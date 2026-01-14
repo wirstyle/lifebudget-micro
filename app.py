@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 
 from src.baseline import generate_baseline
 from src.compounder import simulate_scenario
+from src.explain import ExplanationInputs, build_explanation  # <-- Milestone 4
 
 st.set_page_config(page_title="LifeBudget Micro", layout="centered")
 
@@ -98,7 +99,11 @@ if delta > variable:
     )
 
 # Helper to run simulation and build a DF
-def run_scenario_and_build_df():
+def run_scenario_and_build_df(seed_offset: int = 0):
+    """
+    seed_offset helps avoid scenarios being identical when user saves A and B
+    with same parameters by accident.
+    """
     mean, lower, upper = simulate_scenario(
         income=income,
         fixed_expenses=fixed,
@@ -106,8 +111,8 @@ def run_scenario_and_build_df():
         delta_savings=delta,
         months=months,
         iterations=int(iterations),
-        seed=int(seed),
-        variability_pct=float(variability_pct / 100.0),  # convert 10 -> 0.10
+        seed=int(seed) + int(seed_offset),
+        variability_pct=float(variability_pct / 100.0),  # convert 10 -> 0.10 (fraction)
     )
 
     scenario_df = pd.DataFrame(
@@ -122,8 +127,8 @@ def run_scenario_and_build_df():
     params = {
         "delta_savings": float(delta),
         "iterations": int(iterations),
-        "variability_pct": int(variability_pct),
-        "seed": int(seed),
+        "variability_pct": int(variability_pct),  # keep as percent for explanation text
+        "seed": int(seed) + int(seed_offset),
         "months": int(months),
     }
     return scenario_df, params
@@ -135,7 +140,7 @@ with col1:
         if st.session_state["baseline_df"] is None:
             st.error("Generate the baseline first.")
         else:
-            df_a, params_a = run_scenario_and_build_df()
+            df_a, params_a = run_scenario_and_build_df(seed_offset=0)
             st.session_state["scenario_a"] = {"df": df_a, "params": params_a}
             st.success("Scenario A saved.")
 
@@ -144,7 +149,8 @@ with col2:
         if st.session_state["baseline_df"] is None:
             st.error("Generate the baseline first.")
         else:
-            df_b, params_b = run_scenario_and_build_df()
+            # Offset seed by 1 so B is reproducible but not identical to A by accident
+            df_b, params_b = run_scenario_and_build_df(seed_offset=1)
             st.session_state["scenario_b"] = {"df": df_b, "params": params_b}
             st.success("Scenario B saved.")
 
@@ -217,15 +223,59 @@ else:
     st.subheader("Summary")
     st.dataframe(summary, use_container_width=True)
 
-    # Simple interpretation
-    diff_a = a_mean - base_final
-    diff_b = b_mean - base_final
-    better = "Scenario A" if diff_a > diff_b else "Scenario B"
+    # -----------------------
+    # Milestone 4: Explainability / Reasoning layer
+    # -----------------------
+    # extra: check whether uncertainty band widens over time
+    def band_width(df, idx):
+        return float(df["Upper bound"].iloc[idx] - df["Lower bound"].iloc[idx])
 
-    st.markdown(
-        f"**Interpretation:** Compared to the baseline, "
-        f"Scenario A changes the final mean balance by **£{diff_a:.2f}**, "
-        f"and Scenario B changes it by **£{diff_b:.2f}**. "
-        f"Based on mean outcomes, **{better}** produces the higher projected balance. "
-        f"The shaded bands show uncertainty driven by variable spending fluctuations."
+    width_a_start = band_width(df_a, 0)
+    width_a_end = band_width(df_a, -1)
+    width_b_start = band_width(df_b, 0)
+    width_b_end = band_width(df_b, -1)
+
+    # Pull params saved for A/B (so explanation references the actual saved scenarios)
+    params_a = scenario_a["params"]
+    params_b = scenario_b["params"]
+
+    exp_inputs = ExplanationInputs(
+        income=float(income),
+        fixed_expenses=float(fixed),
+        variable_expenses=float(variable),
+        months=int(months),
+        delta_a=float(params_a["delta_savings"]),
+        delta_b=float(params_b["delta_savings"]),
+        variability_pct=float(params_a["variability_pct"]),  # they should match, but we use A
+        seed=int(params_a["seed"]),
+        iters=int(params_a["iterations"]),
     )
+
+    explanation_text = build_explanation(
+        base_final=base_final,
+        a_final_mean=a_mean,
+        a_final_low=a_low,
+        a_final_high=a_up,
+        b_final_mean=b_mean,
+        b_final_low=b_low,
+        b_final_high=b_up,
+        inputs=exp_inputs,
+    )
+
+    # Add one extra smart sentence about widening uncertainty over time
+    widening_a = width_a_end - width_a_start
+    widening_b = width_b_end - width_b_start
+
+    extra_lines = []
+    if widening_a > 0 or widening_b > 0:
+        extra_lines.append(
+            f"Uncertainty tends to widen over time (A band width: £{width_a_start:,.2f} → £{width_a_end:,.2f}; "
+            f"B band width: £{width_b_start:,.2f} → £{width_b_end:,.2f}), which reflects compounding monthly variability."
+        )
+    else:
+        extra_lines.append(
+            "Uncertainty does not widen noticeably over time in this run, indicating relatively stable variability under the chosen settings."
+        )
+
+    st.markdown("### Interpretation")
+    st.markdown(explanation_text + "\n\n" + "**Additional insight:** " + extra_lines[0])
