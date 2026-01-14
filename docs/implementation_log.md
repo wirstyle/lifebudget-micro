@@ -59,18 +59,27 @@ Working Streamlit interface showing baseline table and projected balance chart.
 Initial git commit: feat: initial streamlit app with deterministic baseline projection.
 
 
+### 2026-01-14 — Compounder+ scenario simulation added
 
-\### 2026-01-14 — Compounder+ scenario simulation added
+**Goal:**  
+Introduce scenario-based simulation to move beyond deterministic projections.
 
+**Work done:**  
+- Implemented Monte Carlo–style simulation for scenario analysis.  
+- Added Gaussian noise to variable expenses.  
+- Fixed random seed for reproducibility.  
+- Introduced "additional monthly savings" as scenario parameter.
 
+**Issues encountered:**  
+- Initial deterministic approach failed to capture real-world variability.
 
-Implemented Monte Carlo–style simulation for scenario analysis.
+**Decisions / Fix:**  
+- Rejected deterministic model in favour of stochastic simulation.  
+- Chose additional savings parameter to align with behavioural focus.
 
-Initial deterministic approach was rejected because it failed to capture real-world variability in spending.
-
-Added Gaussian noise to variable expenses and fixed random seed for reproducibility.
-
-Scenario parameter chosen: additional monthly savings, as it aligns with project focus on short-term behavioural change.
+**Evidence:**  
+- Scenario simulation visible in Streamlit UI.  
+- Commit: feat: add compounder scenario simulation
 
 
 
@@ -125,4 +134,41 @@ Extend the baseline prototype with scenario-based simulation (Compounder+) to su
 &nbsp; - (optional) `chore: add gitignore`
 
 
+
+2026-01-14 — Milestone 4: Explainability / Reasoning layer
+
+Goal:
+Add an explainability layer to interpret baseline vs scenario outcomes and articulate why changes occur, not just what changes.
+
+Work done:
+
+Implemented an explainability module (src/explain.py) to generate human-readable interpretations.
+
+Added logic to compare baseline, Scenario A and Scenario B final balances.
+
+Identified dominant drivers (e.g. variable spending vs fixed expenses).
+
+Generated narrative explanations such as which scenario performs best and why, and how variability affects uncertainty bands.
+
+Integrated explanation output directly into the Streamlit UI.
+
+Issues encountered:
+
+Early explanations were too generic and did not clearly reference user inputs.
+
+Risk of over-complicating with ML-based explainability (e.g. SHAP) for MVP scope.
+
+Decisions / Fix:
+
+Rejected SHAP/ML explainability in favour of rule-based reasoning aligned with project scope.
+
+Focused on behavioural drivers (savings, variable expenses, compounding effect).
+
+Prioritised clarity and interpretability over mathematical complexity.
+
+Evidence:
+
+Streamlit UI now displays automatic interpretation below scenario comparison.
+
+Commit: feat: add explainability layer for scenario comparison
 
