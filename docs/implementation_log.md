@@ -64,13 +64,65 @@ Initial git commit: feat: initial streamlit app with deterministic baseline proj
 
 
 
-Implemented Monte Carlo–style simulation for scenario analysis.  
+Implemented Monte Carlo–style simulation for scenario analysis.
 
-Initial deterministic approach was rejected because it failed to capture real-world variability in spending.  
+Initial deterministic approach was rejected because it failed to capture real-world variability in spending.
 
-Added Gaussian noise to variable expenses and fixed random seed for reproducibility.  
+Added Gaussian noise to variable expenses and fixed random seed for reproducibility.
 
 Scenario parameter chosen: additional monthly savings, as it aligns with project focus on short-term behavioural change.
+
+
+
+\### 2026-01-14 — Milestone 2: Compounder+ scenario simulation (Monte Carlo) + repo hygiene
+
+
+
+\*\*Goal:\*\*  
+
+Extend the baseline prototype with scenario-based simulation (Compounder+) to support short-term “what-if” analysis with uncertainty.
+
+
+
+\*\*Work done:\*\*  
+
+\- Implemented Monte Carlo–style simulation for variable expenses (multiple iterations).  
+
+\- Added scenario parameter: additional monthly savings (modelled as reduced variable spending).  
+
+\- Generated uncertainty bounds using 10th–90th percentiles and plotted uncertainty band.  
+
+\- Improved interpretability by comparing baseline vs scenario on the same chart.  
+
+\- Added user controls for iterations, spending variability, and random seed (reproducibility).  
+
+\- Created a `.gitignore` to prevent committing Python cache files and environment folders.
+
+
+
+\*\*Issues encountered:\*\*  
+
+\- Needed to ensure stable and repeatable outputs for assessment evidence; without a fixed seed results varied between runs.
+
+
+
+\*\*Decisions / Fix:\*\*  
+
+\- Used a fixed default random seed (user-adjustable) to make scenario results reproducible.  
+
+\- Kept the simulation lightweight (no ML training) to align with MVP scope and ensure fast UI response times.
+
+
+
+\*\*Evidence:\*\*  
+
+\- Streamlit UI shows baseline projection and scenario simulation with uncertainty band and interpretation text.  
+
+\- Commits:  
+
+&nbsp; - `feat: add baseline vs scenario comparison + polish scenario output`  
+
+&nbsp; - (optional) `chore: add gitignore`
 
 
 
