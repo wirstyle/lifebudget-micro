@@ -58,3 +58,19 @@ Working Streamlit interface showing baseline table and projected balance chart.
 
 Initial git commit: feat: initial streamlit app with deterministic baseline projection.
 
+
+
+\### 2026-01-14 — Compounder+ scenario simulation added
+
+
+
+Implemented Monte Carlo–style simulation for scenario analysis.  
+
+Initial deterministic approach was rejected because it failed to capture real-world variability in spending.  
+
+Added Gaussian noise to variable expenses and fixed random seed for reproducibility.  
+
+Scenario parameter chosen: additional monthly savings, as it aligns with project focus on short-term behavioural change.
+
+
+
