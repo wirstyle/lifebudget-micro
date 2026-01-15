@@ -1,10 +1,11 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 
 from src.baseline import generate_baseline
 from src.compounder import simulate_scenario
-from src.explain import ExplanationInputs, build_explanation  # <-- Milestone 4
+from src.explain import ExplanationInputs, build_explanation  # Milestone 4
 
 st.set_page_config(page_title="LifeBudget Micro", layout="centered")
 
@@ -25,10 +26,13 @@ if "scenario_b" not in st.session_state:
 # -----------------------
 st.title("LifeBudget Micro")
 st.subheader("Short-term financial clarity")
-st.write("Use this tool to understand your baseline trajectory, explore behavioural changes, and compare outcomes under uncertainty.")
+st.write(
+    "Use this tool to understand your baseline trajectory, explore behavioural changes, "
+    "and compare outcomes under uncertainty."
+)
 
 # -----------------------
-# UI: Inputs (Milestone 5 narrative framing)
+# Step 1 — Baseline
 # -----------------------
 st.header("Step 1 — Establish your baseline")
 st.caption("Define your current monthly situation to understand your starting point (income minus fixed + variable expenses).")
@@ -63,43 +67,53 @@ months = st.slider(
     help="Short-term horizon to keep projections interpretable.",
 )
 
-# -----------------------
-# Baseline (BudgetMind)
-# -----------------------
 if st.button("Generate baseline"):
-    baseline_df = generate_baseline(income, fixed, variable, months).round(2)
-    st.session_state["baseline_df"] = baseline_df
+    st.session_state["baseline_df"] = generate_baseline(income, fixed, variable, months).round(2)
 
 st.subheader("Baseline Projection")
 
 if st.session_state["baseline_df"] is not None:
     st.dataframe(st.session_state["baseline_df"], use_container_width=True)
-
     st.subheader("Projected Balance Over Time")
     st.line_chart(st.session_state["baseline_df"].set_index("Month")["Balance"])
 else:
     st.info("Generate a baseline to unlock scenario exploration and comparisons.")
 
 # -----------------------
-# Scenario Simulation (Compounder+)
+# Step 2 — Scenarios (A & B deltas)
 # -----------------------
 st.divider()
 st.subheader("Step 2 — Explore behavioural change")
 st.caption(
-    "Test how small changes in spending behaviour could affect your short-term financial position. "
+    "Define two scenarios (A and B) with different monthly savings adjustments. "
     "Scenarios use a lightweight Monte Carlo simulation to reflect uncertainty in variable expenses."
 )
 
-delta = st.number_input(
-    "Additional monthly savings (£)",
-    min_value=0.0,
-    value=50.0,
-    step=10.0,
-    help=(
-        "Represents behavioural change (spending less), not extra income. "
-        "This reduces your variable expenses each month by the chosen amount."
-    ),
-)
+colA, colB = st.columns(2)
+
+with colA:
+    delta_a = st.number_input(
+        "Scenario A — Additional monthly savings (£)",
+        min_value=0.0,
+        value=50.0,
+        step=10.0,
+        help=(
+            "Represents behavioural change (spending less), not extra income. "
+            "This reduces your variable expenses each month by the chosen amount."
+        ),
+    )
+
+with colB:
+    delta_b = st.number_input(
+        "Scenario B — Additional monthly savings (£)",
+        min_value=0.0,
+        value=100.0,
+        step=10.0,
+        help=(
+            "Use this to test a different behavioural change from Scenario A "
+            "(e.g., a more aggressive or more conservative saving plan)."
+        ),
+    )
 
 iterations = st.slider(
     "Monte Carlo iterations",
@@ -113,8 +127,8 @@ iterations = st.slider(
 variability_pct = st.slider(
     "Spending variability (%)",
     min_value=0,
-    max_value=30,
-    value=10,
+    max_value=60,
+    value=30,
     step=5,
     help=(
         "Simulates real-world uncertainty in variable expenses (e.g., food, leisure). "
@@ -130,33 +144,35 @@ seed = st.number_input(
     help="Keeps results repeatable for assessment evidence. Change it to explore different random draws.",
 )
 
-# Simple validation warning (defensive UX)
-if delta > variable:
-    st.warning(
-        "Your additional savings exceed your current variable expenses. "
-        "In some simulations, variable spending will be clamped to £0."
-    )
+# Defensive UX warnings
+if delta_a > variable:
+    st.warning("Scenario A savings exceed your current variable expenses. Variable spending will be clamped to £0 in some runs.")
+if delta_b > variable:
+    st.warning("Scenario B savings exceed your current variable expenses. Variable spending will be clamped to £0 in some runs.")
 
-# Helper to run simulation and build a DF
-def run_scenario_and_build_df(seed_offset: int = 0):
+
+def run_scenario_and_build_df(delta_savings: float, seed_offset: int = 0):
     """
-    seed_offset helps avoid scenarios being identical when user saves A and B
-    with same parameters by accident.
+    Runs the simulation and returns:
+    - scenario_df: Mean + uncertainty bounds
+    - params: traceability info for examiner + explanation layer
     """
+    variability_frac = float(variability_pct) / 100.0  # 30 -> 0.30 (fraction)
+
     mean, lower, upper = simulate_scenario(
         income=income,
         fixed_expenses=fixed,
         variable_expenses=variable,
-        delta_savings=delta,
-        months=months,
+        delta_savings=float(delta_savings),
+        months=int(months),
         iterations=int(iterations),
         seed=int(seed) + int(seed_offset),
-        variability_pct=float(variability_pct / 100.0),  # convert 10 -> 0.10 (fraction)
+        variability_frac=float(variability_frac),
     )
 
     scenario_df = pd.DataFrame(
         {
-            "Month": range(1, months + 1),
+            "Month": range(1, int(months) + 1),
             "Mean balance": mean,
             "Lower bound": lower,
             "Upper bound": upper,
@@ -164,16 +180,20 @@ def run_scenario_and_build_df(seed_offset: int = 0):
     ).round(2)
 
     params = {
-        "delta_savings": float(delta),
+        "delta_savings": float(delta_savings),
         "iterations": int(iterations),
-        "variability_pct": int(variability_pct),  # keep as percent for explanation text
+        # Percent shown in the UI (for explanation text)
+        "variability_pct": int(variability_pct),
+        # Fraction used internally in calculations
+        "variability_frac": float(variability_frac),
         "seed": int(seed) + int(seed_offset),
         "months": int(months),
     }
+
     return scenario_df, params
 
 
-st.caption("Save two different scenarios (A and B) to compare outcomes side-by-side.")
+st.caption("Save Scenario A and Scenario B to compare outcomes side-by-side.")
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -181,7 +201,7 @@ with col1:
         if st.session_state["baseline_df"] is None:
             st.error("Generate the baseline first.")
         else:
-            df_a, params_a = run_scenario_and_build_df(seed_offset=0)
+            df_a, params_a = run_scenario_and_build_df(delta_savings=delta_a, seed_offset=0)
             st.session_state["scenario_a"] = {"df": df_a, "params": params_a}
             st.success("Scenario A saved.")
 
@@ -190,8 +210,8 @@ with col2:
         if st.session_state["baseline_df"] is None:
             st.error("Generate the baseline first.")
         else:
-            # Offset seed by 1 so B is reproducible but not identical to A by accident
-            df_b, params_b = run_scenario_and_build_df(seed_offset=1)
+            # Seed offset keeps B reproducible but avoids accidental identical draws
+            df_b, params_b = run_scenario_and_build_df(delta_savings=delta_b, seed_offset=1)
             st.session_state["scenario_b"] = {"df": df_b, "params": params_b}
             st.success("Scenario B saved.")
 
@@ -201,14 +221,13 @@ with col3:
         st.session_state["scenario_b"] = None
         st.info("Scenario A and B cleared.")
 
-# Show stored scenarios (helps examiner)
 if st.session_state["scenario_a"] is not None:
     st.caption(f"Scenario A params: {st.session_state['scenario_a']['params']}")
 if st.session_state["scenario_b"] is not None:
     st.caption(f"Scenario B params: {st.session_state['scenario_b']['params']}")
 
 # -----------------------
-# Comparison section (FR-4 / FR-6)
+# Step 3 — Compare
 # -----------------------
 st.divider()
 st.subheader("Step 3 — Compare outcomes")
@@ -226,36 +245,22 @@ else:
     df_a = scenario_a["df"]
     df_b = scenario_b["df"]
 
-    # Plot: baseline + A mean + B mean + bands
     fig, ax = plt.subplots()
 
     ax.plot(baseline_df["Month"], baseline_df["Balance"], label="Baseline", linestyle="--")
+
     ax.plot(df_a["Month"], df_a["Mean balance"], label="Scenario A (mean)")
-    ax.fill_between(
-        df_a["Month"],
-        df_a["Lower bound"],
-        df_a["Upper bound"],
-        alpha=0.2,
-        label="A band (10–90%)",
-    )
+    ax.fill_between(df_a["Month"], df_a["Lower bound"], df_a["Upper bound"], alpha=0.2, label="A band (10–90%)")
 
     ax.plot(df_b["Month"], df_b["Mean balance"], label="Scenario B (mean)")
-    ax.fill_between(
-        df_b["Month"],
-        df_b["Lower bound"],
-        df_b["Upper bound"],
-        alpha=0.2,
-        label="B band (10–90%)",
-    )
+    ax.fill_between(df_b["Month"], df_b["Lower bound"], df_b["Upper bound"], alpha=0.2, label="B band (10–90%)")
 
     ax.set_xlabel("Month")
     ax.set_ylabel("Balance (£)")
     ax.set_title("Budget projection comparison")
     ax.legend()
-
     st.pyplot(fig)
 
-    # Summary table
     def final_stats(df):
         final_mean = float(df["Mean balance"].iloc[-1])
         final_low = float(df["Lower bound"].iloc[-1])
@@ -268,21 +273,9 @@ else:
 
     summary = pd.DataFrame(
         [
-            {
-                "Scenario": "Baseline",
-                "Final balance (mean)": round(base_final, 2),
-                "Final range (10–90%)": "—",
-            },
-            {
-                "Scenario": "Scenario A",
-                "Final balance (mean)": round(a_mean, 2),
-                "Final range (10–90%)": f"{a_low:.2f} – {a_up:.2f}",
-            },
-            {
-                "Scenario": "Scenario B",
-                "Final balance (mean)": round(b_mean, 2),
-                "Final range (10–90%)": f"{b_low:.2f} – {b_up:.2f}",
-            },
+            {"Scenario": "Baseline", "Final balance (mean)": round(base_final, 2), "Final range (10–90%)": "—"},
+            {"Scenario": "Scenario A", "Final balance (mean)": round(a_mean, 2), "Final range (10–90%)": f"{a_low:.2f} – {a_up:.2f}"},
+            {"Scenario": "Scenario B", "Final balance (mean)": round(b_mean, 2), "Final range (10–90%)": f"{b_low:.2f} – {b_up:.2f}"},
         ]
     )
 
@@ -290,12 +283,11 @@ else:
     st.dataframe(summary, use_container_width=True)
 
     # -----------------------
-    # Milestone 4: Explainability / Reasoning layer
+    # Step 4 — Explainability
     # -----------------------
     st.subheader("Step 4 — Reflect on impact")
     st.caption("Understand why outcomes differ and what is driving change.")
 
-    # extra: check whether uncertainty band widens over time
     def band_width(df, idx):
         return float(df["Upper bound"].iloc[idx] - df["Lower bound"].iloc[idx])
 
@@ -304,7 +296,6 @@ else:
     width_b_start = band_width(df_b, 0)
     width_b_end = band_width(df_b, -1)
 
-    # Pull params saved for A/B (so explanation references the actual saved scenarios)
     params_a = scenario_a["params"]
     params_b = scenario_b["params"]
 
@@ -315,7 +306,7 @@ else:
         months=int(months),
         delta_a=float(params_a["delta_savings"]),
         delta_b=float(params_b["delta_savings"]),
-        variability_pct=float(params_a["variability_pct"]),  # they should match, but we use A
+        variability_pct=float(params_a["variability_pct"]),  # same slider for both, but trace via A
         seed=int(params_a["seed"]),
         iters=int(params_a["iterations"]),
     )
@@ -331,14 +322,10 @@ else:
         inputs=exp_inputs,
     )
 
-    # Add one extra smart sentence about widening uncertainty over time
-    widening_a = width_a_end - width_a_start
-    widening_b = width_b_end - width_b_start
-
-    if widening_a > 0 or widening_b > 0:
+    if (width_a_end - width_a_start) > 0 or (width_b_end - width_b_start) > 0:
         extra_insight = (
             f"Uncertainty tends to widen over time (A band width: £{width_a_start:,.2f} → £{width_a_end:,.2f}; "
-            f"B band width: £{width_b_start:,.2f} → £{width_b_end:,.2f}), which reflects compounding monthly variability."
+            f"B band width: £{width_b_start:,.2f} → £{width_b_end:,.2f}), reflecting compounding monthly variability."
         )
     else:
         extra_insight = (

@@ -220,3 +220,83 @@ Maintain focus on short-term clarity and behavioural reasoning within MVP constr
 - Architecture remains modular and lightweight.  
 - Design decisions documented in portfolio.
 
+### 15-01-2026 — Milestone 7: Technical portfolio documentation
+
+**Goal:**  
+Produce technical documentation explaining the implemented system for other developers.
+
+**Work done:**  
+- Wrote system overview, architecture, flow, and design decisions.  
+- Documented implementation details and execution steps.  
+- Explicitly described limitations and scope constraints.
+
+**Decisions / Fix:**  
+- Chose Word/PDF format over Markdown to align with academic assessment expectations.  
+- Structured documentation around reasoning flow rather than module listing.
+
+**Evidence:**  
+- LifeBudget_Micro_Technical_Portfolio.docx created.
+
+### 15-01-2026 — Parameter Semantics Fix: Variability Consistency (Compounder+)
+
+**Goal:**  
+Ensure semantic and numerical consistency between UI controls, simulation logic, and explanation layer for spending variability.
+
+**Work done:**  
+- Identified inconsistency between percentage-based UI input and fractional interpretation in simulation logic.
+- Standardised variability handling by converting UI percentage input to fractional form before simulation.
+- Renamed internal parameter to variability_frac to reflect correct semantics.
+- Updated simulation docstrings and defaults for clarity.
+- Integrated consistent parameter usage into the explainability layer.
+- Added defensive clamping to prevent negative effective variable spending.
+
+**Decisions / Fix:**  
+- Chose to keep UI in percentage form for user comprehension and convert internally to fraction for correct mathematical behaviour.
+- Prioritised interpretability and numerical stability over adding additional model complexity.
+- Ensured traceability of scenario assumptions in the explanation layer.
+
+**Evidence:**  
+- Updated compounder.py, app.py, and explain.py with aligned parameter semantics.
+- Verified correct behaviour via reproducible runs using fixed random seed.
+
+### 15-01-2026 — Scenario Design Refactor: Behavioural Differentiation for A/B Comparison
+
+**Goal:**  
+Ensure that Scenario A and Scenario B represent genuinely different behavioural assumptions rather than superficial stochastic variation.
+
+**Work done:**  
+- Introduced explicit delta_a and delta_b parameters to represent different monthly savings behaviours.
+- Updated UI flow to allow separate behavioural inputs for each scenario.
+- Ensured scenario storage preserves distinct behavioural parameters.
+- Updated explanation layer to reference behavioural differences directly.
+
+**Decisions / Fix:**  
+- Rejected seed-only differentiation as conceptually weak and potentially misleading.
+- Prioritised behavioural interpretability over minimal code change.
+- Ensured A/B comparison reflects meaningful user decisions rather than random variation.
+
+**Evidence:**  
+- Updated app.py scenario saving logic.
+- Updated ExplanationInputs to include delta_a and delta_b.
+- Verified explanation output reflects correct behavioural assumptions.
+
+### 15-01-2026 — Explainability Layer Refactor: Driver Logic and Assumption Traceability
+
+**Goal:**  
+Improve technical correctness and interpretability of the explanation layer.
+
+**Work done:**  
+- Added explicit assumption traceability (“A saves £X/month, B saves £Y/month”).
+- Replaced heuristic surplus driver logic with case-based behavioural reasoning.
+- Added differentiation between equal, unequal, and zero behavioural changes.
+- Integrated uncertainty band comparison for technical clarity.
+- Ensured explanation text aligns with actual simulation parameters.
+
+**Decisions / Fix:**  
+- Chose explicit reasoning branches over heuristic shortcuts to avoid misleading interpretations.
+- Prioritised technical accuracy over brevity in explanation generation.
+- Ensured explanation logic is robust to edge cases (e.g. equal deltas, zero deltas).
+
+**Evidence:**  
+- Refactored build_explanation() in explain.py.
+- Tested explanation output across multiple scenario configurations.

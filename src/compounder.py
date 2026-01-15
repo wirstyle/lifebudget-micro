@@ -10,36 +10,37 @@ def simulate_scenario(
     months: int,
     iterations: int = 200,
     seed: int = 42,
-    variability_pct: float = 0.10,
+    variability_frac: float = 0.30,
 ):
     """
-    Monte Carlo light simulation for a simple scenario:
-    - We model variability on variable expenses (noise).
-    - "delta_savings" reduces variable expenses (i.e., saving more each month).
-    Returns mean, lower, upper arrays for balances across months.
+    Monte Carlo–style simulation for a simple behavioural scenario.
 
-    Notes:
-    - seed fixed for reproducibility (important for assessment + logging).
-    - variability_pct controls the standard deviation as a fraction of variable_expenses.
+    Model:
+    - Uncertainty is applied ONLY to variable expenses via Gaussian noise.
+    - delta_savings represents additional monthly savings by reducing variable expenses.
+
+    Parameters:
+    - variability_frac: fraction of variable_expenses used as the noise std dev.
+      Example: variability_frac=0.10 => std dev = 10% of variable_expenses.
+
+    Returns:
+    - mean, lower, upper arrays (balances across months)
+      where lower/upper are 10th/90th percentiles (uncertainty band).
     """
     rng = np.random.default_rng(seed)
-
     all_runs = np.zeros((iterations, months), dtype=float)
 
     for i in range(iterations):
         balance = 0.0
         for m in range(months):
-            # Noise based on variable expenses variability
-            noise = rng.normal(loc=0.0, scale=variable_expenses * variability_pct)
+            noise = rng.normal(loc=0.0, scale=variable_expenses * variability_frac)
 
-            # Scenario effect: save more => reduce variable expenses by delta_savings
             effective_variable = variable_expenses - delta_savings + noise
-            if effective_variable < 0:
+            if effective_variable < 0.0:
                 effective_variable = 0.0
 
             savings = income - fixed_expenses - effective_variable
             balance += savings
-
             all_runs[i, m] = balance
 
     mean = all_runs.mean(axis=0)
