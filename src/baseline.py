@@ -6,29 +6,29 @@ def generate_baseline(
     income: float,
     fixed_expenses: float,
     variable_expenses: float,
-    months: int = 6,
+    weeks: int = 12,
 ) -> pd.DataFrame:
     """
-    Deterministic baseline projection.
+    Deterministic baseline projection (weekly).
 
     Computes:
-    - Monthly Savings = income - fixed_expenses - variable_expenses
-    - Balance = cumulative sum of monthly savings across the horizon
+    - Weekly Savings = income - fixed_expenses - variable_expenses
+    - Balance = cumulative sum of weekly savings across the horizon
 
     Returns a DataFrame with:
-    Month, Monthly Savings, Balance
+    Week, Weekly Savings, Balance
     """
-    monthly_savings = income - fixed_expenses - variable_expenses
+    weekly_savings = income - fixed_expenses - variable_expenses
 
     data = []
     balance = 0.0
 
-    for month in range(1, months + 1):
-        balance += monthly_savings
+    for week in range(1, weeks + 1):
+        balance += weekly_savings
         data.append(
             {
-                "Month": month,
-                "Monthly Savings": round(monthly_savings, 2),
+                "Week": week,
+                "Weekly Savings": round(weekly_savings, 2),
                 "Balance": round(balance, 2),
             }
         )

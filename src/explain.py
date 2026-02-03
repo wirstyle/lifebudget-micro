@@ -10,7 +10,7 @@ class ExplanationInputs:
     income: float
     fixed_expenses: float
     variable_expenses: float
-    months: int
+    weeks: int
     delta_a: float
     delta_b: float
     variability_pct: float  # e.g., 30 for ±30%
@@ -64,12 +64,12 @@ def build_explanation(
         return f"{sign}£{abs(x):,.2f}"
 
     # 1) What happened
-    lines.append(f"Over {inputs.months} months, the baseline ends at **£{base_final:,.2f}**.")
+    lines.append(f"Over {inputs.weeks} weeks, the baseline ends at **£{base_final:,.2f}**.")
 
     # A/B assumptions (explicit parameter traceability)
     lines.append(
-        f"Scenario assumptions: **A saves £{inputs.delta_a:,.0f}/month**, "
-        f"**B saves £{inputs.delta_b:,.0f}/month** "
+        f"Scenario assumptions: **A saves £{inputs.delta_a:,.0f}/week**, "
+        f"**B saves £{inputs.delta_b:,.0f}/week** "
         f"(variable spending uncertainty set to ±{inputs.variability_pct:.0f}%)."
     )
 
@@ -98,7 +98,7 @@ def build_explanation(
     if inputs.delta_a == inputs.delta_b:
         if inputs.delta_a > 0:
             lines.append(
-                f"Both scenarios apply the same behavioural change (**£{inputs.delta_a:,.0f}/month** extra savings), "
+                f"Both scenarios apply the same behavioural change (**£{inputs.delta_a:,.0f}/week** extra savings), "
                 "so remaining differences are driven mainly by stochastic variability."
             )
         else:
@@ -110,20 +110,20 @@ def build_explanation(
         stronger_delta = max(inputs.delta_a, inputs.delta_b)
         lines.append(
             f"The main driver of change is the **behavioural savings lever**: **{stronger}** applies the larger adjustment "
-            f"(**£{stronger_delta:,.0f}/month**), which increases monthly surplus and compounds over time."
+            f"(**£{stronger_delta:,.0f}/week**), which increases weekly surplus and compounds over time."
         )
 
     # Uncertainty reasoning (band widths)
     lines.append(
         f"Uncertainty comes from **variable spending fluctuations** (±{inputs.variability_pct:.0f}%). "
-        f"At month {inputs.months}, the uncertainty range width is about **£{width_a:,.2f}** for Scenario A "
+        f"At week {inputs.weeks}, the uncertainty range width is about **£{width_a:,.2f}** for Scenario A "
         f"and **£{width_b:,.2f}** for Scenario B (10–90% band)."
     )
 
     # Bonus micro: which band is wider?
     wider = "Scenario A" if width_a >= width_b else "Scenario B"
     lines.append(
-        f"The uncertainty band is slightly wider for **{wider}** at the final month, "
+        f"The uncertainty band is slightly wider for **{wider}** at the final week, "
         "reflecting sensitivity to variable spending noise."
     )
 

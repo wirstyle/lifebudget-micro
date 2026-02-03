@@ -35,47 +35,50 @@ st.write(
 # Step 1 — Baseline
 # -----------------------
 st.header("Step 1 — Establish your baseline")
-st.caption("Define your current monthly situation to understand your starting point (income minus fixed + variable expenses).")
+st.caption(
+    "Define your current weekly situation to understand your starting point "
+    "(income minus fixed + variable expenses)."
+)
 
 income = st.number_input(
-    "Monthly income (£)",
+    "Weekly income (£)",
     min_value=0.0,
-    value=2000.0,
-    step=50.0,
-    help="Your total monthly take-home income (simplified for MVP).",
+    value=460.0,
+    step=10.0,
+    help="Your total weekly take-home income (simplified for MVP).",
 )
 fixed = st.number_input(
-    "Fixed expenses (£)",
+    "Weekly fixed expenses (£)",
     min_value=0.0,
-    value=800.0,
-    step=50.0,
-    help="Stable monthly costs (e.g., rent, bills, subscriptions).",
+    value=185.0,
+    step=10.0,
+    help="Stable weekly costs (e.g., rent, bills, subscriptions).",
 )
 variable = st.number_input(
-    "Variable expenses (£)",
+    "Weekly variable expenses (£)",
     min_value=0.0,
-    value=500.0,
-    step=50.0,
-    help="Flexible costs that vary month-to-month (e.g., food, travel, leisure).",
+    value=115.0,
+    step=10.0,
+    help="Flexible costs that vary week-to-week (e.g., food, travel, leisure).",
 )
 
-months = st.slider(
-    "Projection period (months)",
-    min_value=3,
-    max_value=12,
-    value=6,
+weeks = st.slider(
+    "Projection period (weeks)",
+    min_value=4,
+    max_value=52,
+    value=12,
     help="Short-term horizon to keep projections interpretable.",
 )
 
 if st.button("Generate baseline"):
-    st.session_state["baseline_df"] = generate_baseline(income, fixed, variable, months).round(2)
+    st.session_state["baseline_df"] = generate_baseline(income, fixed, variable, weeks).round(2)
 
 st.subheader("Baseline Projection")
 
 if st.session_state["baseline_df"] is not None:
     st.dataframe(st.session_state["baseline_df"], use_container_width=True)
     st.subheader("Projected Balance Over Time")
-    st.line_chart(st.session_state["baseline_df"].set_index("Month")["Balance"])
+    st.line_chart(st.session_state["baseline_df"].set_index("Week")["Balance"])
 else:
     st.info("Generate a baseline to unlock scenario exploration and comparisons.")
 
@@ -85,7 +88,7 @@ else:
 st.divider()
 st.subheader("Step 2 — Explore behavioural change")
 st.caption(
-    "Define two scenarios (A and B) with different monthly savings adjustments. "
+    "Define two scenarios (A and B) with different weekly savings adjustments. "
     "Scenarios use a lightweight Monte Carlo simulation to reflect uncertainty in variable expenses."
 )
 
@@ -93,22 +96,22 @@ colA, colB = st.columns(2)
 
 with colA:
     delta_a = st.number_input(
-        "Scenario A — Additional monthly savings (£)",
+        "Scenario A — Additional weekly savings (£)",
         min_value=0.0,
-        value=50.0,
-        step=10.0,
+        value=10.0,
+        step=5.0,
         help=(
             "Represents behavioural change (spending less), not extra income. "
-            "This reduces your variable expenses each month by the chosen amount."
+            "This reduces your variable expenses each week by the chosen amount."
         ),
     )
 
 with colB:
     delta_b = st.number_input(
-        "Scenario B — Additional monthly savings (£)",
+        "Scenario B — Additional weekly savings (£)",
         min_value=0.0,
-        value=100.0,
-        step=10.0,
+        value=20.0,
+        step=5.0,
         help=(
             "Use this to test a different behavioural change from Scenario A "
             "(e.g., a more aggressive or more conservative saving plan)."
@@ -131,7 +134,7 @@ variability_pct = st.slider(
     value=30,
     step=5,
     help=(
-        "Simulates real-world uncertainty in variable expenses (e.g., food, leisure). "
+        "Simulates real-world uncertainty in weekly variable expenses (e.g., food, leisure). "
         "Higher values increase uncertainty bands over time."
     ),
 )
@@ -146,9 +149,15 @@ seed = st.number_input(
 
 # Defensive UX warnings
 if delta_a > variable:
-    st.warning("Scenario A savings exceed your current variable expenses. Variable spending will be clamped to £0 in some runs.")
+    st.warning(
+        "Scenario A savings exceed your current variable expenses. "
+        "Variable spending will be clamped to £0 in some runs."
+    )
 if delta_b > variable:
-    st.warning("Scenario B savings exceed your current variable expenses. Variable spending will be clamped to £0 in some runs.")
+    st.warning(
+        "Scenario B savings exceed your current variable expenses. "
+        "Variable spending will be clamped to £0 in some runs."
+    )
 
 
 def run_scenario_and_build_df(delta_savings: float, seed_offset: int = 0):
@@ -164,7 +173,7 @@ def run_scenario_and_build_df(delta_savings: float, seed_offset: int = 0):
         fixed_expenses=fixed,
         variable_expenses=variable,
         delta_savings=float(delta_savings),
-        months=int(months),
+        weeks=int(weeks),
         iterations=int(iterations),
         seed=int(seed) + int(seed_offset),
         variability_frac=float(variability_frac),
@@ -172,7 +181,7 @@ def run_scenario_and_build_df(delta_savings: float, seed_offset: int = 0):
 
     scenario_df = pd.DataFrame(
         {
-            "Month": range(1, int(months) + 1),
+            "Week": range(1, int(weeks) + 1),
             "Mean balance": mean,
             "Lower bound": lower,
             "Upper bound": upper,
@@ -187,7 +196,7 @@ def run_scenario_and_build_df(delta_savings: float, seed_offset: int = 0):
         # Fraction used internally in calculations
         "variability_frac": float(variability_frac),
         "seed": int(seed) + int(seed_offset),
-        "months": int(months),
+        "weeks": int(weeks),
     }
 
     return scenario_df, params
@@ -247,15 +256,15 @@ else:
 
     fig, ax = plt.subplots()
 
-    ax.plot(baseline_df["Month"], baseline_df["Balance"], label="Baseline", linestyle="--")
+    ax.plot(baseline_df["Week"], baseline_df["Balance"], label="Baseline", linestyle="--")
 
-    ax.plot(df_a["Month"], df_a["Mean balance"], label="Scenario A (mean)")
-    ax.fill_between(df_a["Month"], df_a["Lower bound"], df_a["Upper bound"], alpha=0.2, label="A band (10–90%)")
+    ax.plot(df_a["Week"], df_a["Mean balance"], label="Scenario A (mean)")
+    ax.fill_between(df_a["Week"], df_a["Lower bound"], df_a["Upper bound"], alpha=0.2, label="A band (10–90%)")
 
-    ax.plot(df_b["Month"], df_b["Mean balance"], label="Scenario B (mean)")
-    ax.fill_between(df_b["Month"], df_b["Lower bound"], df_b["Upper bound"], alpha=0.2, label="B band (10–90%)")
+    ax.plot(df_b["Week"], df_b["Mean balance"], label="Scenario B (mean)")
+    ax.fill_between(df_b["Week"], df_b["Lower bound"], df_b["Upper bound"], alpha=0.2, label="B band (10–90%)")
 
-    ax.set_xlabel("Month")
+    ax.set_xlabel("Week")
     ax.set_ylabel("Balance (£)")
     ax.set_title("Budget projection comparison")
     ax.legend()
@@ -303,7 +312,7 @@ else:
         income=float(income),
         fixed_expenses=float(fixed),
         variable_expenses=float(variable),
-        months=int(months),
+        weeks=int(weeks),
         delta_a=float(params_a["delta_savings"]),
         delta_b=float(params_b["delta_savings"]),
         variability_pct=float(params_a["variability_pct"]),  # same slider for both, but trace via A
@@ -325,7 +334,7 @@ else:
     if (width_a_end - width_a_start) > 0 or (width_b_end - width_b_start) > 0:
         extra_insight = (
             f"Uncertainty tends to widen over time (A band width: £{width_a_start:,.2f} → £{width_a_end:,.2f}; "
-            f"B band width: £{width_b_start:,.2f} → £{width_b_end:,.2f}), reflecting compounding monthly variability."
+            f"B band width: £{width_b_start:,.2f} → £{width_b_end:,.2f}), reflecting compounding weekly variability."
         )
     else:
         extra_insight = (
