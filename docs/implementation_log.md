@@ -5,7 +5,9 @@ Set up project environment and implement a first runnable version of the LifeBud
 
 **Work done:**  
 - Created project structure (app.py, requirements.txt, src/baseline.py).
-- Implemented generate\_baseline() function to calculate monthly savings and cumulative balance over a 3–12 month horizon.
+- Implemented generate\_baseline() function to calculate monthly savings and cumulative balance over a short-term horizon (later refined to weekly).
+
+
 - Built Streamlit UI to collect monthly income, fixed expenses, and variable expenses, and render a table and balance chart.
 
 **Issues encountered:**  
@@ -29,7 +31,7 @@ Introduce scenario-based simulation to move beyond deterministic projections.
 - Implemented Monte Carlo–style simulation for scenario analysis.  
 - Added Gaussian noise to variable expenses.  
 - Fixed random seed for reproducibility.  
-- Introduced "additional monthly savings" as scenario parameter.
+- Introduced an "additional savings" parameter (initially monthly, later refined to weekly).
 
 **Issues encountered:**  
 - Initial deterministic approach failed to capture real-world variability.
@@ -265,7 +267,7 @@ Ensure semantic and numerical consistency between UI controls, simulation logic,
 Ensure that Scenario A and Scenario B represent genuinely different behavioural assumptions rather than superficial stochastic variation.
 
 **Work done:**  
-- Introduced explicit delta_a and delta_b parameters to represent different monthly savings behaviours.
+- Introduced explicit delta_a and delta_b parameters to represent different savings behaviours (initially monthly, later refined to weekly).
 - Updated UI flow to allow separate behavioural inputs for each scenario.
 - Ensured scenario storage preserves distinct behavioural parameters.
 - Updated explanation layer to reference behavioural differences directly.
@@ -300,3 +302,50 @@ Improve technical correctness and interpretability of the explanation layer.
 **Evidence:**  
 - Refactored build_explanation() in explain.py.
 - Tested explanation output across multiple scenario configurations.
+
+### 03-02-2026 — Refactor: Temporal Granularity Shift from Monthly to Weekly
+
+**Goal:**
+Improve short-term interpretability by aligning the system’s temporal resolution with weekly budgeting behaviour.
+
+**Work done:**
+- Refactored the deterministic baseline projection (BudgetMind) from monthly to weekly calculations.
+- Updated the projection horizon to operate over weeks rather than months.
+- Refactored the Compounder+ Monte Carlo simulation to use weekly time steps and week-indexed outputs.
+- Updated the explainability layer to reflect weekly semantics (weeks, £/week, final week, weekly surplus).
+- Updated the Streamlit UI to accept weekly inputs (income, fixed expenses, variable expenses) and use a weekly projection slider.
+- Updated tables, charts, and comparison views to use Week-based indexing and labels.
+- Updated uncertainty insight text to refer to compounding weekly variability.
+
+**Decisions / Fix:**
+- Chose a full system-wide weekly refactor rather than internal monthly-to-weekly conversion to avoid mixed-unit semantics.
+- Preserved the original model structure and behavioural assumptions, changing only the temporal granularity to maintain MVP scope and conceptual clarity.
+- Prioritised interpretability and consistency across UI, simulation logic, and explanation text.
+
+**Evidence:**
+- Updated modules: src/baseline.py, src/compounder.py, src/explain.py, app.py.
+- Streamlit UI displays baseline and scenarios using weekly tables, charts, and interpretive text.
+- Commit: refactor: switch projections from monthly to weekly across system.
+
+### 03-02-2026 — Note: Historical consistency after weekly refactor
+
+**Note:**  
+Earlier log entries describe the initial monthly-based implementation. The system has since been refactored to operate fully on a weekly basis. Previous milestones remain historically accurate and document the evolution of the prototype.
+
+### 03-02-2026 — Design Insight: Temporal granularity as a UX decision
+
+**Goal:**  
+Reflect on the impact of temporal resolution (monthly vs weekly) as a design decision rather than a purely technical choice.
+
+**Work done:**  
+- Evaluated how users reason about everyday financial decisions.
+- Identified that weekly framing improved immediacy and behavioural interpretability.
+
+**Decisions / Fix:**  
+- Treated temporal granularity as part of the interaction design, not just a modelling parameter.
+- Prioritised user reasoning and clarity over conventional monthly budgeting conventions.
+
+**Evidence:**  
+- Weekly-based UI, simulation, and explanation layer.
+- Reflected in Evaluation and Technical Portfolio documentation.
+
