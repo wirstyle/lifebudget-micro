@@ -405,21 +405,66 @@ def run_scenario_and_build_df(delta_savings: float, seed_offset: int = 0):
 
 
 # -----------------------
-# Save / Clear + persistent green messages
+# Save / Clear + persistent messages
 # -----------------------
 st.caption("Save Scenario A and Scenario B to compare outcomes side-by-side.")
 
-status_box = st.container()
-with status_box:
-    if st.session_state["saved_a_msg"]:
-        st.success("Scenario A saved.")
-    if st.session_state["saved_b_msg"]:
-        st.success("Scenario B saved.")
+# ✅ One-time init (place this near your session_state defaults too if you prefer)
+if "cleared_msg" not in st.session_state:
+    st.session_state["cleared_msg"] = False
+
+def saved_badge(text: str):
+    st.markdown(
+        f"""
+        <div style="
+            width: 100%;
+            box-sizing: border-box;
+            padding: 0.65rem 0.9rem;
+            border-radius: 0.6rem;
+            background: rgba(46, 204, 113, 0.14);
+            border: 1px solid rgba(46, 204, 113, 0.35);
+            color: rgba(22, 101, 52, 1);
+            font-weight: 600;
+            margin-top: 0.55rem;
+        ">
+            {text}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def info_badge(text: str):
+    st.markdown(
+        f"""
+        <div style="
+            width: 100%;
+            box-sizing: border-box;
+            padding: 0.65rem 0.9rem;
+            border-radius: 0.6rem;
+            background: rgba(59, 130, 246, 0.10);
+            border: 1px solid rgba(59, 130, 246, 0.25);
+            color: rgba(30, 64, 175, 1);
+            font-weight: 600;
+            margin-top: 0.55rem;
+        ">
+            {text}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def clear_ab():
+    st.session_state["scenario_a"] = None
+    st.session_state["scenario_b"] = None
+    st.session_state["saved_a_msg"] = False
+    st.session_state["saved_b_msg"] = False
+    st.session_state["cleared_msg"] = True  # ✅ will render after rerun, but no green badges
 
 b1, b2, b3 = st.columns(3)
 
 with b1:
-    if st.button("Save Scenario A", use_container_width=True, key="save_a"):
+    clicked_a = st.button("Save Scenario A", use_container_width=True, key="save_a")
+    if clicked_a:
         if st.session_state["baseline_df"] is None:
             st.error("Generate the baseline first.")
         else:
@@ -427,8 +472,12 @@ with b1:
             st.session_state["scenario_a"] = {"df": df_a, "params": params_a}
             st.session_state["saved_a_msg"] = True
 
+    if st.session_state.get("saved_a_msg", False):
+        saved_badge("Scenario A saved.")
+
 with b2:
-    if st.button("Save Scenario B", use_container_width=True, key="save_b"):
+    clicked_b = st.button("Save Scenario B", use_container_width=True, key="save_b")
+    if clicked_b:
         if st.session_state["baseline_df"] is None:
             st.error("Generate the baseline first.")
         else:
@@ -436,13 +485,22 @@ with b2:
             st.session_state["scenario_b"] = {"df": df_b, "params": params_b}
             st.session_state["saved_b_msg"] = True
 
+    if st.session_state.get("saved_b_msg", False):
+        saved_badge("Scenario B saved.")
+
 with b3:
-    if st.button("Clear A/B", use_container_width=True, key="clear_ab"):
-        st.session_state["scenario_a"] = None
-        st.session_state["scenario_b"] = None
-        st.session_state["saved_a_msg"] = False
-        st.session_state["saved_b_msg"] = False
-        st.info("Scenario A and B cleared.")
+    st.button(
+        "Clear A/B",
+        use_container_width=True,
+        key="clear_ab",
+        on_click=clear_ab
+    )
+
+# ✅ Put the cleared message UNDER the Clear button, same width
+with b3:
+    if st.session_state.get("cleared_msg", False):
+        info_badge("Scenario A and B cleared.")
+        st.session_state["cleared_msg"] = False  # reset so it doesn't stick forever
 
 # Optional trace for debugging (keep or remove)
 if st.session_state["scenario_a"] is not None:
