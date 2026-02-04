@@ -25,6 +25,12 @@ if "scenario_b" not in st.session_state:
 if "seed" not in st.session_state:
     st.session_state["seed"] = 42
 
+# Persist success messages until Clear A/B
+if "saved_a_msg" not in st.session_state:
+    st.session_state["saved_a_msg"] = False
+if "saved_b_msg" not in st.session_state:
+    st.session_state["saved_b_msg"] = False
+
 # -----------------------
 # UI: Header
 # -----------------------
@@ -116,93 +122,203 @@ PRESETS = {
     "Stress test": {"predictability": "Chaotic", "detail": "High confidence"},
 }
 
-PREDICTABILITY_MAP = {"Stable": 10, "Typical": 30, "Chaotic": 50}
-DETAIL_MAP = {"Fast": 100, "Balanced": 200, "High confidence": 500}
+# Conceptual → numeric
+PREDICTABILITY_MAP = {"Stable": 10, "Typical": 30, "Chaotic": 50}      # variability %
+DETAIL_MAP = {"Fast": 100, "Balanced": 200, "High confidence": 500}    # iterations
 
-# Keep UI state
+
+# -----------------------
+# State for preset + advanced controls
+# -----------------------
 if "preset_name" not in st.session_state:
     st.session_state["preset_name"] = "Quick estimate (default)"
-if "predictability" not in st.session_state:
-    st.session_state["predictability"] = PRESETS[st.session_state["preset_name"]]["predictability"]
-if "detail" not in st.session_state:
-    st.session_state["detail"] = PRESETS[st.session_state["preset_name"]]["detail"]
 
-# Layout: preset + seed button
+# RADIO widget keys we will control directly
+if "predictability_radio" not in st.session_state:
+    st.session_state["predictability_radio"] = PRESETS[st.session_state["preset_name"]]["predictability"]
+if "detail_radio" not in st.session_state:
+    st.session_state["detail_radio"] = PRESETS[st.session_state["preset_name"]]["detail"]
+
+# Advanced override toggle (off by default)
+if "use_adv_overrides" not in st.session_state:
+    st.session_state["use_adv_overrides"] = False
+
+# Advanced technical widgets (initialise once)
+if "iterations_adv" not in st.session_state:
+    st.session_state["iterations_adv"] = int(DETAIL_MAP[st.session_state["detail_radio"]])
+if "variability_adv" not in st.session_state:
+    st.session_state["variability_adv"] = int(PREDICTABILITY_MAP[st.session_state["predictability_radio"]])
+if "seed_adv" not in st.session_state:
+    st.session_state["seed_adv"] = int(st.session_state["seed"])
+
+
+def sync_adv_defaults_from_conceptual():
+    """
+    When NOT using advanced overrides, keep the technical sliders consistent
+    with the conceptual radios (so everything stays coherent).
+    """
+    if not st.session_state.get("use_adv_overrides", False):
+        st.session_state["iterations_adv"] = int(DETAIL_MAP[st.session_state["detail_radio"]])
+        st.session_state["variability_adv"] = int(PREDICTABILITY_MAP[st.session_state["predictability_radio"]])
+        st.session_state["seed_adv"] = int(st.session_state["seed"])
+
+
+def apply_preset_to_controls():
+    """
+    When preset changes:
+    - update radio selections automatically (key requirement)
+    - keep advanced technical defaults in sync (unless overrides are enabled)
+    """
+    preset = st.session_state["preset_select"]
+    st.session_state["preset_name"] = preset
+
+    st.session_state["predictability_radio"] = PRESETS[preset]["predictability"]
+    st.session_state["detail_radio"] = PRESETS[preset]["detail"]
+
+    sync_adv_defaults_from_conceptual()
+
+
+# -----------------------
+# Layout: preset + randomness button
+# -----------------------
 top_left, top_right = st.columns([2, 1])
 
 with top_left:
-    preset_name = st.selectbox(
+    st.selectbox(
         "Preset",
         list(PRESETS.keys()),
         index=list(PRESETS.keys()).index(st.session_state["preset_name"]),
-        help="One-click setup based on the same two settings below.",
+        help="One-click setup (beginner-friendly). Advanced options allow fine-tuning.",
         key="preset_select",
+        on_change=apply_preset_to_controls,
     )
-
-    # If user changes preset, apply it directly to the conceptual controls
-    if preset_name != st.session_state["preset_name"]:
-        st.session_state["preset_name"] = preset_name
-        st.session_state["predictability"] = PRESETS[preset_name]["predictability"]
-        st.session_state["detail"] = PRESETS[preset_name]["detail"]
 
 with top_right:
     st.markdown("**Randomness**")
     st.caption("For fair A vs B comparison, randomness is kept consistent unless you redraw.")
     if st.button("Try another random run", use_container_width=True, key="reroll_seed"):
         st.session_state["seed"] += 1
+        # keep advanced seed aligned unless user is overriding manually
+        sync_adv_defaults_from_conceptual()
         st.toast("New random draw applied.", icon="🎲")
 
-# Two conceptual controls
-c1, c2 = st.columns(2)
-
-with c1:
-    predictability = st.radio(
-        "How predictable are your weekly expenses?",
-        list(PREDICTABILITY_MAP.keys()),
-        index=list(PREDICTABILITY_MAP.keys()).index(st.session_state["predictability"]),
-        help="Stable = small weekly changes. Chaotic = large swings.",
-        horizontal=True,
-        key="predictability_radio",
-    )
-
-with c2:
-    detail = st.radio(
-        "Result detail",
-        list(DETAIL_MAP.keys()),
-        index=list(DETAIL_MAP.keys()).index(st.session_state["detail"]),
-        help="Higher detail runs more simulations for a smoother, more stable summary.",
-        horizontal=True,
-        key="detail_radio",
-    )
-
-# Update state
-st.session_state["predictability"] = predictability
-st.session_state["detail"] = detail
-
-# Match preset?
-preset_target = PRESETS[st.session_state["preset_name"]]
-matches_preset = (
-    st.session_state["predictability"] == preset_target["predictability"]
-    and st.session_state["detail"] == preset_target["detail"]
-)
-
-# Final effective parameters
-iterations = int(DETAIL_MAP[st.session_state["detail"]])
-variability_pct = int(PREDICTABILITY_MAP[st.session_state["predictability"]])
-seed = int(st.session_state["seed"])
-
-if matches_preset:
+# -----------------------
+# Advanced options (collapsible)
+# -----------------------
+with st.expander("Advanced options"):
     st.caption(
-        f"Preset applied: **{st.session_state['preset_name']}** "
-        f"→ **{iterations} simulations**, **{variability_pct}% unpredictability**."
+        "Advanced controls for fine-tuning uncertainty and simulation behaviour. "
+        "If you enable overrides, you can directly set the technical parameters."
+    )
+
+    # ✅ Put the conceptual section FIRST inside the expander (as requested)
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.radio(
+            "How predictable are your weekly expenses?",
+            list(PREDICTABILITY_MAP.keys()),
+            horizontal=True,
+            key="predictability_radio",
+            help="Stable = small weekly changes. Chaotic = large swings.",
+            on_change=sync_adv_defaults_from_conceptual,
+        )
+
+    with c2:
+        st.radio(
+            "Result detail",
+            list(DETAIL_MAP.keys()),
+            horizontal=True,
+            key="detail_radio",
+            help="Higher detail runs more simulations for a smoother, more stable summary.",
+            on_change=sync_adv_defaults_from_conceptual,
+        )
+
+    st.divider()
+
+    st.checkbox(
+        "Enable technical overrides",
+        key="use_adv_overrides",
+        help="When enabled, the sliders below override the preset + conceptual controls.",
+    )
+
+    st.caption("Technical parameters (optional)")
+
+    st.slider(
+        "Monte Carlo simulations",
+        min_value=50,
+        max_value=1000,
+        step=50,
+        key="iterations_adv",
+        disabled=not st.session_state["use_adv_overrides"],
+        help="More simulations = smoother averages, slower computation.",
+    )
+
+    st.slider(
+        "Weekly spending variability (%)",
+        min_value=0,
+        max_value=80,
+        step=5,
+        key="variability_adv",
+        disabled=not st.session_state["use_adv_overrides"],
+        help="How much variable spending fluctuates week-to-week.",
+    )
+
+    st.number_input(
+        "Random seed",
+        min_value=0,
+        step=1,
+        key="seed_adv",
+        disabled=not st.session_state["use_adv_overrides"],
+        help="Only change if you want a completely different random draw (for testing).",
+    )
+
+# -----------------------
+# Decide effective parameters (conceptual vs advanced override)
+# -----------------------
+predictability = str(st.session_state["predictability_radio"])
+detail = str(st.session_state["detail_radio"])
+
+# Base (conceptual)
+iterations_base = int(DETAIL_MAP[detail])
+variability_base = int(PREDICTABILITY_MAP[predictability])
+seed_base = int(st.session_state["seed"])
+
+# Effective (may be overridden)
+if st.session_state["use_adv_overrides"]:
+    iterations = int(st.session_state["iterations_adv"])
+    variability_pct = int(st.session_state["variability_adv"])
+    seed = int(st.session_state["seed_adv"])
+else:
+    iterations = iterations_base
+    variability_pct = variability_base
+    seed = seed_base
+
+# Determine whether current conceptual selection matches the preset
+preset_target = PRESETS[st.session_state["preset_name"]]
+matches_preset = (predictability == preset_target["predictability"] and detail == preset_target["detail"])
+
+# Friendly status line (with override indicator)
+if st.session_state["use_adv_overrides"]:
+    st.caption(
+        f"**Advanced override active** → {iterations} simulations, {variability_pct}% unpredictability "
+        f"(seed {seed})."
     )
 else:
-    st.caption(
-        f"Custom settings (based on **{st.session_state['preset_name']}**) "
-        f"→ **{iterations} simulations**, **{variability_pct}% unpredictability**."
-    )
+    if matches_preset:
+        st.caption(
+            f"Preset applied: **{st.session_state['preset_name']}** "
+            f"→ **{iterations} simulations**, **{variability_pct}% unpredictability**."
+        )
+    else:
+        st.caption(
+            f"Custom settings (based on **{st.session_state['preset_name']}**) "
+            f"→ **{iterations} simulations**, **{variability_pct}% unpredictability**."
+        )
 
-# Scenario deltas
+# -----------------------
+# Scenario deltas (keep simple in main UI)
+# -----------------------
 colA, colB = st.columns(2)
 
 with colA:
@@ -243,13 +359,14 @@ if delta_b > variable:
         "Variable spending will be clamped to £0 in some runs."
     )
 
+
 def run_scenario_and_build_df(delta_savings: float, seed_offset: int = 0):
     """
     Runs the simulation and returns:
     - scenario_df: Mean + uncertainty bounds
     - params: traceability info for examiner + explanation layer
     """
-    variability_frac = float(variability_pct) / 100.0  # 30 -> 0.30
+    variability_frac = float(variability_pct) / 100.0
 
     mean, lower, upper = simulate_scenario(
         income=float(income),
@@ -279,14 +396,26 @@ def run_scenario_and_build_df(delta_savings: float, seed_offset: int = 0):
         "seed": int(seed) + int(seed_offset),
         "weeks": int(weeks),
         "preset": str(st.session_state["preset_name"]),
-        "predictability": str(st.session_state["predictability"]),
-        "detail": str(st.session_state["detail"]),
+        "predictability": str(predictability),
+        "detail": str(detail),
+        "advanced_override": bool(st.session_state["use_adv_overrides"]),
     }
 
     return scenario_df, params
 
-# ✅ RESTORED: Save / Clear buttons
+
+# -----------------------
+# Save / Clear + persistent green messages
+# -----------------------
 st.caption("Save Scenario A and Scenario B to compare outcomes side-by-side.")
+
+status_box = st.container()
+with status_box:
+    if st.session_state["saved_a_msg"]:
+        st.success("Scenario A saved.")
+    if st.session_state["saved_b_msg"]:
+        st.success("Scenario B saved.")
+
 b1, b2, b3 = st.columns(3)
 
 with b1:
@@ -296,22 +425,23 @@ with b1:
         else:
             df_a, params_a = run_scenario_and_build_df(delta_savings=delta_a, seed_offset=0)
             st.session_state["scenario_a"] = {"df": df_a, "params": params_a}
-            st.success("Scenario A saved.")
+            st.session_state["saved_a_msg"] = True
 
 with b2:
     if st.button("Save Scenario B", use_container_width=True, key="save_b"):
         if st.session_state["baseline_df"] is None:
             st.error("Generate the baseline first.")
         else:
-            # Seed offset keeps B reproducible but avoids accidental identical draws
             df_b, params_b = run_scenario_and_build_df(delta_savings=delta_b, seed_offset=1)
             st.session_state["scenario_b"] = {"df": df_b, "params": params_b}
-            st.success("Scenario B saved.")
+            st.session_state["saved_b_msg"] = True
 
 with b3:
     if st.button("Clear A/B", use_container_width=True, key="clear_ab"):
         st.session_state["scenario_a"] = None
         st.session_state["scenario_b"] = None
+        st.session_state["saved_a_msg"] = False
+        st.session_state["saved_b_msg"] = False
         st.info("Scenario A and B cleared.")
 
 # Optional trace for debugging (keep or remove)
@@ -402,7 +532,7 @@ else:
         weeks=int(weeks),
         delta_a=float(params_a["delta_savings"]),
         delta_b=float(params_b["delta_savings"]),
-        variability_pct=float(params_a["variability_pct"]),  # trace via A
+        variability_pct=float(params_a["variability_pct"]),
         seed=int(params_a["seed"]),
         iters=int(params_a["iterations"]),
     )
