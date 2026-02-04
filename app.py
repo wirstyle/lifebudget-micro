@@ -21,6 +21,10 @@ if "scenario_a" not in st.session_state:
 if "scenario_b" not in st.session_state:
     st.session_state["scenario_b"] = None  # dict: {"df":..., "params":...}
 
+# Hidden seed for reproducible randomness (UX-friendly)
+if "seed" not in st.session_state:
+    st.session_state["seed"] = 42
+
 # -----------------------
 # UI: Header
 # -----------------------
@@ -46,6 +50,7 @@ income = st.number_input(
     value=460.0,
     step=10.0,
     help="Your total weekly take-home income (simplified for MVP).",
+    key="income",
 )
 fixed = st.number_input(
     "Weekly fixed expenses (£)",
@@ -53,6 +58,7 @@ fixed = st.number_input(
     value=185.0,
     step=10.0,
     help="Stable weekly costs (e.g., rent, bills, subscriptions).",
+    key="fixed",
 )
 variable = st.number_input(
     "Weekly variable expenses (£)",
@@ -60,6 +66,7 @@ variable = st.number_input(
     value=115.0,
     step=10.0,
     help="Flexible costs that vary week-to-week (e.g., food, travel, leisure).",
+    key="variable",
 )
 
 weeks = st.slider(
@@ -68,15 +75,24 @@ weeks = st.slider(
     max_value=52,
     value=12,
     help="Short-term horizon to keep projections interpretable.",
+    key="weeks",
 )
 
-if st.button("Generate baseline"):
+if st.button("Generate baseline", key="generate_baseline_btn"):
     st.session_state["baseline_df"] = generate_baseline(income, fixed, variable, weeks).round(2)
 
 st.subheader("Baseline Projection")
 
 if st.session_state["baseline_df"] is not None:
-    st.dataframe(st.session_state["baseline_df"], use_container_width=True)
+    st.caption("Each row represents one week. Balance accumulates weekly savings over time.")
+
+    df_display = st.session_state["baseline_df"].copy()
+
+    try:
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+    except TypeError:
+        st.dataframe(df_display.style.hide(axis="index"), use_container_width=True)
+
     st.subheader("Projected Balance Over Time")
     st.line_chart(st.session_state["baseline_df"].set_index("Week")["Balance"])
 else:
@@ -89,9 +105,104 @@ st.divider()
 st.subheader("Step 2 — Explore behavioural change")
 st.caption(
     "Define two scenarios (A and B) with different weekly savings adjustments. "
-    "Scenarios use a lightweight Monte Carlo simulation to reflect uncertainty in variable expenses."
+    "Results reflect uncertainty in week-to-week variable spending."
 )
 
+# --- Presets (1-click) — 100% aligned to conceptual controls ---
+PRESETS = {
+    "Quick estimate (default)": {"predictability": "Typical", "detail": "Fast"},
+    "Typical spending": {"predictability": "Typical", "detail": "Balanced"},
+    "Unpredictable weeks": {"predictability": "Chaotic", "detail": "Balanced"},
+    "Stress test": {"predictability": "Chaotic", "detail": "High confidence"},
+}
+
+PREDICTABILITY_MAP = {"Stable": 10, "Typical": 30, "Chaotic": 50}
+DETAIL_MAP = {"Fast": 100, "Balanced": 200, "High confidence": 500}
+
+# Keep UI state
+if "preset_name" not in st.session_state:
+    st.session_state["preset_name"] = "Quick estimate (default)"
+if "predictability" not in st.session_state:
+    st.session_state["predictability"] = PRESETS[st.session_state["preset_name"]]["predictability"]
+if "detail" not in st.session_state:
+    st.session_state["detail"] = PRESETS[st.session_state["preset_name"]]["detail"]
+
+# Layout: preset + seed button
+top_left, top_right = st.columns([2, 1])
+
+with top_left:
+    preset_name = st.selectbox(
+        "Preset",
+        list(PRESETS.keys()),
+        index=list(PRESETS.keys()).index(st.session_state["preset_name"]),
+        help="One-click setup based on the same two settings below.",
+        key="preset_select",
+    )
+
+    # If user changes preset, apply it directly to the conceptual controls
+    if preset_name != st.session_state["preset_name"]:
+        st.session_state["preset_name"] = preset_name
+        st.session_state["predictability"] = PRESETS[preset_name]["predictability"]
+        st.session_state["detail"] = PRESETS[preset_name]["detail"]
+
+with top_right:
+    st.markdown("**Randomness**")
+    st.caption("For fair A vs B comparison, randomness is kept consistent unless you redraw.")
+    if st.button("Try another random run", use_container_width=True, key="reroll_seed"):
+        st.session_state["seed"] += 1
+        st.toast("New random draw applied.", icon="🎲")
+
+# Two conceptual controls
+c1, c2 = st.columns(2)
+
+with c1:
+    predictability = st.radio(
+        "How predictable are your weekly expenses?",
+        list(PREDICTABILITY_MAP.keys()),
+        index=list(PREDICTABILITY_MAP.keys()).index(st.session_state["predictability"]),
+        help="Stable = small weekly changes. Chaotic = large swings.",
+        horizontal=True,
+        key="predictability_radio",
+    )
+
+with c2:
+    detail = st.radio(
+        "Result detail",
+        list(DETAIL_MAP.keys()),
+        index=list(DETAIL_MAP.keys()).index(st.session_state["detail"]),
+        help="Higher detail runs more simulations for a smoother, more stable summary.",
+        horizontal=True,
+        key="detail_radio",
+    )
+
+# Update state
+st.session_state["predictability"] = predictability
+st.session_state["detail"] = detail
+
+# Match preset?
+preset_target = PRESETS[st.session_state["preset_name"]]
+matches_preset = (
+    st.session_state["predictability"] == preset_target["predictability"]
+    and st.session_state["detail"] == preset_target["detail"]
+)
+
+# Final effective parameters
+iterations = int(DETAIL_MAP[st.session_state["detail"]])
+variability_pct = int(PREDICTABILITY_MAP[st.session_state["predictability"]])
+seed = int(st.session_state["seed"])
+
+if matches_preset:
+    st.caption(
+        f"Preset applied: **{st.session_state['preset_name']}** "
+        f"→ **{iterations} simulations**, **{variability_pct}% unpredictability**."
+    )
+else:
+    st.caption(
+        f"Custom settings (based on **{st.session_state['preset_name']}**) "
+        f"→ **{iterations} simulations**, **{variability_pct}% unpredictability**."
+    )
+
+# Scenario deltas
 colA, colB = st.columns(2)
 
 with colA:
@@ -100,6 +211,7 @@ with colA:
         min_value=0.0,
         value=10.0,
         step=5.0,
+        key="delta_a",
         help=(
             "Represents behavioural change (spending less), not extra income. "
             "This reduces your variable expenses each week by the chosen amount."
@@ -112,40 +224,12 @@ with colB:
         min_value=0.0,
         value=20.0,
         step=5.0,
+        key="delta_b",
         help=(
             "Use this to test a different behavioural change from Scenario A "
             "(e.g., a more aggressive or more conservative saving plan)."
         ),
     )
-
-iterations = st.slider(
-    "Monte Carlo iterations",
-    min_value=50,
-    max_value=500,
-    value=200,
-    step=50,
-    help="Number of simulations run to capture plausible future outcomes.",
-)
-
-variability_pct = st.slider(
-    "Spending variability (%)",
-    min_value=0,
-    max_value=60,
-    value=30,
-    step=5,
-    help=(
-        "Simulates real-world uncertainty in weekly variable expenses (e.g., food, leisure). "
-        "Higher values increase uncertainty bands over time."
-    ),
-)
-
-seed = st.number_input(
-    "Random seed (reproducibility)",
-    min_value=0,
-    value=42,
-    step=1,
-    help="Keeps results repeatable for assessment evidence. Change it to explore different random draws.",
-)
 
 # Defensive UX warnings
 if delta_a > variable:
@@ -159,19 +243,18 @@ if delta_b > variable:
         "Variable spending will be clamped to £0 in some runs."
     )
 
-
 def run_scenario_and_build_df(delta_savings: float, seed_offset: int = 0):
     """
     Runs the simulation and returns:
     - scenario_df: Mean + uncertainty bounds
     - params: traceability info for examiner + explanation layer
     """
-    variability_frac = float(variability_pct) / 100.0  # 30 -> 0.30 (fraction)
+    variability_frac = float(variability_pct) / 100.0  # 30 -> 0.30
 
     mean, lower, upper = simulate_scenario(
-        income=income,
-        fixed_expenses=fixed,
-        variable_expenses=variable,
+        income=float(income),
+        fixed_expenses=float(fixed),
+        variable_expenses=float(variable),
         delta_savings=float(delta_savings),
         weeks=int(weeks),
         iterations=int(iterations),
@@ -191,22 +274,23 @@ def run_scenario_and_build_df(delta_savings: float, seed_offset: int = 0):
     params = {
         "delta_savings": float(delta_savings),
         "iterations": int(iterations),
-        # Percent shown in the UI (for explanation text)
         "variability_pct": int(variability_pct),
-        # Fraction used internally in calculations
         "variability_frac": float(variability_frac),
         "seed": int(seed) + int(seed_offset),
         "weeks": int(weeks),
+        "preset": str(st.session_state["preset_name"]),
+        "predictability": str(st.session_state["predictability"]),
+        "detail": str(st.session_state["detail"]),
     }
 
     return scenario_df, params
 
-
+# ✅ RESTORED: Save / Clear buttons
 st.caption("Save Scenario A and Scenario B to compare outcomes side-by-side.")
-col1, col2, col3 = st.columns(3)
+b1, b2, b3 = st.columns(3)
 
-with col1:
-    if st.button("Save Scenario A", use_container_width=True):
+with b1:
+    if st.button("Save Scenario A", use_container_width=True, key="save_a"):
         if st.session_state["baseline_df"] is None:
             st.error("Generate the baseline first.")
         else:
@@ -214,8 +298,8 @@ with col1:
             st.session_state["scenario_a"] = {"df": df_a, "params": params_a}
             st.success("Scenario A saved.")
 
-with col2:
-    if st.button("Save Scenario B", use_container_width=True):
+with b2:
+    if st.button("Save Scenario B", use_container_width=True, key="save_b"):
         if st.session_state["baseline_df"] is None:
             st.error("Generate the baseline first.")
         else:
@@ -224,12 +308,13 @@ with col2:
             st.session_state["scenario_b"] = {"df": df_b, "params": params_b}
             st.success("Scenario B saved.")
 
-with col3:
-    if st.button("Clear A/B", use_container_width=True):
+with b3:
+    if st.button("Clear A/B", use_container_width=True, key="clear_ab"):
         st.session_state["scenario_a"] = None
         st.session_state["scenario_b"] = None
         st.info("Scenario A and B cleared.")
 
+# Optional trace for debugging (keep or remove)
 if st.session_state["scenario_a"] is not None:
     st.caption(f"Scenario A params: {st.session_state['scenario_a']['params']}")
 if st.session_state["scenario_b"] is not None:
@@ -283,8 +368,10 @@ else:
     summary = pd.DataFrame(
         [
             {"Scenario": "Baseline", "Final balance (mean)": round(base_final, 2), "Final range (10–90%)": "—"},
-            {"Scenario": "Scenario A", "Final balance (mean)": round(a_mean, 2), "Final range (10–90%)": f"{a_low:.2f} – {a_up:.2f}"},
-            {"Scenario": "Scenario B", "Final balance (mean)": round(b_mean, 2), "Final range (10–90%)": f"{b_low:.2f} – {b_up:.2f}"},
+            {"Scenario": "Scenario A", "Final balance (mean)": round(a_mean, 2),
+             "Final range (10–90%)": f"{a_low:.2f} – {a_up:.2f}"},
+            {"Scenario": "Scenario B", "Final balance (mean)": round(b_mean, 2),
+             "Final range (10–90%)": f"{b_low:.2f} – {b_up:.2f}"},
         ]
     )
 
@@ -315,7 +402,7 @@ else:
         weeks=int(weeks),
         delta_a=float(params_a["delta_savings"]),
         delta_b=float(params_b["delta_savings"]),
-        variability_pct=float(params_a["variability_pct"]),  # same slider for both, but trace via A
+        variability_pct=float(params_a["variability_pct"]),  # trace via A
         seed=int(params_a["seed"]),
         iters=int(params_a["iterations"]),
     )
