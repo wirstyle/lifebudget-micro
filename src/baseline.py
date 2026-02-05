@@ -2,6 +2,14 @@
 """
 Baseline (deterministic) module.
 
+This module provides the "no-change" trajectory used as the comparison anchor.
+
+Important naming note (current MVP):
+- `variable_expenses` here is used as the **controllable spending bucket** from Step 1/2.
+  In LifeBudget Micro's current design, that bucket corresponds to **discretionary spending**.
+- Fixed costs are passed in as `fixed_expenses` (fixed essential + variable essentials combined),
+  and are treated as unchanged in the baseline.
+
 Option A chosen:
 - Validation lives in app.py (Streamlit-friendly try/except + st.error)
 - baseline.py still provides validate_baseline_df() as the single schema rule
@@ -31,6 +39,21 @@ def generate_baseline(
     variable_expenses: float,
     weeks: int = 12,
 ) -> pd.DataFrame:
+    """
+    Generate a deterministic baseline trajectory.
+
+    Parameters:
+    - income: weekly income (take-home)
+    - fixed_expenses: weekly fixed total (fixed essential + variable essentials combined)
+    - variable_expenses: weekly controllable bucket (currently: discretionary spending)
+    - weeks: planning horizon
+
+    Returns:
+    DataFrame with columns:
+    - Week
+    - Weekly Savings (weekly surplus given the baseline allocation)
+    - Balance (cumulative)
+    """
     if int(weeks) <= 0:
         raise ValueError(f"weeks must be positive, got {weeks}")
 

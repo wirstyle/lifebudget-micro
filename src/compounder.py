@@ -12,7 +12,7 @@ This module intentionally contains **pure computation** (no Streamlit):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -37,7 +37,8 @@ def simulate_scenario(
 
     Model:
     - Uncertainty is applied ONLY to variable expenses via Gaussian noise.
-    - delta_savings represents additional weekly savings by reducing variable expenses.
+    - delta_savings is interpreted as a REAL weekly spend reduction (a "cut") applied to the controllable spending bucket.
+      The UI is responsible for translating a *savings target* into this cut amount (margin -> discretionary policy).
 
     Parameters:
     - variability_frac: fraction of variable_expenses used as the noise std dev.
@@ -57,12 +58,15 @@ def simulate_scenario(
     rng = np.random.default_rng(seed)
     all_runs = np.zeros((iterations, weeks), dtype=float)
 
+    # Clarity: delta_savings is a cut applied to variable_expenses (controllable bucket)
+    delta_cut = float(delta_savings)
+
     for i in range(iterations):
         balance = 0.0
         for w in range(weeks):
             noise = rng.normal(loc=0.0, scale=variable_expenses * variability_frac)
 
-            effective_variable = variable_expenses - delta_savings + noise
+            effective_variable = variable_expenses - delta_cut + noise
             if effective_variable < 0.0:
                 effective_variable = 0.0
 
@@ -187,6 +191,10 @@ def simulate_scenario_df(
     Runs simulate_scenario and returns:
     - scenario_df: tidy dataframe with Week, Mean, Lower, Upper
     - params: dict for traceability/logging/display
+
+    Note:
+    - delta_savings here is a *cut* applied to variable_expenses (controllable bucket).
+      Savings targets are resolved in the UI layer (margin -> discretionary).
     """
     mean, lower, upper = simulate_scenario(
         income=income,

@@ -9,6 +9,13 @@
 #
 # New change (this version):
 # - Step 4 logic is centralized in src/explain.py (app.py keeps UI/orchestration only)
+#
+# ✅ New conceptual change implemented here:
+# - Scenario A/B inputs represent a *savings target* (£/week), NOT a direct discretionary reduction.
+# - Coverage order (policy): remaining margin → discretionary cut
+# - Essentials are NOT adjusted automatically (MVP scope).
+# - Scenario is blocked if target > (margin + discretionary).
+# - Compounder receives ONLY the real discretionary cut (from_discretionary), not the target.
 
 import streamlit as st
 import pandas as pd
@@ -350,13 +357,14 @@ The proportions above remain the same at different time scales.
 st.markdown("**Next:** explore what happens if you change something (Step 2).")
 
 # ============================================================
-# Step 2 — Scenarios (A & B deltas)
+# Step 2 — Scenarios (A & B savings targets)
 # ============================================================
 st.divider()
 st.subheader("Step 2 — Explore behavioural change")
 st.caption(
-    "Define two scenarios (A and B) with different weekly behaviour adjustments. "
-    "Uncertainty is applied to **discretionary** spending (the most controllable category)."
+    "Define two scenarios (A and B) with different weekly savings targets. "
+    "If your target exceeds your remaining margin, the difference must come from cutting "
+    "**discretionary** spending (the most controllable category). Essentials are not changed automatically."
 )
 
 # -----------------------
@@ -444,6 +452,36 @@ def warning_badge(text: str):
         """,
         unsafe_allow_html=True,
     )
+
+# -----------------------
+# ✅ Savings target policy resolver (margin -> discretionary)
+# -----------------------
+def resolve_savings_target(*, target: float, weekly_margin: float, discretionary: float) -> dict:
+    """
+    Interpret Scenario A/B as a *savings target* per week.
+
+    Coverage order:
+      1) remaining margin (no sacrifice)
+      2) discretionary spending (requires cut)
+
+    We do NOT touch variable essentials nor fixed essentials (by design, MVP).
+    """
+    t = max(float(target), 0.0)
+    m = float(weekly_margin)
+    d = max(float(discretionary), 0.0)
+
+    from_margin = min(t, max(m, 0.0))  # if margin is negative, contributes 0
+    remaining = t - from_margin
+
+    from_discretionary = min(remaining, d)
+    uncovered = remaining - from_discretionary
+
+    return {
+        "target": t,
+        "from_margin": from_margin,
+        "from_discretionary": from_discretionary,  # real behavioural cut (what Compounder should receive)
+        "uncovered": uncovered,
+    }
 
 # -----------------------
 # ✅ Clear scenarios (avoid stale saved A/B when settings change)
@@ -570,7 +608,6 @@ if "preset_name" not in st.session_state:
 
 def apply_preset():
     st.session_state["preset_name"] = st.session_state["preset_select"]
-    # settings changed → saved A/B now stale
     clear_ab_silent()
 
 top_left, top_right = st.columns([2, 1])
@@ -606,33 +643,76 @@ st.caption(
 )
 
 # -----------------------
-# Scenario deltas
+# Scenario savings targets (NEW semantics)
 # -----------------------
+disc = float(st.session_state.get("discretionary_w", 0.0))
+margin = float(st.session_state.get("weekly_margin", 0.0))
+
 colA, colB = st.columns(2)
 with colA:
-    delta_a = st.number_input(
-        "Scenario A — Reduce discretionary spending by (£/week)",
+    target_a = st.number_input(
+        "Scenario A — Savings target (£/week)",
         min_value=0.0,
         value=10.0,
         step=5.0,
-        key="delta_a",
-        help="Behavioural change (spending less). This reduces discretionary spending each week by the chosen amount.",
+        key="target_a",
+        on_change=clear_ab_silent,
+        help=(
+            "This is the savings amount you want to achieve each week. "
+            "The app tries to cover it first from your remaining margin, then (if needed) "
+            "by cutting discretionary spending."
+        ),
     )
 with colB:
-    delta_b = st.number_input(
-        "Scenario B — Reduce discretionary spending by (£/week)",
+    target_b = st.number_input(
+        "Scenario B — Savings target (£/week)",
         min_value=0.0,
         value=20.0,
         step=5.0,
-        key="delta_b",
-        help="Test a different behavioural change from Scenario A (e.g., more aggressive or more conservative).",
+        key="target_b",
+        on_change=clear_ab_silent,
+        help="A second weekly savings target to compare against Scenario A.",
     )
 
-disc = float(st.session_state.get("discretionary_w", 0.0))
-if delta_a > disc:
-    st.warning("Scenario A exceeds your current discretionary spending. Discretionary will be clamped to £0 in some runs.")
-if delta_b > disc:
-    st.warning("Scenario B exceeds your current discretionary spending. Discretionary will be clamped to £0 in some runs.")
+res_a = resolve_savings_target(target=float(target_a), weekly_margin=float(margin), discretionary=float(disc))
+res_b = resolve_savings_target(target=float(target_b), weekly_margin=float(margin), discretionary=float(disc))
+
+st.markdown("**How your target is covered (policy):** remaining margin → discretionary cut (essentials untouched).")
+cA1, cB1 = st.columns(2)
+with cA1:
+    st.caption("Scenario A breakdown")
+    st.write(
+        f"- Target: **£{res_a['target']:,.0f}/w**\n"
+        f"- Covered by margin: **£{res_a['from_margin']:,.0f}/w**\n"
+        f"- Requires discretionary cut: **£{res_a['from_discretionary']:,.0f}/w**"
+    )
+with cB1:
+    st.caption("Scenario B breakdown")
+    st.write(
+        f"- Target: **£{res_b['target']:,.0f}/w**\n"
+        f"- Covered by margin: **£{res_b['from_margin']:,.0f}/w**\n"
+        f"- Requires discretionary cut: **£{res_b['from_discretionary']:,.0f}/w**"
+    )
+
+def savings_status(res: dict, name: str) -> bool:
+    if res["uncovered"] > 0:
+        st.error(
+            f"{name}: target cannot be fully covered without cutting essentials "
+            f"(shortfall ≈ £{res['uncovered']:,.0f}/w). "
+            "In this MVP, essentials are not adjusted automatically — reduce the target."
+        )
+        return False
+    if res["from_discretionary"] > 0:
+        st.warning(
+            f"{name}: reaching this target requires cutting discretionary spending by "
+            f"≈ £{res['from_discretionary']:,.0f}/w."
+        )
+    else:
+        st.info(f"{name}: fully covered by remaining margin (no spending cuts needed).")
+    return True
+
+ok_a = savings_status(res_a, "Scenario A")
+ok_b = savings_status(res_b, "Scenario B")
 
 # -----------------------
 # Save / Clear + persistent messages
@@ -656,12 +736,15 @@ with b1:
             st.error("Generate the baseline trajectory first (Step 2).")
         elif not st.session_state.get("baseline_ready", False) or st.session_state.get("baseline_signature") != make_baseline_signature():
             st.error("Baseline exists but is out of date. Re-generate baseline before saving scenarios.")
+        elif not ok_a:
+            st.error("Scenario A cannot be saved because the savings target is not feasible under current MVP rules.")
         else:
+            # IMPORTANT: pass only the real discretionary cut to Compounder
             df_a, params_a = simulate_scenario_df_with_seed_offset(
                 income=float(st.session_state["income_w"]),
                 fixed_expenses=float(st.session_state["fixed_total_w"]),
                 variable_expenses=float(st.session_state["discretionary_w"]),
-                delta_savings=float(delta_a),
+                delta_savings=float(res_a["from_discretionary"]),
                 weeks=int(weeks),
                 iterations=int(iterations),
                 seed=int(seed),
@@ -671,12 +754,20 @@ with b1:
                 shock_amount=float(st.session_state.get("shock_amount", 0.0)),
                 shock_week=int(st.session_state.get("shock_week", 1)),
             )
+
             # Add UI traceability fields
             params_a["preset"] = str(st.session_state["preset_name"])
             params_a["variability_pct"] = int(variability_pct)
 
+            # Add NEW semantic traceability fields
+            params_a["target_savings"] = float(res_a["target"])
+            params_a["from_margin"] = float(res_a["from_margin"])
+            params_a["from_discretionary"] = float(res_a["from_discretionary"])
+            params_a["uncovered"] = float(res_a["uncovered"])
+
             st.session_state["scenario_a"] = {"df": df_a.round(2), "params": params_a}
             st.session_state["saved_a_msg"] = True
+
     if st.session_state.get("saved_a_msg", False):
         saved_badge("Scenario A saved.")
 
@@ -688,12 +779,14 @@ with b2:
             st.error("Generate the baseline trajectory first (Step 2).")
         elif not st.session_state.get("baseline_ready", False) or st.session_state.get("baseline_signature") != make_baseline_signature():
             st.error("Baseline exists but is out of date. Re-generate baseline before saving scenarios.")
+        elif not ok_b:
+            st.error("Scenario B cannot be saved because the savings target is not feasible under current MVP rules.")
         else:
             df_b, params_b = simulate_scenario_df_with_seed_offset(
                 income=float(st.session_state["income_w"]),
                 fixed_expenses=float(st.session_state["fixed_total_w"]),
                 variable_expenses=float(st.session_state["discretionary_w"]),
-                delta_savings=float(delta_b),
+                delta_savings=float(res_b["from_discretionary"]),
                 weeks=int(weeks),
                 iterations=int(iterations),
                 seed=int(seed),
@@ -703,12 +796,20 @@ with b2:
                 shock_amount=float(st.session_state.get("shock_amount", 0.0)),
                 shock_week=int(st.session_state.get("shock_week", 1)),
             )
+
             # Add UI traceability fields
             params_b["preset"] = str(st.session_state["preset_name"])
             params_b["variability_pct"] = int(variability_pct)
 
+            # Add NEW semantic traceability fields
+            params_b["target_savings"] = float(res_b["target"])
+            params_b["from_margin"] = float(res_b["from_margin"])
+            params_b["from_discretionary"] = float(res_b["from_discretionary"])
+            params_b["uncovered"] = float(res_b["uncovered"])
+
             st.session_state["scenario_b"] = {"df": df_b.round(2), "params": params_b}
             st.session_state["saved_b_msg"] = True
+
     if st.session_state.get("saved_b_msg", False):
         saved_badge("Scenario B saved.")
 
@@ -725,7 +826,7 @@ with b3:
 # ============================================================
 st.divider()
 st.subheader("Step 3 — Compare outcomes")
-st.caption("Compare your baseline trajectory with alternative behavioural scenarios under uncertainty.")
+st.caption("Compare your baseline trajectory with alternative scenarios under uncertainty.")
 
 baseline_df = st.session_state.get("baseline_df")
 scenario_a  = st.session_state.get("scenario_a")
@@ -811,13 +912,14 @@ if ready_for_compare:
 # ============================================================
 st.divider()
 st.subheader("Step 4 — Reflect on impact")
-st.caption("Plain-English summary: what your weekly change could mean for your money.")
+st.caption("Plain-English summary: what your weekly targets could mean for your money.")
 
 if not ready_for_compare:
     st.info("Complete Step 3 (baseline + saved Scenario A and B) to see the reflection summary.")
 else:
     # Pull final numbers (UI/orchestration only)
     params_a = scenario_a.get("params", {})
+    params_b = scenario_b.get("params", {})
 
     base_final = float(baseline_df["Balance"].iloc[-1])
 
@@ -829,19 +931,44 @@ else:
     b_low  = float(df_b["Lower"].iloc[-1])
     b_up   = float(df_b["Upper"].iloc[-1])
 
-    delta_a_w = float(scenario_a["params"]["delta_savings"])
-    delta_b_w = float(scenario_b["params"]["delta_savings"])
-    weeks_n   = int(st.session_state["weeks"])
+    weeks_n = int(st.session_state["weeks"])
+
+    # New semantic values (stored in params)
+    target_a_w = float(params_a.get("target_savings", 0.0))
+    target_b_w = float(params_b.get("target_savings", 0.0))
+
+    margin_a_w = float(params_a.get("from_margin", 0.0))
+    margin_b_w = float(params_b.get("from_margin", 0.0))
+
+    cut_a_w = float(params_a.get("from_discretionary", params_a.get("delta_savings", 0.0)))
+    cut_b_w = float(params_b.get("from_discretionary", params_b.get("delta_savings", 0.0)))
 
     # Centralised Step 4 computation + copy
-    metrics = compute_reflection_metrics(
-        weeks=weeks_n,
-        base_final=base_final,
-        a_mean=a_mean, a_low=a_low, a_high=a_up,
-        b_mean=b_mean, b_low=b_low, b_high=b_up,
-        delta_a_weekly=delta_a_w,
-        delta_b_weekly=delta_b_w,
-    )
+    # NOTE: To avoid hard-breaks if your explain.py is not updated yet, we try the new signature first,
+    # then fall back to the old signature.
+    try:
+        metrics = compute_reflection_metrics(
+            weeks=weeks_n,
+            base_final=base_final,
+            a_mean=a_mean, a_low=a_low, a_high=a_up,
+            b_mean=b_mean, b_low=b_low, b_high=b_up,
+            target_a_weekly=target_a_w,
+            target_b_weekly=target_b_w,
+            cut_a_weekly=cut_a_w,
+            cut_b_weekly=cut_b_w,
+            margin_a_weekly=margin_a_w,
+            margin_b_weekly=margin_b_w,
+        )
+    except TypeError:
+        # Old signature fallback (uses the REAL cut, not the target)
+        metrics = compute_reflection_metrics(
+            weeks=weeks_n,
+            base_final=base_final,
+            a_mean=a_mean, a_low=a_low, a_high=a_up,
+            b_mean=b_mean, b_low=b_low, b_high=b_up,
+            delta_a_weekly=cut_a_w,
+            delta_b_weekly=cut_b_w,
+        )
 
     text = build_human_reflection_text(
         metrics,
@@ -855,15 +982,15 @@ else:
     st.markdown(text["what_you_get"])
 
     st.markdown("### Which one should you pick?")
-    if metrics.winner == "Tie":
+    if getattr(metrics, "winner", "Tie") == "Tie":
         st.info(text["pick_primary"])
     else:
         st.success(text["pick_primary"])
-        if text["pick_secondary"]:
+        if text.get("pick_secondary"):
             st.warning(text["pick_secondary"])
 
     # --- 2) Shock note ---
-    if text["shock_note"]:
+    if text.get("shock_note"):
         st.info(text["shock_note"])
 
     # --- 3) Variability note ---
@@ -875,8 +1002,9 @@ else:
         fixed_expenses=float(st.session_state["fixed_total_w"]),
         variable_expenses=float(st.session_state["discretionary_w"]),
         weeks=int(st.session_state["weeks"]),
-        delta_a=float(scenario_a["params"]["delta_savings"]),
-        delta_b=float(scenario_b["params"]["delta_savings"]),
+        # Explanation talks in targets (human intent)
+        delta_a=float(target_a_w),
+        delta_b=float(target_b_w),
         variability_pct=float(params_a.get("variability_pct", 0)),
         seed=int(params_a.get("seed", st.session_state.get("seed", 0))),
         iters=int(params_a.get("iterations", 0)),
@@ -914,5 +1042,15 @@ else:
     with st.expander("Technical details (optional)"):
         st.markdown("### Model explanation (technical)")
         st.markdown(explanation_text + shock_note)
+
+        # Add explicit semantic traceability in the technical panel
+        st.markdown(
+            f"""
+**Scenario semantics (traceability):**
+- Scenario A target: **£{target_a_w:,.0f}/w** = margin **£{margin_a_w:,.0f}/w** + discretionary cut **£{cut_a_w:,.0f}/w**
+- Scenario B target: **£{target_b_w:,.0f}/w** = margin **£{margin_b_w:,.0f}/w** + discretionary cut **£{cut_b_w:,.0f}/w**
+""".strip()
+        )
+
         st.caption(f"Preset: **{preset_name}** ({iters} sims, {var_pct}% variability).")
         st.caption(fairness_note)
