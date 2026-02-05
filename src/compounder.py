@@ -1,6 +1,26 @@
 # src/compounder.py
-import numpy as np
+"""
+Compounder+ (Scenario Simulation Module)
 
+This module intentionally contains **pure computation** (no Streamlit):
+- Monte Carlo scenario simulation (uncertainty on variable spending)
+- Optional one-off shock (unexpected expense) application to trajectories
+- Helpers to build a tidy scenario DataFrame for the UI
+- Lightweight schema validation for scenario outputs
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+
+# ============================================================
+# Core simulation
+# ============================================================
 
 def simulate_scenario(
     income: float,
@@ -27,6 +47,13 @@ def simulate_scenario(
     - mean, lower, upper arrays (balances across weeks)
       where lower/upper are 10th/90th percentiles (uncertainty band).
     """
+    if weeks <= 0:
+        raise ValueError(f"weeks must be positive, got {weeks}")
+    if iterations <= 0:
+        raise ValueError(f"iterations must be positive, got {iterations}")
+    if variability_frac < 0:
+        raise ValueError(f"variability_frac must be >= 0, got {variability_frac}")
+
     rng = np.random.default_rng(seed)
     all_runs = np.zeros((iterations, weeks), dtype=float)
 
@@ -48,3 +75,193 @@ def simulate_scenario(
     upper = np.percentile(all_runs, 90, axis=0)
 
     return mean, lower, upper
+
+
+# ============================================================
+# One-off shock (unexpected expense)
+# ============================================================
+
+def apply_one_off_shock(values, shock_amount: float, shock_week: int):
+    """
+    Apply a single unexpected expense ONCE at week shock_week (1-indexed).
+
+    Semantics:
+    - From shock_week onward, balances are reduced by shock_amount (cumulative effect).
+
+    values: list/np array of balances length == weeks
+    """
+    if values is None:
+        return values
+    if shock_amount <= 0:
+        return [float(v) for v in values]
+
+    start_idx = max(int(shock_week) - 1, 0)
+    out = []
+    for i, v in enumerate(values):
+        vv = float(v)
+        out.append(vv - float(shock_amount) if i >= start_idx else vv)
+    return out
+
+
+def apply_one_off_shock_to_df(
+    df: pd.DataFrame,
+    shock_amount: float,
+    shock_week: int,
+    value_cols: Tuple[str, ...] = ("Balance",),
+) -> pd.DataFrame:
+    """
+    Apply the same cumulative shock to one or multiple columns in a dataframe.
+
+    Robustness:
+    - Applies by row index (week 1 -> row 0), so the Week column is not required.
+    - If expected value cols are missing, raises a clear error.
+    """
+    if df is None or df.empty or shock_amount <= 0:
+        return df
+
+    missing = [c for c in value_cols if c not in df.columns]
+    if missing:
+        raise KeyError(
+            f"Dataframe missing expected columns {missing}. "
+            f"Found columns: {df.columns.tolist()}"
+        )
+
+    df2 = df.copy()
+    start_idx = max(int(shock_week) - 1, 0)
+
+    for col in value_cols:
+        vals = df2[col].tolist()
+        df2[col] = [
+            float(v) - float(shock_amount) if i >= start_idx else float(v)
+            for i, v in enumerate(vals)
+        ]
+
+    return df2
+
+
+# ============================================================
+# Scenario dataframe builder (UI-friendly)
+# ============================================================
+
+@dataclass(frozen=True)
+class ScenarioParams:
+    delta_savings: float
+    weeks: int
+    iterations: int
+    seed: int
+    variability_frac: float
+    shock_enabled: bool = False
+    shock_amount: float = 0.0
+    shock_week: int = 1
+
+
+def validate_scenario_df(df: pd.DataFrame) -> None:
+    """
+    Lightweight schema validation for scenario outputs.
+    """
+    if df is None or df.empty:
+        raise ValueError("Scenario dataframe is empty.")
+    required = {"Week", "Mean", "Lower", "Upper"}
+    missing = required - set(df.columns)
+    if missing:
+        raise KeyError(
+            f"Scenario dataframe missing columns: {sorted(missing)}. "
+            f"Found columns: {df.columns.tolist()}"
+        )
+
+
+def simulate_scenario_df(
+    income: float,
+    fixed_expenses: float,
+    variable_expenses: float,
+    delta_savings: float,
+    weeks: int,
+    iterations: int = 200,
+    seed: int = 42,
+    variability_frac: float = 0.30,
+    shock_enabled: bool = False,
+    shock_amount: float = 0.0,
+    shock_week: int = 1,
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    Runs simulate_scenario and returns:
+    - scenario_df: tidy dataframe with Week, Mean, Lower, Upper
+    - params: dict for traceability/logging/display
+    """
+    mean, lower, upper = simulate_scenario(
+        income=income,
+        fixed_expenses=fixed_expenses,
+        variable_expenses=variable_expenses,
+        delta_savings=delta_savings,
+        weeks=weeks,
+        iterations=iterations,
+        seed=seed,
+        variability_frac=variability_frac,
+    )
+
+    mean_l = [float(x) for x in mean]
+    low_l = [float(x) for x in lower]
+    up_l = [float(x) for x in upper]
+
+    if shock_enabled and shock_amount > 0:
+        mean_l = apply_one_off_shock(mean_l, shock_amount, shock_week)
+        low_l = apply_one_off_shock(low_l, shock_amount, shock_week)
+        up_l = apply_one_off_shock(up_l, shock_amount, shock_week)
+
+    df = pd.DataFrame(
+        {
+            "Week": list(range(1, int(weeks) + 1)),
+            "Mean": mean_l,
+            "Lower": low_l,
+            "Upper": up_l,
+        }
+    )
+
+    validate_scenario_df(df)
+
+    params = {
+        "delta_savings": float(delta_savings),
+        "weeks": int(weeks),
+        "iterations": int(iterations),
+        "seed": int(seed),
+        "variability_frac": float(variability_frac),
+        "shock_enabled": bool(shock_enabled),
+        "shock_amount": float(shock_amount),
+        "shock_week": int(shock_week),
+    }
+
+    return df, params
+
+
+def simulate_scenario_df_with_seed_offset(
+    income: float,
+    fixed_expenses: float,
+    variable_expenses: float,
+    delta_savings: float,
+    weeks: int,
+    iterations: int = 200,
+    seed: int = 42,
+    seed_offset: int = 0,
+    variability_frac: float = 0.30,
+    shock_enabled: bool = False,
+    shock_amount: float = 0.0,
+    shock_week: int = 1,
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    Convenience wrapper to keep your current UI behaviour:
+    - Scenario A uses seed + 0
+    - Scenario B uses seed + 1 (etc.)
+    """
+    return simulate_scenario_df(
+        income=income,
+        fixed_expenses=fixed_expenses,
+        variable_expenses=variable_expenses,
+        delta_savings=delta_savings,
+        weeks=weeks,
+        iterations=iterations,
+        seed=int(seed) + int(seed_offset),
+        variability_frac=variability_frac,
+        shock_enabled=shock_enabled,
+        shock_amount=shock_amount,
+        shock_week=shock_week,
+    )

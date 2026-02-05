@@ -1,14 +1,30 @@
-# app.py (FULL) — integrated with the 2 mini-implementations:
+# app.py (FULL) — refactored to move scenario-building + shocks into src/compounder.py
+# ✅ Keeps the same UX features:
 # 1) shock_enabled checkbox + disabled inputs when off (clean UX / no accidental shocks)
 # 2) baseline schema validation + robust shock application (clear error if baseline output shape changes)
+#
+# Change implemented in this version:
+# - Uses validate_baseline_df() from src/baseline.py (single source of truth)
+# - Removes the duplicated manual checks (isinstance + required_cols) in app.py
+#
+# New change (this version):
+# - Step 4 logic is centralized in src/explain.py (app.py keeps UI/orchestration only)
 
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from src.baseline import generate_baseline
-from src.compounder import simulate_scenario
-from src.explain import ExplanationInputs, build_explanation  # Milestone 4
+from src.baseline import generate_baseline, validate_baseline_df
+from src.compounder import (
+    simulate_scenario_df_with_seed_offset,
+    apply_one_off_shock_to_df,  # for baseline shock application
+)
+from src.explain import (
+    ExplanationInputs,
+    build_explanation,
+    compute_reflection_metrics,
+    build_human_reflection_text,
+)
 
 st.set_page_config(page_title="LifeBudget Micro", layout="centered")
 
@@ -23,59 +39,6 @@ PERIOD_TO_WEEK = {
 
 def to_weekly(amount: float, period: str) -> float:
     return float(amount) * float(PERIOD_TO_WEEK[period])
-
-# -----------------------
-# ✅ Helper: apply one-off shock to any trajectory
-# -----------------------
-def apply_one_off_shock_to_series(values, shock_amount: float, shock_week: int):
-    """
-    values: list/np array of balances length == weeks
-    shock is applied ONCE at week shock_week, which means:
-    - balance decreases by shock_amount from that week onward (cumulative effect)
-    """
-    if shock_amount <= 0:
-        return values
-    start_idx = max(int(shock_week) - 1, 0)
-    return [
-        float(v) - float(shock_amount) if i >= start_idx else float(v)
-        for i, v in enumerate(values)
-    ]
-
-def apply_one_off_shock_to_df(
-    df: pd.DataFrame,
-    shock_amount: float,
-    shock_week: int,
-    week_col: str = "Week",
-    value_cols: tuple = ("Balance",),
-):
-    """
-    Applies the same cumulative shock to one or multiple columns in a dataframe.
-
-    Robustness:
-    - We apply by row index (week 1 -> row 0), so Week column is not strictly required
-      for the operation, but we keep it for clarity.
-    - If expected value cols are missing, we raise a clear error.
-    """
-    if df is None or df.empty or shock_amount <= 0:
-        return df
-
-    missing_vals = [c for c in value_cols if c not in df.columns]
-    if missing_vals:
-        raise KeyError(
-            f"Baseline dataframe missing expected columns {missing_vals}. "
-            f"Found columns: {df.columns.tolist()}"
-        )
-
-    df2 = df.copy()
-    start_idx = max(int(shock_week) - 1, 0)
-
-    for col in value_cols:
-        vals = df2[col].tolist()
-        df2[col] = [
-            float(v) - float(shock_amount) if i >= start_idx else float(v)
-            for i, v in enumerate(vals)
-        ]
-    return df2
 
 # -----------------------
 # Session state defaults
@@ -557,19 +520,11 @@ if st.button("Generate baseline trajectory", key="generate_baseline_btn"):
         int(weeks),
     ).round(2)
 
-    # ✅ Robustness: baseline must be a DataFrame with Week + Balance
-    if not isinstance(baseline_raw, pd.DataFrame):
-        st.error(f"generate_baseline must return a DataFrame, got: {type(baseline_raw)}")
-        st.stop()
-
-    required_cols = {"Week", "Balance"}
-    if not required_cols.issubset(set(baseline_raw.columns)):
-        st.error(
-            "Baseline output has an unexpected schema.\n\n"
-            f"Expected columns: {sorted(required_cols)}\n"
-            f"Got columns: {baseline_raw.columns.tolist()}\n\n"
-            "Fix src/baseline.py to output Week + Balance."
-        )
+    # ✅ Centralised schema validation (single source of truth)
+    try:
+        validate_baseline_df(baseline_raw)
+    except (ValueError, KeyError) as e:
+        st.error(f"Baseline output validation failed: {e}")
         st.stop()
 
     # ✅ Apply shock ONLY if enabled + amount > 0
@@ -578,7 +533,6 @@ if st.button("Generate baseline trajectory", key="generate_baseline_btn"):
             baseline_raw,
             shock_amount=float(st.session_state["shock_amount"]),
             shock_week=int(st.session_state["shock_week"]),
-            week_col="Week",
             value_cols=("Balance",),
         )
         st.session_state["baseline_df"] = baseline_adj
@@ -680,61 +634,6 @@ if delta_a > disc:
 if delta_b > disc:
     st.warning("Scenario B exceeds your current discretionary spending. Discretionary will be clamped to £0 in some runs.")
 
-def run_scenario_and_build_df(delta_savings: float, seed_offset: int = 0):
-    income_eff = float(st.session_state["income_w"])
-    fixed_eff = float(st.session_state["fixed_total_w"])
-    disc_eff = float(st.session_state["discretionary_w"])
-
-    mean, lower, upper = simulate_scenario(
-        income=income_eff,
-        fixed_expenses=fixed_eff,
-        variable_expenses=disc_eff,
-        delta_savings=float(delta_savings),
-        weeks=int(weeks),
-        iterations=int(iterations),
-        seed=int(seed) + int(seed_offset),
-        variability_frac=float(variability_frac),
-    )
-
-    # ✅ Apply the one-off shock to scenario bands ONLY if enabled + amount > 0
-    if st.session_state.get("shock_enabled", False) and float(st.session_state.get("shock_amount", 0.0)) > 0:
-        shock_amount_eff = float(st.session_state["shock_amount"])
-        shock_week_eff = int(st.session_state["shock_week"])
-
-        mean  = apply_one_off_shock_to_series(mean,  shock_amount_eff, shock_week_eff)
-        lower = apply_one_off_shock_to_series(lower, shock_amount_eff, shock_week_eff)
-        upper = apply_one_off_shock_to_series(upper, shock_amount_eff, shock_week_eff)
-    else:
-        shock_amount_eff = 0.0
-        shock_week_eff = 1
-
-    scenario_df = pd.DataFrame(
-        {
-            "Week": range(1, int(weeks) + 1),
-            "Mean balance": mean,
-            "Lower bound": lower,
-            "Upper bound": upper,
-        }
-    ).round(2)
-
-    params = {
-        "delta_savings": float(delta_savings),
-        "iterations": int(iterations),
-        "variability_pct": int(variability_pct),
-        "variability_frac": float(variability_frac),
-        "seed": int(seed) + int(seed_offset),
-        "weeks": int(weeks),
-        "preset": str(st.session_state["preset_name"]),
-        "income_w": float(income_eff),
-        "fixed_total_w": float(fixed_eff),
-        "discretionary_w": float(disc_eff),
-        "shock_enabled": bool(st.session_state.get("shock_enabled", False)),
-        "shock_amount": float(shock_amount_eff),
-        "shock_week": int(shock_week_eff),
-    }
-
-    return scenario_df, params
-
 # -----------------------
 # Save / Clear + persistent messages
 # -----------------------
@@ -758,8 +657,25 @@ with b1:
         elif not st.session_state.get("baseline_ready", False) or st.session_state.get("baseline_signature") != make_baseline_signature():
             st.error("Baseline exists but is out of date. Re-generate baseline before saving scenarios.")
         else:
-            df_a, params_a = run_scenario_and_build_df(delta_savings=delta_a, seed_offset=0)
-            st.session_state["scenario_a"] = {"df": df_a, "params": params_a}
+            df_a, params_a = simulate_scenario_df_with_seed_offset(
+                income=float(st.session_state["income_w"]),
+                fixed_expenses=float(st.session_state["fixed_total_w"]),
+                variable_expenses=float(st.session_state["discretionary_w"]),
+                delta_savings=float(delta_a),
+                weeks=int(weeks),
+                iterations=int(iterations),
+                seed=int(seed),
+                seed_offset=0,
+                variability_frac=float(variability_frac),
+                shock_enabled=bool(st.session_state.get("shock_enabled", False)),
+                shock_amount=float(st.session_state.get("shock_amount", 0.0)),
+                shock_week=int(st.session_state.get("shock_week", 1)),
+            )
+            # Add UI traceability fields
+            params_a["preset"] = str(st.session_state["preset_name"])
+            params_a["variability_pct"] = int(variability_pct)
+
+            st.session_state["scenario_a"] = {"df": df_a.round(2), "params": params_a}
             st.session_state["saved_a_msg"] = True
     if st.session_state.get("saved_a_msg", False):
         saved_badge("Scenario A saved.")
@@ -773,8 +689,25 @@ with b2:
         elif not st.session_state.get("baseline_ready", False) or st.session_state.get("baseline_signature") != make_baseline_signature():
             st.error("Baseline exists but is out of date. Re-generate baseline before saving scenarios.")
         else:
-            df_b, params_b = run_scenario_and_build_df(delta_savings=delta_b, seed_offset=1)
-            st.session_state["scenario_b"] = {"df": df_b, "params": params_b}
+            df_b, params_b = simulate_scenario_df_with_seed_offset(
+                income=float(st.session_state["income_w"]),
+                fixed_expenses=float(st.session_state["fixed_total_w"]),
+                variable_expenses=float(st.session_state["discretionary_w"]),
+                delta_savings=float(delta_b),
+                weeks=int(weeks),
+                iterations=int(iterations),
+                seed=int(seed),
+                seed_offset=1,
+                variability_frac=float(variability_frac),
+                shock_enabled=bool(st.session_state.get("shock_enabled", False)),
+                shock_amount=float(st.session_state.get("shock_amount", 0.0)),
+                shock_week=int(st.session_state.get("shock_week", 1)),
+            )
+            # Add UI traceability fields
+            params_b["preset"] = str(st.session_state["preset_name"])
+            params_b["variability_pct"] = int(variability_pct)
+
+            st.session_state["scenario_b"] = {"df": df_b.round(2), "params": params_b}
             st.session_state["saved_b_msg"] = True
     if st.session_state.get("saved_b_msg", False):
         saved_badge("Scenario B saved.")
@@ -809,32 +742,41 @@ def assert_cols(df: pd.DataFrame, required: set, name: str):
         st.stop()
 
 # --- Guardrails: order of operations ---
+ready_for_compare = True
+
 if baseline_df is None:
     st.info("Generate the baseline trajectory in Step 2 to enable comparison.")
+    ready_for_compare = False
 elif not st.session_state.get("baseline_ready", False) or st.session_state.get("baseline_signature") != make_baseline_signature():
     st.warning("Baseline exists but inputs have changed. Re-generate baseline in Step 2 to update comparison.")
+    ready_for_compare = False
 elif scenario_a is None or scenario_b is None:
     st.info("Save both Scenario A and Scenario B to compare.")
-else:
+    ready_for_compare = False
+
+df_a = None
+df_b = None
+
+if ready_for_compare:
     # --- Pull scenario dataframes ---
     df_a = scenario_a.get("df")
     df_b = scenario_b.get("df")
 
     # --- Validate expected schemas ---
     assert_cols(baseline_df, {"Week", "Balance"}, "Baseline dataframe")
-    assert_cols(df_a, {"Week", "Mean balance", "Lower bound", "Upper bound"}, "Scenario A dataframe")
-    assert_cols(df_b, {"Week", "Mean balance", "Lower bound", "Upper bound"}, "Scenario B dataframe")
+    assert_cols(df_a, {"Week", "Mean", "Lower", "Upper"}, "Scenario A dataframe")
+    assert_cols(df_b, {"Week", "Mean", "Lower", "Upper"}, "Scenario B dataframe")
 
     # --- Plot ---
     fig, ax = plt.subplots()
 
     ax.plot(baseline_df["Week"], baseline_df["Balance"], label="Baseline (no change)", linestyle="--")
 
-    ax.plot(df_a["Week"], df_a["Mean balance"], label="Scenario A (mean)")
-    ax.fill_between(df_a["Week"], df_a["Lower bound"], df_a["Upper bound"], alpha=0.2, label="A band (10–90%)")
+    ax.plot(df_a["Week"], df_a["Mean"], label="Scenario A (mean)")
+    ax.fill_between(df_a["Week"], df_a["Lower"], df_a["Upper"], alpha=0.2, label="A band (10–90%)")
 
-    ax.plot(df_b["Week"], df_b["Mean balance"], label="Scenario B (mean)")
-    ax.fill_between(df_b["Week"], df_b["Lower bound"], df_b["Upper bound"], alpha=0.2, label="B band (10–90%)")
+    ax.plot(df_b["Week"], df_b["Mean"], label="Scenario B (mean)")
+    ax.fill_between(df_b["Week"], df_b["Lower"], df_b["Upper"], alpha=0.2, label="B band (10–90%)")
 
     ax.set_xlabel("Week")
     ax.set_ylabel("Balance (£)")
@@ -844,9 +786,9 @@ else:
 
     # --- Summary stats ---
     def final_stats(df):
-        final_mean = float(df["Mean balance"].iloc[-1])
-        final_low  = float(df["Lower bound"].iloc[-1])
-        final_up   = float(df["Upper bound"].iloc[-1])
+        final_mean = float(df["Mean"].iloc[-1])
+        final_low  = float(df["Lower"].iloc[-1])
+        final_up   = float(df["Upper"].iloc[-1])
         return final_mean, final_low, final_up
 
     base_final = float(baseline_df["Balance"].iloc[-1])
@@ -871,164 +813,106 @@ st.divider()
 st.subheader("Step 4 — Reflect on impact")
 st.caption("Plain-English summary: what your weekly change could mean for your money.")
 
-# --- helpers ---
-def fmt_gbp(x: float) -> str:
-    return f"£{x:,.0f}"
-
-def pct_change(new: float, base: float) -> float:
-    if base == 0:
-        return 0.0
-    return ((new - base) / base) * 100.0
-
-def band_width_start_end(df):
-    w0 = float(df["Upper bound"].iloc[0] - df["Lower bound"].iloc[0])
-    w1 = float(df["Upper bound"].iloc[-1] - df["Lower bound"].iloc[-1])
-    return w0, w1
-
-# --- uncertainty widths (for optional tech + a tiny human note) ---
-width_a_start, width_a_end = band_width_start_end(df_a)
-width_b_start, width_b_end = band_width_start_end(df_b)
-
-params_a = scenario_a.get("params", {})
-
-# --- key numbers (human) ---
-weeks_n = int(st.session_state["weeks"])
-delta_a_w = float(scenario_a["params"]["delta_savings"])
-delta_b_w = float(scenario_b["params"]["delta_savings"])
-
-a_gain = float(a_mean - base_final)
-b_gain = float(b_mean - base_final)
-gap_ab = float(b_mean - a_mean)
-
-a_pct = pct_change(float(a_mean), float(base_final))
-b_pct = pct_change(float(b_mean), float(base_final))
-
-winner = "Scenario A" if a_mean > b_mean else "Scenario B" if b_mean > a_mean else "Tie"
-safer = "Scenario A" if a_low > b_low else "Scenario B" if b_low > a_low else "Tie"
-
-# --- 1) Human-first summary ---
-st.markdown("### What you get if you follow each plan")
-
-st.markdown(
-    f"- If you **change nothing**, you end around **{fmt_gbp(base_final)}** after **{weeks_n} weeks**."
-)
-
-st.markdown(
-    f"- **Scenario A**: spend **{fmt_gbp(delta_a_w)}/week less** → end around **{fmt_gbp(a_mean)}** "
-    f"(≈ **{fmt_gbp(a_gain)} more** than baseline, **{a_pct:.1f}%**)."
-)
-
-st.markdown(
-    f"- **Scenario B**: spend **{fmt_gbp(delta_b_w)}/week less** → end around **{fmt_gbp(b_mean)}** "
-    f"(≈ **{fmt_gbp(b_gain)} more** than baseline, **{b_pct:.1f}%**)."
-)
-
-# Direct answer to “which one is better?”
-st.markdown("### Which one should you pick?")
-
-if winner == "Tie":
-    st.info(
-        "Both scenarios are very close on the expected outcome. "
-        "Pick the one that feels easier to stick to every week."
-    )
+if not ready_for_compare:
+    st.info("Complete Step 3 (baseline + saved Scenario A and B) to see the reflection summary.")
 else:
-    # winner text
-    if winner == "Scenario A":
-        st.success(
-            f"On average, **Scenario A** leaves you with more money. "
-            f"The gap vs Scenario B is about **{fmt_gbp(abs(gap_ab))}**."
-        )
+    # Pull final numbers (UI/orchestration only)
+    params_a = scenario_a.get("params", {})
+
+    base_final = float(baseline_df["Balance"].iloc[-1])
+
+    a_mean = float(df_a["Mean"].iloc[-1])
+    a_low  = float(df_a["Lower"].iloc[-1])
+    a_up   = float(df_a["Upper"].iloc[-1])
+
+    b_mean = float(df_b["Mean"].iloc[-1])
+    b_low  = float(df_b["Lower"].iloc[-1])
+    b_up   = float(df_b["Upper"].iloc[-1])
+
+    delta_a_w = float(scenario_a["params"]["delta_savings"])
+    delta_b_w = float(scenario_b["params"]["delta_savings"])
+    weeks_n   = int(st.session_state["weeks"])
+
+    # Centralised Step 4 computation + copy
+    metrics = compute_reflection_metrics(
+        weeks=weeks_n,
+        base_final=base_final,
+        a_mean=a_mean, a_low=a_low, a_high=a_up,
+        b_mean=b_mean, b_low=b_low, b_high=b_up,
+        delta_a_weekly=delta_a_w,
+        delta_b_weekly=delta_b_w,
+    )
+
+    text = build_human_reflection_text(
+        metrics,
+        shock_enabled=bool(st.session_state.get("shock_enabled", False)),
+        shock_amount=float(st.session_state.get("shock_amount", 0.0)),
+        shock_week=int(st.session_state.get("shock_week", 1)),
+    )
+
+    # --- 1) Human-first summary ---
+    st.markdown("### What you get if you follow each plan")
+    st.markdown(text["what_you_get"])
+
+    st.markdown("### Which one should you pick?")
+    if metrics.winner == "Tie":
+        st.info(text["pick_primary"])
     else:
-        st.success(
-            f"On average, **Scenario B** leaves you with more money. "
-            f"The gap vs Scenario A is about **{fmt_gbp(abs(gap_ab))}**."
+        st.success(text["pick_primary"])
+        if text["pick_secondary"]:
+            st.warning(text["pick_secondary"])
+
+    # --- 2) Shock note ---
+    if text["shock_note"]:
+        st.info(text["shock_note"])
+
+    # --- 3) Variability note ---
+    st.markdown(text["variability"])
+
+    # --- 4) Technical details hidden (for you / marking) ---
+    exp_inputs = ExplanationInputs(
+        income=float(st.session_state["income_w"]),
+        fixed_expenses=float(st.session_state["fixed_total_w"]),
+        variable_expenses=float(st.session_state["discretionary_w"]),
+        weeks=int(st.session_state["weeks"]),
+        delta_a=float(scenario_a["params"]["delta_savings"]),
+        delta_b=float(scenario_b["params"]["delta_savings"]),
+        variability_pct=float(params_a.get("variability_pct", 0)),
+        seed=int(params_a.get("seed", st.session_state.get("seed", 0))),
+        iters=int(params_a.get("iterations", 0)),
+    )
+
+    explanation_text = build_explanation(
+        base_final=base_final,
+        a_final_mean=a_mean,
+        a_final_low=a_low,
+        a_final_high=a_up,
+        b_final_mean=b_mean,
+        b_final_low=b_low,
+        b_final_high=b_up,
+        inputs=exp_inputs,
+    )
+
+    shock_note = ""
+    if st.session_state.get("shock_enabled", False) and float(st.session_state.get("shock_amount", 0.0)) > 0:
+        shock_amount = float(st.session_state["shock_amount"])
+        shock_week = int(st.session_state["shock_week"])
+        shock_note = (
+            f"\n\n**One-off event applied:** £{shock_amount:,.2f} at week {shock_week} "
+            f"(reduces balance from that week onward)."
         )
 
-    # safety / worst-case cue (still simple)
-    if safer != "Tie" and safer != winner:
-        st.warning(
-            f"However, the **safer worst-case** (lower-bound) looks like **{safer}**. "
-            "So one option wins on average, but the other is slightly more resilient in a bad draw."
-        )
+    preset_name = str(params_a.get("preset", st.session_state.get("preset_name", "Preset")))
+    iters = int(params_a.get("iterations", 0))
+    var_pct = int(params_a.get("variability_pct", 0))
 
-# --- 2) Shock note (human) ---
-if st.session_state.get("shock_enabled", False) and float(st.session_state.get("shock_amount", 0.0)) > 0:
-    shock_amount = float(st.session_state["shock_amount"])
-    shock_week = int(st.session_state["shock_week"])
-    st.info(
-        f"One-off event included: **{fmt_gbp(shock_amount)}** happens in **week {shock_week}** "
-        f"(it reduces the balance from that week onward)."
+    fairness_note = (
+        "A and B use the same uncertainty preset; Scenario B uses a controlled seed offset "
+        "to keep randomness comparable."
     )
 
-# --- 3) Tiny uncertainty note (human, not nerdy) ---
-# Keep it simple: "results may vary" + optionally show ranges at the end
-st.markdown("### Results can vary (because real weeks aren’t identical)")
-
-st.markdown(
-    f"- Scenario A likely ends somewhere around **{fmt_gbp(a_low)} to {fmt_gbp(a_up)}**.\n"
-    f"- Scenario B likely ends somewhere around **{fmt_gbp(b_low)} to {fmt_gbp(b_up)}**."
-)
-
-# --- 4) Technical details hidden (for you / marking) ---
-# Build explanation text as before, but do not force user to read it.
-exp_inputs = ExplanationInputs(
-    income=float(st.session_state["income_w"]),
-    fixed_expenses=float(st.session_state["fixed_total_w"]),
-    variable_expenses=float(st.session_state["discretionary_w"]),
-    weeks=int(st.session_state["weeks"]),
-    delta_a=float(scenario_a["params"]["delta_savings"]),
-    delta_b=float(scenario_b["params"]["delta_savings"]),
-    variability_pct=float(params_a.get("variability_pct", 0)),
-    seed=int(params_a.get("seed", st.session_state.get("seed", 0))),
-    iters=int(params_a.get("iterations", 0)),
-)
-
-explanation_text = build_explanation(
-    base_final=base_final,
-    a_final_mean=a_mean,
-    a_final_low=a_low,
-    a_final_high=a_up,
-    b_final_mean=b_mean,
-    b_final_low=b_low,
-    b_final_high=b_up,
-    inputs=exp_inputs,
-)
-
-shock_note = ""
-if st.session_state.get("shock_enabled", False) and float(st.session_state.get("shock_amount", 0.0)) > 0:
-    shock_amount = float(st.session_state["shock_amount"])
-    shock_week = int(st.session_state["shock_week"])
-    shock_note = (
-        f"\n\n**One-off event applied:** £{shock_amount:,.2f} at week {shock_week} "
-        f"(reduces balance from that week onward)."
-    )
-
-preset_name = str(params_a.get("preset", st.session_state.get("preset_name", "Preset")))
-iters = int(params_a.get("iterations", 0))
-var_pct = int(params_a.get("variability_pct", 0))
-
-widens_a = (width_a_end - width_a_start) > 0
-widens_b = (width_b_end - width_b_start) > 0
-
-if widens_a or widens_b:
-    extra_insight = (
-        f"Uncertainty band widens over time (A: £{width_a_start:,.2f} → £{width_a_end:,.2f}; "
-        f"B: £{width_b_start:,.2f} → £{width_b_end:,.2f}) under preset **{preset_name}** "
-        f"({iters} sims, {var_pct}% variability)."
-    )
-else:
-    extra_insight = (
-        f"Uncertainty does not widen noticeably under preset **{preset_name}** "
-        f"({iters} sims, {var_pct}% variability)."
-    )
-
-fairness_note = (
-    "A and B use the same uncertainty preset; Scenario B uses a controlled seed offset "
-    "to keep randomness comparable."
-)
-
-with st.expander("Technical details (optional)"):
-    st.markdown("### Model explanation (technical)")
-    st.markdown(explanation_text + shock_note)
-    st.markdown("**Additional insight:** " + extra_insight)
-    st.caption(fairness_note)
+    with st.expander("Technical details (optional)"):
+        st.markdown("### Model explanation (technical)")
+        st.markdown(explanation_text + shock_note)
+        st.caption(f"Preset: **{preset_name}** ({iters} sims, {var_pct}% variability).")
+        st.caption(fairness_note)

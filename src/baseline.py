@@ -1,5 +1,28 @@
 # src/baseline.py
+"""
+Baseline (deterministic) module.
+
+Option A chosen:
+- Validation lives in app.py (Streamlit-friendly try/except + st.error)
+- baseline.py still provides validate_baseline_df() as the single schema rule
+"""
+
+from __future__ import annotations
 import pandas as pd
+
+
+def validate_baseline_df(df: pd.DataFrame) -> None:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        raise ValueError("Baseline output is missing or empty.")
+
+    required = {"Week", "Balance"}
+    missing = required - set(df.columns)
+    if missing:
+        raise KeyError(
+            f"Baseline dataframe missing columns: {sorted(missing)}. "
+            f"Found columns: {df.columns.tolist()}. "
+            "Fix generate_baseline to output at least Week + Balance."
+        )
 
 
 def generate_baseline(
@@ -8,29 +31,23 @@ def generate_baseline(
     variable_expenses: float,
     weeks: int = 12,
 ) -> pd.DataFrame:
-    """
-    Deterministic baseline projection (weekly).
+    if int(weeks) <= 0:
+        raise ValueError(f"weeks must be positive, got {weeks}")
 
-    Computes:
-    - Weekly Savings = income - fixed_expenses - variable_expenses
-    - Balance = cumulative sum of weekly savings across the horizon
-
-    Returns a DataFrame with:
-    Week, Weekly Savings, Balance
-    """
-    weekly_savings = income - fixed_expenses - variable_expenses
+    weekly_savings = float(income) - float(fixed_expenses) - float(variable_expenses)
 
     data = []
     balance = 0.0
 
-    for week in range(1, weeks + 1):
+    for week in range(1, int(weeks) + 1):
         balance += weekly_savings
         data.append(
             {
-                "Week": week,
-                "Weekly Savings": round(weekly_savings, 2),
-                "Balance": round(balance, 2),
+                "Week": int(week),
+                "Weekly Savings": round(float(weekly_savings), 2),
+                "Balance": round(float(balance), 2),
             }
         )
 
+    # ✅ No validation here (app.py handles validation + user-facing errors)
     return pd.DataFrame(data)
