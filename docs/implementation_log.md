@@ -349,3 +349,293 @@ Reflect on the impact of temporal resolution (monthly vs weekly) as a design dec
 - Weekly-based UI, simulation, and explanation layer.
 - Reflected in Evaluation and Technical Portfolio documentation.
 
+### 04-02-2026 — UX Refinement: Baseline table cleanup, user-friendly uncertainty controls, and persistent scenario save feedback
+
+**Goal:**  
+Reduce confusion for non-technical users and improve interaction clarity in the scenario workflow, while keeping outputs reproducible and comparisons consistent.
+
+**Work done:**  
+- **Baseline table cleanup:** Hid the implicit DataFrame index column in the baseline projection table to avoid confusing users with an extra unlabeled column.  
+- **User-friendly uncertainty controls:** Replaced technical parameters (Monte Carlo iterations, spending variability %, random seed) with:
+  - A **Preset selector** (one-click configurations aligned to conceptual settings),
+  - Two **conceptual controls**:
+    - **Expense predictability** (Stable / Typical / Chaotic) → mapped to spending variability (%),
+    - **Result detail** (Fast / Balanced / High confidence) → mapped to number of simulation iterations,
+  - A **“Try another random run”** button that increments an internal random seed, enabling controlled re-draws without exposing technical jargon.
+- **Preset–concept alignment:** Redefined presets so they are **fully consistent** with the two conceptual controls, ensuring no hidden or contradictory parameter values.
+- **Scenario workflow stability:** Preserved explicit **Save Scenario A/B** actions and stored scenarios in `st.session_state` to prevent unintended recomputation caused by Streamlit reruns.
+- **Persistent save feedback (new):** Implemented **two independent green success messages** (“Scenario A saved” and “Scenario B saved”) that remain visible after saving and **do not overwrite each other**. Messages are cleared only when the user presses **Clear A/B** (and when regenerating the baseline to avoid inconsistent state carry-over).
+- **Widget stability:** Added explicit widget keys where required to reduce UI state collisions during Streamlit reruns.
+
+**Issues encountered:**  
+- Streamlit reruns caused transient success messages to disappear when interacting with other controls (e.g., saving Scenario B removed Scenario A’s message).
+- Non-technical users struggled with simulation jargon and misinterpreted “random seed” as a parameter they needed to understand or manually adjust.
+
+**Decisions / Fix:**  
+- Prioritised **conceptual mental models** over technical exposure: users interact with predictability and result detail rather than raw Monte Carlo parameters.
+- Kept randomness **reproducible by default** via a fixed internal seed, while providing an explicit re-draw action for exploratory analysis.
+- Chose **persistent, state-driven feedback** over ephemeral notifications to support a clearer and more reassuring scenario-saving workflow.
+
+**Evidence:**  
+- Updated Streamlit UI showing presets, conceptual controls, and re-draw functionality, with technical parameters mapped internally.
+- Saving Scenario A and Scenario B produces persistent green confirmation messages until **Clear A/B** is pressed.
+- Changes implemented primarily in `app.py`, including session state flags, preset–control mapping, and persistent banner logic.
+
+
+### 04-02-2026 — UX Refinement: Preset-driven controls, Advanced Options expander, and persistent scenario save feedback
+
+**Goal:**  
+Improve Step 2 usability and conceptual clarity by hiding technical jargon behind presets and an optional “Advanced options” section, while keeping scenarios reproducible and the save workflow reassuring.
+
+**Work done:**  
+- **Preset-driven conceptual controls (auto-sync):**  
+  - Implemented a preset selector where choosing a preset automatically updates the conceptual radio controls:  
+    - **How predictable are your weekly expenses?** (Stable / Typical / Chaotic)  
+    - **Result detail** (Fast / Balanced / High confidence)  
+  - Achieved via `st.session_state` widget-key control + `on_change` callback to directly set radio values.
+
+- **Advanced Options (collapsible expander):**  
+  - Added a hideable section using `st.expander("Advanced options")` (the “>” style control).  
+  - Placed the **conceptual radios at the top of the expander** (as requested) so users see the mental model first, then the technical controls.
+
+- **Technical sliders restored (but optional):**  
+  - Reintroduced the previously-removed technical parameters inside Advanced Options:  
+    - **Monte Carlo simulations (iterations)**  
+    - **Weekly spending variability (%)**  
+    - **Random seed**  
+  - Added an “Enable technical overrides” checkbox so these controls only override behaviour when explicitly enabled.
+  - When overrides are disabled, sliders stay **synchronised** with the conceptual controls (coherence by default).
+
+- **Randomness UX maintained:**  
+  - Kept “Try another random run” (seed increment) for controlled redraws, while preserving reproducibility for A vs B comparisons.  
+  - Ensured advanced seed remains aligned unless overrides are enabled.
+
+- **Persistent Save feedback (green banners):**  
+  - Implemented two independent success messages (“Scenario A saved.” / “Scenario B saved.”) stored in `st.session_state`.  
+  - Messages **do not overwrite each other** and remain visible until the user presses **Clear A/B**, which clears both banners and both saved scenarios.
+
+- **Traceability improvements:**  
+  - Stored extra metadata inside scenario params (preset name, conceptual selections, advanced override flag) for easier examiner traceability and debugging.
+
+**Issues encountered:**  
+- Preset selection did not automatically update the radio widgets due to Streamlit rerun/state behaviour.  
+- Technical controls created coherence risk (users could unknowingly diverge from the conceptual model).  
+- Success banners were ephemeral and disappeared after subsequent interactions.
+
+**Decisions / Fix:**  
+- Used widget-key–driven state (`predictability_radio`, `detail_radio`) and a preset `on_change` callback to guarantee automatic radio updates.  
+- Made advanced controls opt-in via “Enable technical overrides” to prevent silent contradictions with the conceptual model.  
+- Chose persistent, state-driven success banners cleared only by **Clear A/B** to support a stable and reassuring scenario workflow.
+
+**Evidence:**  
+- Step 2 shows presets + randomness button, with Advanced Options collapsible section containing conceptual radios and optional technical sliders.  
+- Selecting a preset auto-selects the correct radio options.  
+- Saving A and B produces two persistent green success messages that only disappear after pressing Clear A/B.  
+- Primary changes in `app.py` (session state flags, preset callbacks, expander + override logic).
+
+### 04-02-2026 — UX Refinement: Persistent scenario save feedback and Clear A/B behaviour
+
+**Goal:**  
+Improve clarity and consistency of the scenario-saving workflow by providing stable, non-intrusive feedback that reflects the actual state of saved scenarios.
+
+**Work done:**  
+- Refactored Scenario A/B save feedback to use **persistent, state-driven visual badges** instead of transient Streamlit messages.
+- Implemented **per-scenario confirmation badges** (“Scenario A saved”, “Scenario B saved”) displayed:
+  - Directly **under each corresponding Save button**,
+  - With **full column width**, visually aligned with the buttons.
+- Ensured that saving one scenario **does not overwrite or remove** the confirmation message of the other.
+- Introduced a dedicated **Clear A/B callback** that:
+  - Clears both stored scenarios from `st.session_state`,
+  - Explicitly resets both save confirmation flags,
+  - Guarantees that all green confirmation messages disappear **in the same interaction**.
+- Added an optional, non-persistent **“Scenario A and B cleared”** informational message to confirm reset action without cluttering the interface.
+
+**Issues encountered:**  
+- Streamlit’s rerun behaviour caused success messages to reappear or stack inconsistently across interactions.
+- Default `st.success()` messages were unsuitable for persistent, per-button feedback.
+- Clearing scenarios did not reliably remove previously rendered confirmation messages.
+
+**Decisions / Fix:**  
+- Replaced ephemeral Streamlit alerts with **custom HTML badges** rendered conditionally from `st.session_state`.
+- Centralised scenario clearing logic in a single `clear_ab()` callback to ensure atomic state reset.
+- Treated save confirmations as **state indicators**, not notifications, aligning UI feedback with actual system state.
+- Prioritised visual consistency and spatial proximity (message appears directly under the triggering control).
+
+**Evidence:**  
+- Streamlit UI shows stable “Scenario A saved” and “Scenario B saved” badges that persist across reruns.
+- Pressing **Clear A/B** removes both badges immediately and clears stored scenarios.
+- Changes implemented in `app.py` within the Scenario Save / Clear section.
+- Commit: `feat: persistent per-scenario save feedback and reliable Clear A/B reset`
+
+### 04-02-2026 — UX Refinement: Step 1 clarity (framing + numeric legend labels + scale note without extra charts)
+
+**Goal:**  
+Increase interpretability of Step 1 (“current position”) without contaminating it with projection meaning, while making the allocation output more readable and self-explanatory.
+
+**Work done:**  
+- **Framing microcopy (2 lines):** Added a short caption to explicitly state that Step 1 captures the current situation and that **no savings / behavioural changes** are applied yet.  
+- **Clean CTA (no pressure):** Added a simple transition line at the end of Step 1 (“Next: explore what happens if you change something (Step 2)”) to guide progression without persuasion or gamification.  
+- **Numeric labels in the stacked bar legend:** Updated legend labels to include **weekly amounts** alongside category names (e.g., “Fixed essential (£185/w)”), improving immediate readability without introducing additional tables or projections.  
+- **Scale clarification without duplicate charts:** Rejected monthly/yearly duplicate allocation charts (same proportions, redundant visuals). Instead, added a **structured note** that provides monthly and yearly numeric equivalents while keeping Step 1 visually minimal.  
+- **Structured presentation for clarity:** Rendered the scale note using an indented bullet layout (Markdown lists) to reduce visual chaos and improve scanability.
+
+**Issues encountered:**  
+- The stacked bar alone communicated proportions well, but users still needed quick access to **actual numeric values** per category.  
+- Adding monthly/yearly charts would create redundant visuals and increase cognitive load without adding new insight (same proportional structure).
+
+**Decisions / Fix:**  
+- Kept Step 1 deliberately “diagnostic” and non-temporal; avoided projections, tables, or timelines in this stage.  
+- Chose **legend numbers + a short structured scale note** as the most defensible solution: it increases clarity while preserving Step 1’s conceptual boundary.  
+- Used Markdown (not caption-only text) to support clean indentation and a more “report-like” structure.
+
+**Evidence:**  
+- Step 1 now displays:  
+  - Input fields → stacked allocation bar → legend with £/w values → structured monthly/yearly equivalents → CTA to Step 2.  
+- Implementation updated in `app.py` (Step 1 section): legend label formatting, scale note generation, and microcopy/CTA additions.
+
+### 05-02-2026 — UX + State Robustness: Step 1 progressive disclosure, safer ordering, and human-first Step 4
+
+**Goal:**  
+Reduce “dashboard noise” on launch, prevent confusing out-of-order states, and make the interpretation layer genuinely readable (decision-support, not technical narration).
+
+**Work done:**  
+- **Step 1 progressive disclosure (launch cleanliness):**  
+  - Moved the **allocation chart + “Note on scale”** into a collapsible **expander** so the app opens like a cleaner “landing page” instead of a full dashboard.  
+  - Renamed the expander label to a more human microcopy option (e.g., **“See breakdown and equivalents”** / **“Show detailed breakdown”**).
+
+- **Workflow stability / order-of-operations guardrails:**  
+  - Strengthened Step 3–4 gating so **comparison + explainability only render when prerequisites exist** (baseline up-to-date + both scenarios saved).  
+  - Added lightweight schema checks and “baseline out of date” warnings to avoid errors when users click buttons in the “wrong” order.
+
+- **Step 4 rewrite (human-first interpretation):**  
+  - Replaced technical narrative (“uncertainty widens”, “seed offsets”, Monte Carlo jargon) with plain-English statements like:  
+    - “If you spend £X/week less, you end with about £Y more after Z weeks.”  
+  - Kept technical details (seed, iterations, variability, band widening) inside a **collapsed expander** for assessment traceability without forcing it onto users.
+
+**Issues encountered:**  
+- **Streamlit rerun/state behaviour** caused confusing intermediate states and warnings when users interacted out of sequence.  
+- Step 4 text was “technically correct” but **not interpretable** for non-technical users, undermining the purpose of a decision-support tool.  
+- Step 1 displayed chart + scale notes immediately on load, creating **visual clutter** before the user had context.
+
+**Decisions / Fix:**  
+- Prioritised **progressive disclosure**: show essential inputs first, hide detail until requested.  
+- Treated Step 4 as **product output**, not developer commentary: user sees decisions and consequences; technical explanation becomes optional evidence.  
+- Enforced prerequisite checks to keep the interface stable under reruns and to reduce user confusion during exploration.
+
+**Evidence:**  
+- Step 1 launches cleanly; allocation breakdown is available via expander (“See breakdown and equivalents”).  
+- Step 3–4 no longer throw confusing states when used out of order; warnings guide the user to regenerate baseline or save missing scenarios.  
+- Step 4 displays a short, human-readable summary; technical details are accessible only via an optional expander.
+
+- Commits (suggested labels):  
+  - `feat: progressive disclosure for Step 1 breakdown + scale note`  
+  - `fix: enforce Step 3/4 prerequisites + schema guardrails`  
+  - `refactor: rewrite Step 4 interpretation to human-first + hide technical details`
+
+### 05-02-2026 — Refactor + Modularisation: Step 4 explainability moved into `src/explain.py`
+
+**Goal:**  
+Reduce complexity in `app.py` by extracting Step 4 (“Reflect on impact”) into a dedicated explainability module, while keeping the Streamlit UI human-first and the technical rationale available for assessment traceability.
+
+**Work done:**  
+- **Modularised Step 4 explainability:**  
+  - Introduced / expanded `src/explain.py` to hold all reasoning logic and explanation text generation.  
+  - Added an `ExplanationInputs` dataclass to capture the full assumption context (income, expenses, weeks, deltas, variability, seed, iterations).  
+- **Moved computation out of UI layer:**  
+  - Removed Step 4 helper functions from `app.py` (e.g., currency formatting, percentage change, band-width calculations, winner/safer logic).  
+  - Centralised comparison metrics (baseline vs A vs B) and uncertainty reasoning inside `build_explanation()`.  
+- **Improved traceability and consistency:**  
+  - Ensured the explanation explicitly references the actual scenario assumptions (A saves £X/week vs B saves £Y/week).  
+  - Included uncertainty-band interpretation based on the 10–90% ranges at the final week.  
+- **Streamlit integration preserved:**  
+  - `app.py` now only prepares inputs + final-week values and calls `build_explanation()` to render explanation output.  
+  - Kept the human-first narrative in the main Step 4 text, with technical explanation placed under a collapsible expander.
+
+**Issues encountered:**  
+- Step 4 had become the largest and most cluttered block in `app.py`, mixing UI rendering with business logic and increasing maintenance risk.  
+- Early explanation variants risked drifting from true simulation parameters if assumptions were not passed explicitly.
+
+**Decisions / Fix:**  
+- Enforced a clean separation of concerns: **`app.py` orchestrates UI and state; `src/explain.py` owns explanation logic**.  
+- Used a structured dataclass (`ExplanationInputs`) to prevent missing/implicit assumptions and guarantee reproducibility/traceability.  
+- Accepted a small amount of duplication in displayed text (human summary + technical expander) to satisfy both usability and marking requirements.
+
+**Evidence:**  
+- `src/explain.py` contains the explanation engine (`ExplanationInputs`, `build_explanation()` plus internal helper functions).  
+- `app.py` Step 4 is visibly shorter and now delegates reasoning to the module.  
+- UI shows a plain-English reflection summary with an optional “Technical details” expander containing the generated explanation.  
+- Suggested commit message: `refactor: move Step 4 explanation logic into src/explain.py`
+
+### 05-02-2026 — Semantics Alignment: “Savings target” vs “discretionary cut” (Compounder+ + Reflection rewrite)
+
+**Goal:**  
+Resolve a conceptual mismatch where the UI described scenario inputs as “weekly savings”, while the simulation engine actually applies the parameter as a **real reduction (cut) to the controllable spending bucket**. Update the reflection layer to explain *targets*, *existing margin coverage*, and *required discretionary cuts*.
+
+**Work done:**  
+- **Compounder+ semantics clarification (`src/compounder.py`):**  
+  - Updated the `simulate_scenario()` docstring to explicitly state that `delta_savings` is interpreted as a **REAL weekly spend reduction (“cut”)** applied to the controllable spending bucket.  
+  - Added an internal alias `delta_cut = float(delta_savings)` before simulation loops to make the model intent explicit.  
+  - Ensured the computation reads clearly: `effective_variable = variable_expenses - delta_cut + noise`, with defensive clamping at £0.
+
+- **Human-first reflection upgrade (`src/explain.py`):**  
+  - Extended `ReflectionMetrics` + `compute_reflection_metrics()` to carry explicit semantics fields:
+    - `target_a_weekly`, `target_b_weekly` (user intent)  
+    - `margin_a_weekly`, `margin_b_weekly` (covered by current surplus)  
+    - `cut_a_weekly`, `cut_b_weekly` (required discretionary reduction)  
+  - Rewrote `build_human_reflection_text()` to describe:
+    - the **weekly target**,
+    - how much is **covered by existing margin**,
+    - and whether the plan **requires a discretionary cut** (or not).
+
+- **UI orchestration (`app.py`):**  
+  - Kept scenario simulation inputs compatible (no breaking imports).  
+  - Ensured Step 4 passes targets + derived cut/margin values to the reflection layer while keeping the technical explanation available in the optional expander.
+
+**Issues encountered:**  
+- The parameter name `delta_savings` and earlier text implied “extra savings” even though the simulation operationally applies a **spend cut**.  
+- Step 4 wording could mislead users into thinking savings always require cutting spending, even when current margin already covers the target.
+
+**Decisions / Fix:**  
+- Maintained the external parameter name `delta_savings` for backwards compatibility, but **reframed its meaning** explicitly in documentation and internal naming (`delta_cut`).  
+- Treated the “savings” input as a **target** in the UX, and made the system compute whether it is:
+  - **fully covered by existing margin**, or
+  - **partly covered and requires a discretionary cut**.  
+- Prioritised alignment of **model semantics ↔ UI mental model** over adding new features.
+
+**Evidence:**  
+- `src/compounder.py` now documents and implements `delta_savings` as a “cut” with `delta_cut` aliasing.  
+- Step 4 output explicitly states “target”, “covered by margin”, and “requires cutting discretionary by £X/w” where applicable.  
+- Suggested commit: `refactor: align savings target semantics with discretionary cut + upgrade human reflection text`
+
+### 05-02-2026 — Step 2 bugfix + UI semantics: Savings target coverage vs discretionary cut (and breakdown clarity)
+
+**Goal:**  
+Fix confusing Scenario A/B behaviour when testing savings targets, and align the UI narrative with the actual simulation semantics (margin coverage first, then discretionary cuts), without changing the underlying Compounder+ model.
+
+**Work done:**  
+- Implemented a clear **savings target resolver** (`resolve_savings_target`) that splits a weekly target into:
+  - amount covered by **remaining margin** (no sacrifice),
+  - amount requiring a **discretionary cut** (behavioural change),
+  - and any **uncovered shortfall** (would require cutting essentials, disallowed in MVP).
+- Updated Step 2 to **block saving scenarios** when the target is not feasible under MVP rules (i.e., uncovered > 0).
+- Improved Step 2 breakdown display to avoid misleading output by ensuring the UI explicitly communicates:
+  - **target**, **covered by margin**, **required discretionary cut**, and **shortfall** (when present).
+- Confirmed Compounder+ semantics: the simulation parameter (`delta_savings`) is operationally a **real cut** applied to the controllable spending bucket:
+  - `effective_variable = variable_expenses - delta_savings + noise` (clamped at 0).
+
+**Issues encountered:**  
+- During testing, Scenario B appeared inconsistent: the UI could show:
+  - “Covered by margin: £150/w” and “Requires discretionary cut: £0/w”
+  - while simultaneously raising a shortfall error (e.g., “shortfall ≈ £50/w”).
+- Root cause: the breakdown did not explicitly display the **uncovered** value, so users interpreted “£0 discretionary cut” as “fully feasible”.
+
+**Decisions / Fix:**  
+- Treated the UI input as a **savings target** (user intent), but passed only the **behavioural cut** component (`from_discretionary`) into simulation to preserve correct model semantics.
+- Prioritised **breakdown transparency** over adding more controls: if discretionary available is £0, the UI must make that visible and show the shortfall explicitly.
+- Maintained MVP rule: **essentials untouched**; infeasible targets are rejected with a clear message.
+
+**Evidence:**  
+- Step 2 UI shows policy line: “remaining margin → discretionary cut (essentials untouched)”, plus per-scenario breakdown.
+- If a target exceeds (margin + discretionary), the UI flags the **shortfall** and prevents saving that scenario.
+- Behaviour validated with test case where Scenario B triggers uncovered shortfall while showing margin coverage correctly.
+

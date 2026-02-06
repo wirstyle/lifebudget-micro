@@ -1,31 +1,25 @@
-# app.py (FULL) — refactored to move scenario-building + shocks into src/compounder.py
-# ✅ Keeps the same UX features:
-# 1) shock_enabled checkbox + disabled inputs when off (clean UX / no accidental shocks)
-# 2) baseline schema validation + robust shock application (clear error if baseline output shape changes)
+# app.py (FULL)
+# ------------------------------------------------------------
+# LifeBudget Micro — main UI / orchestration layer
 #
-# Change implemented in this version:
-# - Uses validate_baseline_df() from src/baseline.py (single source of truth)
-# - Removes the duplicated manual checks (isinstance + required_cols) in app.py
-#
-# New change (this version):
-# - Step 4 logic is centralized in src/explain.py (app.py keeps UI/orchestration only)
-#
-# ✅ New conceptual change implemented here:
-# - Scenario A/B inputs represent a *savings target* (£/week), NOT a direct discretionary reduction.
-# - Coverage order (policy): remaining margin → discretionary cut
-# - Essentials are NOT adjusted automatically (MVP scope).
-# - Scenario is blocked if target > (margin + discretionary).
-# - Compounder receives ONLY the real discretionary cut (from_discretionary), not the target.
+# Key concepts:
+# - Step 1: describe current position (no behaviour change)
+# - Step 2: scenarios are SAVINGS TARGETS, not category cuts
+# - Coverage order: remaining margin → discretionary
+# - Essentials are never auto-modified (MVP scope)
+# ------------------------------------------------------------
 
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 
 from src.baseline import generate_baseline, validate_baseline_df
+
 from src.compounder import (
     simulate_scenario_df_with_seed_offset,
-    apply_one_off_shock_to_df,  # for baseline shock application
+    apply_shock_map_to_df,
 )
+
 from src.explain import (
     ExplanationInputs,
     build_explanation,
@@ -33,6 +27,18 @@ from src.explain import (
     build_human_reflection_text,
 )
 
+from src.expenses import (
+    total_weekly_from_items,
+    default_fixed_items_rows,
+    variable_essentials_weekly_total,
+    discretionary_preset_value,
+    clean_events,
+    events_to_weekly_shock_map,
+)
+
+# ------------------------------------------------------------
+# Page setup
+# ------------------------------------------------------------
 st.set_page_config(page_title="LifeBudget Micro", layout="centered")
 
 # -----------------------
@@ -40,321 +46,505 @@ st.set_page_config(page_title="LifeBudget Micro", layout="centered")
 # -----------------------
 PERIOD_TO_WEEK = {
     "Weekly": 1.0,
-    "Monthly": 12.0 / 52.0,   # approx conversion for MVP
+    "Monthly": 12.0 / 52.0,
     "Yearly": 1.0 / 52.0,
 }
 
 def to_weekly(amount: float, period: str) -> float:
     return float(amount) * float(PERIOD_TO_WEEK[period])
 
-# -----------------------
+def weekly_to_period(amount_w: float, period: str) -> float:
+    """Convert weekly -> Weekly/Monthly/Yearly (inverse of to_weekly)."""
+    if period == "Weekly":
+        return float(amount_w)
+    if period == "Monthly":
+        return float(amount_w) * (52.0 / 12.0)
+    if period == "Yearly":
+        return float(amount_w) * 52.0
+    raise ValueError(f"Unknown period: {period}")
+
+# ------------------------------------------------------------
+# Session state helper
+# ------------------------------------------------------------
+def ss(key, default):
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+def make_baseline_signature():
+    return {
+        "income_w": round(float(st.session_state["income_w"]), 6),
+        "fixed_total_w": round(float(st.session_state["fixed_total_w"]), 6),
+        "discretionary_w": round(float(st.session_state["discretionary_w"]), 6),
+        "weeks": int(st.session_state["weeks"]),
+        "shock_enabled": bool(st.session_state.get("shock_enabled", False)),
+        "shock_events": tuple(
+            (float(r.get("amount", 0.0)), int(r.get("week", 0)))
+            for r in st.session_state.get("shock_events_rows", [])
+            if float(r.get("amount", 0.0)) > 0
+        ),
+    }
+
+# ------------------------------------------------------------
 # Session state defaults
-# -----------------------
-if "baseline_df" not in st.session_state:
-    st.session_state["baseline_df"] = None
+# ------------------------------------------------------------
+ss("baseline_df", None)
+ss("scenario_a", None)
+ss("scenario_b", None)
+ss("seed", 42)
+ss("baseline_ready", False)
+ss("baseline_signature", None)
+ss("weeks", 12)
 
-if "scenario_a" not in st.session_state:
-    st.session_state["scenario_a"] = None
+ss("saved_a_msg", False)
+ss("saved_b_msg", False)
+ss("cleared_msg", False)
 
-if "scenario_b" not in st.session_state:
-    st.session_state["scenario_b"] = None
+# Raw inputs (widget-backed)
+ss("income_raw", 460.0)
+ss("income_period", "Weekly")
+ss("fixed_essential_raw", 185.0)
+ss("fixed_essential_period", "Weekly")
+ss("variable_essential_raw", 80.0)
+ss("variable_essential_period", "Weekly")
+ss("discretionary_raw", 35.0)
+ss("discretionary_period", "Weekly")
 
-if "seed" not in st.session_state:
-    st.session_state["seed"] = 42
+# Estimator state (optional)
+ss("gross_annual_est", 30000.0)
+ss("net_ratio_pct", 70)
+ss("income_est_applied", False)
 
-if "saved_a_msg" not in st.session_state:
-    st.session_state["saved_a_msg"] = False
-if "saved_b_msg" not in st.session_state:
-    st.session_state["saved_b_msg"] = False
+# Weekly normalised (computed each run in Step 1)
+ss("income_w", 0.0)
+ss("fixed_total_w", 0.0)
+ss("discretionary_w", 0.0)
+ss("weekly_margin", 0.0)
 
-if "cleared_msg" not in st.session_state:
-    st.session_state["cleared_msg"] = False
+# Shock events (new model)
+ss("shock_enabled", False)
+ss("shock_events_rows", [
+    {"name": "", "amount": 0.0, "week": 1},
+    {"name": "", "amount": 0.0, "week": 1},
+    {"name": "", "amount": 0.0, "week": 1},
+])
 
-# Store weekly-normalised inputs for cross-step coherence
-if "income_w" not in st.session_state:
-    st.session_state["income_w"] = 460.0
-if "fixed_total_w" not in st.session_state:
-    st.session_state["fixed_total_w"] = 185.0 + 80.0
-if "discretionary_w" not in st.session_state:
-    st.session_state["discretionary_w"] = 35.0
-if "weekly_margin" not in st.session_state:
-    st.session_state["weekly_margin"] = (
-        st.session_state["income_w"]
-        - st.session_state["fixed_total_w"]
-        - st.session_state["discretionary_w"]
-    )
+# ✅ Expense builder (single source of truth = list[dict])
+ss("fixed_items_rows", default_fixed_items_rows())
 
-# ✅ Single source of truth for widgets
-if "income_raw" not in st.session_state:
-    st.session_state["income_raw"] = 460.0
-if "income_period" not in st.session_state:
-    st.session_state["income_period"] = "Weekly"
+# Variable essentials breakdown
+ss("var_utilities_base", 0.0)
+ss("var_utilities_period", "Weekly")
+ss("var_season", "Normal")
+ss("var_commute_days", 0)
+ss("var_commute_cost", 0.0)
+ss("var_groceries", 0.0)
+ss("var_groceries_period", "Weekly")
+ss("var_household", 0.0)
+ss("var_household_period", "Weekly")
 
-# Optional helper defaults
-if "gross_annual" not in st.session_state:
-    st.session_state["gross_annual"] = 30000.0
-if "takehome_rate" not in st.session_state:
-    st.session_state["takehome_rate"] = 75
-
-# ✅ One-off shock defaults (Step 2)
-if "shock_enabled" not in st.session_state:
-    st.session_state["shock_enabled"] = False
-if "shock_amount" not in st.session_state:
-    st.session_state["shock_amount"] = 0.0
-if "shock_week" not in st.session_state:
-    st.session_state["shock_week"] = 1
-
-# -----------------------
-# UI: Header
-# -----------------------
+# ------------------------------------------------------------
+# Header
+# ------------------------------------------------------------
 st.title("LifeBudget Micro")
 st.subheader("Short-term financial clarity")
-st.write(
-    "Use this tool to understand your current allocation, explore behavioural changes, "
-    "and compare outcomes under uncertainty."
-)
+st.caption("Describe your current position first. Explore change later.")
+
+# ------------------------------------------------------------
+# Step 1 helper callbacks (MUST be defined before buttons use them)
+# ------------------------------------------------------------
+def apply_fixed_total(total_fixed_weekly: float):
+    st.session_state["fixed_essential_raw"] = float(total_fixed_weekly)
+    st.session_state["fixed_essential_period"] = "Weekly"
+    st.toast("Fixed essentials updated", icon="✅")
+
+def apply_variable_total(total_var_weekly: float):
+    st.session_state["variable_essential_raw"] = float(total_var_weekly)
+    st.session_state["variable_essential_period"] = "Weekly"
+    st.toast("Variable essentials updated", icon="✅")
+
+def apply_estimated_income(net_weekly: float):
+    st.session_state["income_raw"] = float(net_weekly)
+    st.session_state["income_period"] = "Weekly"
+    st.session_state["income_est_applied"] = True
+    st.toast("Income updated from estimator", icon="✅")
+
+def apply_discretionary_preset(preset_name: str):
+    st.session_state["discretionary_raw"] = float(discretionary_preset_value(preset_name))
+    st.session_state["discretionary_period"] = "Weekly"
+    st.toast(f"Preset applied: {preset_name}", icon="✅")
 
 # ============================================================
-# Step 1 — Current position (no projections here)
+# STEP 1 — CURRENT POSITION
 # ============================================================
 st.header("Step 1 — Understand your current position")
 
-# ✅ Framing (2 lines, no more)
-st.caption(
-    "This step captures your current financial situation.\n"
-    "No saving or behavioural changes are applied yet."
-)
-
-def apply_gross_estimate_to_income(est_monthly: float):
-    st.session_state["income_raw"] = float(est_monthly)
-    st.session_state["income_period"] = "Monthly"
-    st.toast("Take-home income updated using rough estimate.", icon="✅")
-
-# --- Income (take-home) ---
+# Income
 c1, c2 = st.columns([2, 1])
 with c1:
-    income_raw = st.number_input(
+    st.number_input(
         "Take-home income (£)",
         min_value=0.0,
         step=10.0,
-        help=(
-            "Use take-home (net) income. If you only know annual gross salary, use a salary calculator "
-            "and paste the take-home amount here — or use the optional rough helper below."
-        ),
         key="income_raw",
+        help="Net (after tax) income. Use the estimator below if you only know your gross income.",
     )
-
 with c2:
-    income_period = st.selectbox(
+    st.selectbox(
         "Income period",
         ["Weekly", "Monthly", "Yearly"],
         key="income_period",
+        help="How often you receive this income.",
     )
 
-# OPTIONAL helper (Option B): gross -> net rough estimate
-with st.expander("Only know your annual gross salary? (Optional rough estimate)"):
+# ------------------------------------------------------------
+# Optional: take-home estimator (rough)
+# - Slider is full width and uses %
+# - Avoids Streamlit warning by not providing both a default and a session_state assignment
+# ------------------------------------------------------------
+with st.expander("Estimate take-home income (optional)"):
     st.caption(
-        "This helper provides a **rough** gross-to-net estimate using a simple percentage. "
-        "**It is not tax advice** and may be inaccurate (tax code, NI, pension, student loan, etc.). "
-        "For accuracy, use a salary calculator and enter your real take-home income."
+        "Quick estimator to produce a usable *net* figure. "
+        "This is a rough estimate (you can override anytime)."
     )
 
-    gross_annual = st.number_input(
-        "Annual gross salary (£)",
+    st.number_input(
+        "Gross income (£/year)",
         min_value=0.0,
-        step=1000.0,
-        key="gross_annual",
+        step=500.0,
+        key="gross_annual_est",
+        help="Gross annual income before tax/deductions.",
     )
 
-    takehome_rate = st.slider(
-        "Assumed take-home rate (%)",
-        min_value=60,
-        max_value=85,
+    # Slider full width, in %
+    st.slider(
+        "Estimated net ratio (%)",
+        min_value=40,
+        max_value=90,
         step=1,
-        help="A simple approximation. Real take-home depends on tax code, NI, pension, student loan, etc.",
-        key="takehome_rate",
+        key="net_ratio_pct",
+        format="%d%%",
+        help="If unsure, 65–75% is a common ballpark depending on your situation.",
     )
 
-    est_net_annual = float(gross_annual) * (float(takehome_rate) / 100.0)
-    est_net_monthly = est_net_annual / 12.0
-    est_net_weekly = est_net_annual / 52.0
+    net_ratio = float(st.session_state["net_ratio_pct"]) / 100.0
+    net_annual = float(st.session_state["gross_annual_est"]) * net_ratio
+    net_weekly = net_annual / 52.0
+    net_monthly = net_annual / 12.0
 
-    st.write(
-        f"Estimated take-home: **£{est_net_monthly:,.0f}/month** "
-        f"(≈ **£{est_net_weekly:,.0f}/week**)"
+    st.markdown(
+        f"**Estimated take-home:** £{net_weekly:,.2f}/week · £{net_monthly:,.2f}/month · £{net_annual:,.0f}/year"
     )
 
     st.button(
-        "Use this estimate as my take-home income",
-        key="apply_gross_estimate",
-        on_click=apply_gross_estimate_to_income,
-        kwargs={"est_monthly": float(est_net_monthly)},
+        "Use this estimate as my Take-home income",
+        key="use_income_est_btn",
+        on_click=apply_estimated_income,
+        args=(net_weekly,),
     )
 
-st.subheader("Spending (3 categories)")
-
-# Fixed essential
+# ------------------------------------------------------------
+# Fixed essentials
+# ------------------------------------------------------------
 e1, e2 = st.columns([2, 1])
 with e1:
-    fixed_essential_raw = st.number_input(
+    st.number_input(
         "Fixed essential commitments (£)",
         min_value=0.0,
-        value=185.0,
         step=10.0,
-        help="Hard-to-change costs in the short term (e.g., rent, council tax, utilities, mobile plan, basic internet).",
         key="fixed_essential_raw",
+        help="Recurring essentials you cannot easily change (rent, council tax, insurance, etc.).",
     )
 with e2:
-    fixed_essential_period = st.selectbox(
+    st.selectbox(
         "Period",
         ["Weekly", "Monthly", "Yearly"],
-        index=0,
         key="fixed_essential_period",
+        help="How often you pay these fixed essentials.",
     )
 
+with st.expander("Build my fixed expenses (optional)"):
+    # IMPORTANT: give the editor its own widget key (so Streamlit owns that widget state)
+    fixed_rows = st.data_editor(
+        st.session_state["fixed_items_rows"],
+        hide_index=True,
+        num_rows="dynamic",
+        key="fixed_items_editor",
+        column_config={
+            "name": st.column_config.TextColumn("Name"),
+            "amount": st.column_config.NumberColumn("Amount (£)", min_value=0.0),
+            "period": st.column_config.SelectboxColumn(
+                "Period",
+                options=["Weekly", "Monthly", "Yearly"],
+            ),
+        },
+        use_container_width=True,
+    )
+
+    # Persist back to your storage key (NOT the widget key)
+    st.session_state["fixed_items_rows"] = fixed_rows
+
+    # total_weekly_from_items expects list[dict] → fixed_rows is already that
+    total_fixed = total_weekly_from_items(fixed_rows)
+    st.markdown(f"**Estimated total:** £{total_fixed:,.2f}/week")
+
+    st.button(
+        "Use this total for Fixed essentials",
+        key="use_fixed_total_btn",
+        on_click=apply_fixed_total,
+        args=(total_fixed,),
+    )
+
+# ------------------------------------------------------------
 # Variable essentials
+# ------------------------------------------------------------
 e3, e4 = st.columns([2, 1])
 with e3:
-    variable_essential_raw = st.number_input(
+    st.number_input(
         "Variable essentials (£)",
         min_value=0.0,
-        value=80.0,
         step=5.0,
-        help="Necessary spending that fluctuates (e.g., groceries, transport, household basics).",
         key="variable_essential_raw",
+        help="Essentials that vary week-to-week (utilities, groceries, commuting, household basics).",
     )
 with e4:
-    variable_essential_period = st.selectbox(
+    st.selectbox(
         "Period ",
         ["Weekly", "Monthly", "Yearly"],
-        index=0,
         key="variable_essential_period",
+        help="How often you spend this amount.",
     )
 
+with st.expander("Rough breakdown for variable essentials (optional)"):
+    st.number_input("Utilities baseline (£)", min_value=0.0, step=5.0, key="var_utilities_base")
+    st.selectbox("Utilities period", ["Weekly", "Monthly", "Yearly"], key="var_utilities_period")
+    st.selectbox("Season", ["Winter", "Normal", "Summer"], key="var_season")
+
+    st.slider("Commute days/week", 0, 7, key="var_commute_days")
+    st.number_input("Cost per commute day (£)", min_value=0.0, step=0.5, key="var_commute_cost")
+
+    st.number_input("Groceries (£)", min_value=0.0, step=5.0, key="var_groceries")
+    st.selectbox("Groceries period", ["Weekly", "Monthly", "Yearly"], key="var_groceries_period")
+
+    st.number_input("Household basics (£)", min_value=0.0, step=5.0, key="var_household")
+    st.selectbox("Household period", ["Weekly", "Monthly", "Yearly"], key="var_household_period")
+
+    parts = variable_essentials_weekly_total(
+        utilities_base=st.session_state["var_utilities_base"],
+        utilities_period=st.session_state["var_utilities_period"],
+        season=st.session_state["var_season"],
+        commute_days=st.session_state["var_commute_days"],
+        commute_cost_per_day=st.session_state["var_commute_cost"],
+        groceries=st.session_state["var_groceries"],
+        groceries_period=st.session_state["var_groceries_period"],
+        household=st.session_state["var_household"],
+        household_period=st.session_state["var_household_period"],
+    )
+
+    st.markdown(f"**Estimated total:** £{parts['total_weekly']:,.2f}/week")
+
+    st.button(
+        "Use this total for Variable essentials",
+        key="use_variable_total_btn",
+        on_click=apply_variable_total,
+        args=(parts["total_weekly"],),
+    )
+
+# ------------------------------------------------------------
 # Discretionary
+# ------------------------------------------------------------
 e5, e6 = st.columns([2, 1])
 with e5:
-    discretionary_raw = st.number_input(
+    st.number_input(
         "Discretionary spending (£)",
         min_value=0.0,
-        value=35.0,
         step=5.0,
-        help="Spending you have the most control over (e.g., takeaways, leisure, drinks, streaming, non-essential shopping).",
         key="discretionary_raw",
+        help="Flexible spending you can reduce if needed (social, shopping, entertainment, etc.).",
     )
 with e6:
-    discretionary_period = st.selectbox(
+    st.selectbox(
         "Period  ",
         ["Weekly", "Monthly", "Yearly"],
-        index=0,
         key="discretionary_period",
+        help="How often you spend this discretionary amount.",
     )
 
-# Convert to weekly
-income_w = to_weekly(float(income_raw), str(income_period))
-fixed_essential_w = to_weekly(float(fixed_essential_raw), str(fixed_essential_period))
-variable_essential_w = to_weekly(float(variable_essential_raw), str(variable_essential_period))
-discretionary_w = to_weekly(float(discretionary_raw), str(discretionary_period))
+p1, p2, p3 = st.columns(3)
+for col, name in zip([p1, p2, p3], ["Quiet week", "Typical", "Social-heavy"]):
+    with col:
+        st.button(
+            name,
+            key=f"disc_preset_{name}",
+            on_click=apply_discretionary_preset,
+            args=(name,),
+        )
 
-fixed_total_w = fixed_essential_w + variable_essential_w
-weekly_margin = income_w - fixed_total_w - discretionary_w
+# ------------------------------------------------------------
+# Weekly snapshot + comparison (restored)
+# ------------------------------------------------------------
+income_w = to_weekly(st.session_state["income_raw"], st.session_state["income_period"])
+fixed_w  = to_weekly(st.session_state["fixed_essential_raw"], st.session_state["fixed_essential_period"])
+var_w    = to_weekly(st.session_state["variable_essential_raw"], st.session_state["variable_essential_period"])
+disc_w   = to_weekly(st.session_state["discretionary_raw"], st.session_state["discretionary_period"])
 
-st.session_state["income_w"] = float(income_w)
-st.session_state["fixed_total_w"] = float(fixed_total_w)
-st.session_state["discretionary_w"] = float(discretionary_w)
-st.session_state["weekly_margin"] = float(weekly_margin)
+fixed_total_w = fixed_w + var_w
+margin_w = income_w - fixed_total_w - disc_w
 
-st.caption(
-    f"Weekly equivalents → Income: £{income_w:,.2f} | "
-    f"Fixed essential: £{fixed_essential_w:,.2f} | "
-    f"Variable essentials: £{variable_essential_w:,.2f} | "
-    f"Discretionary: £{discretionary_w:,.2f}"
+# Persist weekly-normalised values (used by Step 2)
+st.session_state["income_w"] = income_w
+st.session_state["fixed_total_w"] = fixed_total_w
+st.session_state["discretionary_w"] = disc_w
+st.session_state["weekly_margin"] = margin_w
+
+
+# ============================================================
+# 1) GRAPH FIRST
+# ============================================================
+st.subheader("Weekly composition (stacked)")
+
+income_w = float(income_w)
+fixed_w = float(fixed_w)
+var_w = float(var_w)
+disc_w = float(disc_w)
+margin_w = float(margin_w)
+
+if margin_w >= 0:
+    segments = [
+        ("Fixed", fixed_w),
+        ("Variable", var_w),
+        ("Discretionary", disc_w),
+        ("Margin", margin_w),
+    ]
+else:
+    segments = [
+        ("Fixed", fixed_w),
+        ("Variable", var_w),
+        ("Discretionary", disc_w),
+        ("Deficit", abs(margin_w)),
+    ]
+
+COLOR_MAP = {
+    "Fixed": "#4C72B0",
+    "Variable": "#55A868",
+    "Discretionary": "#DD8452",
+    "Margin": "#64B5CD",
+    "Deficit": "#C44E52",
+}
+
+stack_total = sum(v for _, v in segments)
+
+fig, ax = plt.subplots(figsize=(9.5, 3.0))
+
+left = 0.0
+for label, value in segments:
+    ax.barh(
+        y=["Weekly"],
+        width=[value],
+        left=[left],
+        color=COLOR_MAP[label],
+    )
+    left += value
+
+ax.axvline(income_w, linestyle="--", linewidth=1.5)
+ax.set_xlabel("£ per week")
+ax.set_title("Weekly allocation (stacked)", pad=10)
+ax.legend().remove()
+
+max_x = max(income_w, stack_total)
+ax.set_xlim(0, max_x * 1.05 if max_x > 0 else 1)
+
+def _pct(v: float) -> float:
+    return (v / income_w * 100.0) if income_w > 0 else 0.0
+
+fig.subplots_adjust(bottom=0.48)
+
+x_cols = [0.22, 0.62]
+y_rows = [0.14, 0.06]
+
+def _draw_item(i: int, label: str, value: float):
+    row = 0 if i < 2 else 1
+    col = i % 2
+    x = x_cols[col]
+    y = y_rows[row]
+
+    fig.text(
+        x - 0.045, y,
+        "■",
+        ha="right",
+        va="center",
+        fontsize=15,
+        color=COLOR_MAP[label],
+    )
+
+    fig.text(
+        x, y,
+        f"{label}: £{value:,.0f} ({_pct(value):.0f}%)",
+        ha="left",
+        va="center",
+        fontsize=12,
+        color="black",
+    )
+
+for i, (label, value) in enumerate(segments[:4]):
+    _draw_item(i, label, value)
+
+st.pyplot(fig, clear_figure=True)
+
+# ============================================================
+# 2) TEXT EQUIVALENCES (lightweight)
+# ============================================================
+st.caption("Equivalences (approx.)")
+
+income_m = weekly_to_period(income_w, "Monthly")
+income_y = weekly_to_period(income_w, "Yearly")
+
+ess_w = fixed_total_w
+ess_m = weekly_to_period(ess_w, "Monthly")
+ess_y = weekly_to_period(ess_w, "Yearly")
+
+disc_m = weekly_to_period(disc_w, "Monthly")
+disc_y = weekly_to_period(disc_w, "Yearly")
+
+margin_m = weekly_to_period(margin_w, "Monthly")
+margin_y = weekly_to_period(margin_w, "Yearly")
+
+st.write(
+    f"Income: **£{income_w:,.0f}/w** ≈ **£{income_m:,.0f}/mo** ≈ **£{income_y:,.0f}/yr**"
+)
+st.write(
+    f"Margin: **£{margin_w:,.0f}/w** ≈ **£{margin_m:,.0f}/mo** ≈ **£{margin_y:,.0f}/yr**"
+)
+
+# Optional: one more line (keeps it useful without becoming a table)
+st.write(
+    f"Essentials: **£{ess_w:,.0f}/w** · Discretionary: **£{disc_w:,.0f}/w**"
 )
 
 # ============================================================
-# ✅ Step 1: "Landing page" default + expander for details
+# 3) FULL TABLE (optional)
 # ============================================================
+with st.expander("See full breakdown (Weekly / Monthly / Yearly)"):
+    rows = []
+    for p in ["Weekly", "Monthly", "Yearly"]:
+        rows.append({
+            "Period": p,
+            "Income": weekly_to_period(income_w, p),
+            "Essentials (fixed+variable)": weekly_to_period(ess_w, p),
+            "Discretionary": weekly_to_period(disc_w, p),
+            "Margin": weekly_to_period(margin_w, p),
+        })
 
-spent_w = fixed_total_w + discretionary_w
-remaining_w = income_w - spent_w
-
-st.markdown(
-    f"**Weekly snapshot:** Income **£{income_w:,.0f}** · Expenses **£{spent_w:,.0f}** · "
-    f"{'Margin' if remaining_w >= 0 else 'Deficit'} **£{remaining_w:,.0f}/w**"
-)
-
-# --- helper formatting + scale equivalents (kept local to Step 1) ---
-def money(x: float) -> str:
-    return f"£{x:,.0f}"
-
-def week_to_month(x_w: float) -> float:
-    return float(x_w) * (52.0 / 12.0)
-
-def week_to_year(x_w: float) -> float:
-    return float(x_w) * 52.0
-
-income_m = week_to_month(income_w)
-exp_m    = week_to_month(spent_w)
-margin_m = week_to_month(remaining_w)
-
-income_y = week_to_year(income_w)
-exp_y    = week_to_year(spent_w)
-margin_y = week_to_year(remaining_w)
-
-with st.expander("See breakdown and equivalents", expanded=False):
-    st.subheader("Current weekly allocation")
-
-    segments = {
-        "Fixed essential": float(fixed_essential_w),
-        "Variable essentials": float(variable_essential_w),
-        "Discretionary": float(discretionary_w),
-    }
-    if remaining_w >= 0:
-        segments["Remaining margin"] = float(remaining_w)
-    else:
-        segments["Deficit (overspend)"] = float(abs(remaining_w))
-
-    # Legend labels WITH numbers (weekly)
-    legend_labels = {k: f"{k} ({money(v)}/w)" for k, v in segments.items()}
-
-    fig_alloc, ax_alloc = plt.subplots(figsize=(7, 1.4))
-    left = 0.0
-    for label, val in segments.items():
-        ax_alloc.barh(["Allocation"], [val], left=left, label=legend_labels[label])
-        left += float(val)
-
-    ax_alloc.set_xlabel("£ per week")
-    ax_alloc.set_yticks([])
-
-    ax_alloc.legend(
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.55),
-        ncol=2,
-        frameon=False
+    cmp_df = pd.DataFrame(rows)
+    st.dataframe(
+        cmp_df.style.format({
+            "Income": "£{:,.2f}",
+            "Essentials (fixed+variable)": "£{:,.2f}",
+            "Discretionary": "£{:,.2f}",
+            "Margin": "£{:,.2f}",
+        }),
+        use_container_width=True,
     )
 
-    fig_alloc.subplots_adjust(bottom=0.42)
-    st.pyplot(fig_alloc)
-
-    st.markdown(
-        f"""
-**Note on scale:**  
-The proportions above remain the same at different time scales.
-
-- **Monthly equivalent (approx):**
-  - Income: **{money(income_m)}**
-  - Expenses: **{money(exp_m)}**
-  - Remaining margin: **{money(margin_m)}**
-
-- **Yearly equivalent:**
-  - Income: **{money(income_y)}**
-  - Expenses: **{money(exp_y)}**
-  - Remaining margin: **{money(margin_y)}**
-""".strip()
-    )
-
-# ✅ CTA (clean, no pressure) — end of Step 1
-st.markdown("**Next:** explore what happens if you change something (Step 2).")
 
 # ============================================================
 # Step 2 — Scenarios (A & B savings targets)
@@ -375,20 +565,10 @@ if "baseline_ready" not in st.session_state:
 if "baseline_signature" not in st.session_state:
     st.session_state["baseline_signature"] = None
 
-def make_baseline_signature():
-    return {
-        "income_w": round(float(st.session_state["income_w"]), 6),
-        "fixed_total_w": round(float(st.session_state["fixed_total_w"]), 6),
-        "discretionary_w": round(float(st.session_state["discretionary_w"]), 6),
-        "weeks": int(st.session_state["weeks"]),
-        "shock_enabled": bool(st.session_state.get("shock_enabled", False)),
-        "shock_amount": round(float(st.session_state.get("shock_amount", 0.0)), 6),
-        "shock_week": int(st.session_state.get("shock_week", 1)),
-    }
-
 def mark_baseline_stale():
     # Don’t delete the baseline df; just mark it as outdated to preserve traceability.
     st.session_state["baseline_ready"] = False
+
 
 # -----------------------
 # ✅ Badges (persistent)
@@ -413,6 +593,7 @@ def saved_badge(text: str):
         unsafe_allow_html=True,
     )
 
+
 def info_badge(text: str):
     st.markdown(
         f"""
@@ -433,6 +614,7 @@ def info_badge(text: str):
         unsafe_allow_html=True,
     )
 
+
 def warning_badge(text: str):
     st.markdown(
         f"""
@@ -452,6 +634,7 @@ def warning_badge(text: str):
         """,
         unsafe_allow_html=True,
     )
+
 
 # -----------------------
 # ✅ Savings target policy resolver (margin -> discretionary)
@@ -483,6 +666,7 @@ def resolve_savings_target(*, target: float, weekly_margin: float, discretionary
         "uncovered": uncovered,
     }
 
+
 # -----------------------
 # ✅ Clear scenarios (avoid stale saved A/B when settings change)
 # -----------------------
@@ -492,6 +676,7 @@ def clear_ab_silent():
     st.session_state["saved_a_msg"] = False
     st.session_state["saved_b_msg"] = False
     # no cleared badge here; it's automatic housekeeping
+
 
 # -----------------------
 # Weeks (changing weeks makes baseline stale)
@@ -507,45 +692,54 @@ weeks = st.slider(
 )
 
 # -----------------------
-# Optional one-off event (shock)
+# Optional one-off events (up to 3)  ✅ PRIMERO el editor
 # -----------------------
-with st.expander("Optional — One-off event (unexpected expense)"):
+with st.expander("Optional — One-off events (unexpected expenses)"):
     st.caption(
-        "Model a single unexpected expense applied once during the planning horizon "
-        "(e.g., a night out, repair, fine). This is **not** expense tracking."
+        "Model up to three one-off unexpected expenses applied once during the planning horizon "
+        "(e.g., repair, fine, unusual night out). This is **not** expense tracking."
     )
 
     shock_enabled = st.checkbox(
-        "Enable one-off event",
+        "Enable one-off events",
         key="shock_enabled",
-        help="Turn on to apply a single unexpected expense once during the horizon.",
         on_change=mark_baseline_stale,
     )
 
-    shock_amount = st.number_input(
-        "Unexpected expense amount (£)",
-        min_value=0.0,
-        step=5.0,
-        key="shock_amount",
+    shock_rows = st.data_editor(
+        st.session_state.get("shock_events_rows", []),
+        key="shock_events_editor",
+        hide_index=True,
+        num_rows=3,
         disabled=not shock_enabled,
-        on_change=mark_baseline_stale,
+        column_config={
+            "name": st.column_config.TextColumn("Event (optional)"),
+            "amount": st.column_config.NumberColumn("Amount (£)", min_value=0.0),
+            "week": st.column_config.NumberColumn("Week", min_value=1, max_value=int(weeks), step=1),
+        },
+        use_container_width=True,
     )
 
-    shock_week = st.slider(
-        "Week of event",
-        min_value=1,
-        max_value=int(weeks),
-        value=min(int(st.session_state.get("shock_week", 1)), int(weeks)),
-        key="shock_week",
-        disabled=not shock_enabled,
-        help="The expense is applied once and reduces balance from that week onward.",
-        on_change=mark_baseline_stale,
-    )
+    # Persist back to your storage key
+    st.session_state["shock_events_rows"] = shock_rows
 
-    if shock_enabled and float(st.session_state["shock_amount"]) > 0:
-        st.info(
-            f"Active: £{float(st.session_state['shock_amount']):,.2f} at week {int(st.session_state['shock_week'])}."
-        )
+    if shock_enabled:
+        active = [r for r in shock_rows if float(r.get("amount", 0) or 0) > 0]
+        if len(active) > 0:
+            st.info(f"{len(active)} one-off event(s) active.")
+
+# -----------------------
+# Build shock_map (shared by baseline & scenarios)
+# -----------------------
+shock_map = {}
+
+if st.session_state.get("shock_enabled", False):
+    rows = clean_events(
+        st.session_state.get("shock_events_rows", []),
+        weeks=int(weeks),
+    )
+    if rows:
+        shock_map = events_to_weekly_shock_map(rows)
 
 # -----------------------
 # Button: generate baseline (persist + signature)
@@ -558,26 +752,22 @@ if st.button("Generate baseline trajectory", key="generate_baseline_btn"):
         int(weeks),
     ).round(2)
 
-    # ✅ Centralised schema validation (single source of truth)
+    # Schema validation
     try:
         validate_baseline_df(baseline_raw)
     except (ValueError, KeyError) as e:
         st.error(f"Baseline output validation failed: {e}")
         st.stop()
 
-    # ✅ Apply shock ONLY if enabled + amount > 0
-    if st.session_state.get("shock_enabled", False) and float(st.session_state.get("shock_amount", 0.0)) > 0:
-        baseline_adj = apply_one_off_shock_to_df(
-            baseline_raw,
-            shock_amount=float(st.session_state["shock_amount"]),
-            shock_week=int(st.session_state["shock_week"]),
-            value_cols=("Balance",),
-        )
-        st.session_state["baseline_df"] = baseline_adj
-    else:
-        st.session_state["baseline_df"] = baseline_raw
+    # Apply one-off events (if any)
+    baseline_adj = apply_shock_map_to_df(
+        baseline_raw,
+        shock_map=shock_map,
+        value_cols=("Balance",),
+    )
 
-    # ✅ Persistent indicator + traceability signature
+    # Persist
+    st.session_state["baseline_df"] = baseline_adj
     st.session_state["baseline_ready"] = True
     st.session_state["baseline_signature"] = make_baseline_signature()
 
@@ -606,9 +796,11 @@ PRESETS = {
 if "preset_name" not in st.session_state:
     st.session_state["preset_name"] = "Quick estimate (default)"
 
+
 def apply_preset():
     st.session_state["preset_name"] = st.session_state["preset_select"]
     clear_ab_silent()
+
 
 top_left, top_right = st.columns([2, 1])
 
@@ -694,6 +886,7 @@ with cB1:
         f"- Requires discretionary cut: **£{res_b['from_discretionary']:,.0f}/w**"
     )
 
+
 def savings_status(res: dict, name: str) -> bool:
     if res["uncovered"] > 0:
         st.error(
@@ -711,6 +904,7 @@ def savings_status(res: dict, name: str) -> bool:
         st.info(f"{name}: fully covered by remaining margin (no spending cuts needed).")
     return True
 
+
 ok_a = savings_status(res_a, "Scenario A")
 ok_b = savings_status(res_b, "Scenario B")
 
@@ -719,12 +913,14 @@ ok_b = savings_status(res_b, "Scenario B")
 # -----------------------
 st.caption("Save Scenario A and Scenario B to compare outcomes side-by-side.")
 
+
 def clear_ab():
     st.session_state["scenario_a"] = None
     st.session_state["scenario_b"] = None
     st.session_state["saved_a_msg"] = False
     st.session_state["saved_b_msg"] = False
     st.session_state["cleared_msg"] = True
+
 
 b1, b2, b3 = st.columns(3)
 
@@ -750,9 +946,7 @@ with b1:
                 seed=int(seed),
                 seed_offset=0,
                 variability_frac=float(variability_frac),
-                shock_enabled=bool(st.session_state.get("shock_enabled", False)),
-                shock_amount=float(st.session_state.get("shock_amount", 0.0)),
-                shock_week=int(st.session_state.get("shock_week", 1)),
+
             )
 
             # Add UI traceability fields
@@ -792,9 +986,6 @@ with b2:
                 seed=int(seed),
                 seed_offset=1,
                 variability_frac=float(variability_frac),
-                shock_enabled=bool(st.session_state.get("shock_enabled", False)),
-                shock_amount=float(st.session_state.get("shock_amount", 0.0)),
-                shock_week=int(st.session_state.get("shock_week", 1)),
             )
 
             # Add UI traceability fields
@@ -829,8 +1020,8 @@ st.subheader("Step 3 — Compare outcomes")
 st.caption("Compare your baseline trajectory with alternative scenarios under uncertainty.")
 
 baseline_df = st.session_state.get("baseline_df")
-scenario_a  = st.session_state.get("scenario_a")
-scenario_b  = st.session_state.get("scenario_b")
+scenario_a = st.session_state.get("scenario_a")
+scenario_b = st.session_state.get("scenario_b")
 
 # --- Small helper: validate schema to avoid weird runtime errors ---
 def assert_cols(df: pd.DataFrame, required: set, name: str):
@@ -888,8 +1079,8 @@ if ready_for_compare:
     # --- Summary stats ---
     def final_stats(df):
         final_mean = float(df["Mean"].iloc[-1])
-        final_low  = float(df["Lower"].iloc[-1])
-        final_up   = float(df["Upper"].iloc[-1])
+        final_low = float(df["Lower"].iloc[-1])
+        final_up = float(df["Upper"].iloc[-1])
         return final_mean, final_low, final_up
 
     base_final = float(baseline_df["Balance"].iloc[-1])
@@ -898,9 +1089,9 @@ if ready_for_compare:
 
     summary = pd.DataFrame(
         [
-            {"Scenario": "Baseline",   "Final balance (mean)": round(base_final, 2), "Final range (10–90%)": "—"},
-            {"Scenario": "Scenario A", "Final balance (mean)": round(a_mean, 2),     "Final range (10–90%)": f"{a_low:.2f} – {a_up:.2f}"},
-            {"Scenario": "Scenario B", "Final balance (mean)": round(b_mean, 2),     "Final range (10–90%)": f"{b_low:.2f} – {b_up:.2f}"},
+            {"Scenario": "Baseline", "Final balance (mean)": round(base_final, 2), "Final range (10–90%)": "—"},
+            {"Scenario": "Scenario A", "Final balance (mean)": round(a_mean, 2), "Final range (10–90%)": f"{a_low:.2f} – {a_up:.2f}"},
+            {"Scenario": "Scenario B", "Final balance (mean)": round(b_mean, 2), "Final range (10–90%)": f"{b_low:.2f} – {b_up:.2f}"},
         ]
     )
 
@@ -924,12 +1115,12 @@ else:
     base_final = float(baseline_df["Balance"].iloc[-1])
 
     a_mean = float(df_a["Mean"].iloc[-1])
-    a_low  = float(df_a["Lower"].iloc[-1])
-    a_up   = float(df_a["Upper"].iloc[-1])
+    a_low = float(df_a["Lower"].iloc[-1])
+    a_up = float(df_a["Upper"].iloc[-1])
 
     b_mean = float(df_b["Mean"].iloc[-1])
-    b_low  = float(df_b["Lower"].iloc[-1])
-    b_up   = float(df_b["Upper"].iloc[-1])
+    b_low = float(df_b["Lower"].iloc[-1])
+    b_up = float(df_b["Upper"].iloc[-1])
 
     weeks_n = int(st.session_state["weeks"])
 
@@ -970,31 +1161,38 @@ else:
             delta_b_weekly=cut_b_w,
         )
 
-    text = build_human_reflection_text(
-        metrics,
-        shock_enabled=bool(st.session_state.get("shock_enabled", False)),
-        shock_amount=float(st.session_state.get("shock_amount", 0.0)),
-        shock_week=int(st.session_state.get("shock_week", 1)),
+    events_active = (
+        bool(st.session_state.get("shock_enabled", False))
+        and any(
+            float(r.get("amount", 0.0)) > 0
+            for r in st.session_state.get("shock_events_rows", [])
+        )
     )
 
-    # --- 1) Human-first summary ---
+    # Build reflection text (robust to old signature)
+    try:
+        text = build_human_reflection_text(metrics, shocks_active=events_active)
+    except TypeError:
+        text = build_human_reflection_text(metrics)
+
+          # --- 1) Human-first summary ---
     st.markdown("### What you get if you follow each plan")
-    st.markdown(text["what_you_get"])
+    st.markdown(text.get("what_you_get", ""))
 
     st.markdown("### Which one should you pick?")
     if getattr(metrics, "winner", "Tie") == "Tie":
-        st.info(text["pick_primary"])
+        st.info(text.get("pick_primary", ""))
     else:
-        st.success(text["pick_primary"])
+        st.success(text.get("pick_primary", ""))
         if text.get("pick_secondary"):
-            st.warning(text["pick_secondary"])
+            st.warning(text.get("pick_secondary", ""))
 
     # --- 2) Shock note ---
     if text.get("shock_note"):
-        st.info(text["shock_note"])
+        st.info(text.get("shock_note", ""))
 
     # --- 3) Variability note ---
-    st.markdown(text["variability"])
+    st.markdown(text.get("variability", ""))
 
     # --- 4) Technical details hidden (for you / marking) ---
     exp_inputs = ExplanationInputs(
@@ -1005,9 +1203,11 @@ else:
         # Explanation talks in targets (human intent)
         delta_a=float(target_a_w),
         delta_b=float(target_b_w),
-        variability_pct=float(params_a.get("variability_pct", 0)),
-        seed=int(params_a.get("seed", st.session_state.get("seed", 0))),
-        iters=int(params_a.get("iterations", 0)),
+
+        # Use app-level truth (don’t rely on params_a having these keys)
+        variability_pct=float(variability_pct),
+        seed=int(st.session_state.get("seed", 0)),
+        iters=int(iterations),
     )
 
     explanation_text = build_explanation(
@@ -1021,14 +1221,6 @@ else:
         inputs=exp_inputs,
     )
 
-    shock_note = ""
-    if st.session_state.get("shock_enabled", False) and float(st.session_state.get("shock_amount", 0.0)) > 0:
-        shock_amount = float(st.session_state["shock_amount"])
-        shock_week = int(st.session_state["shock_week"])
-        shock_note = (
-            f"\n\n**One-off event applied:** £{shock_amount:,.2f} at week {shock_week} "
-            f"(reduces balance from that week onward)."
-        )
 
     preset_name = str(params_a.get("preset", st.session_state.get("preset_name", "Preset")))
     iters = int(params_a.get("iterations", 0))
@@ -1041,7 +1233,7 @@ else:
 
     with st.expander("Technical details (optional)"):
         st.markdown("### Model explanation (technical)")
-        st.markdown(explanation_text + shock_note)
+        st.markdown(explanation_text)
 
         # Add explicit semantic traceability in the technical panel
         st.markdown(
