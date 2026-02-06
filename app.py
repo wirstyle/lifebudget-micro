@@ -657,7 +657,12 @@ def resolve_savings_target(*, target: float, weekly_margin: float, discretionary
     remaining = t - from_margin
 
     from_discretionary = min(remaining, d)
-    uncovered = remaining - from_discretionary
+
+          # ✅ robustez numérica + no negativos
+    uncovered_raw = remaining - from_discretionary
+    eps = 1e-9
+    uncovered = 0.0 if uncovered_raw < eps else uncovered_raw
+
 
     return {
         "target": t,
@@ -685,7 +690,6 @@ weeks = st.slider(
     "Planning horizon (weeks)",
     min_value=4,
     max_value=52,
-    value=12,
     help="Short-term horizon to keep outputs interpretable.",
     key="weeks",
     on_change=mark_baseline_stale,
@@ -1169,11 +1173,39 @@ else:
         )
     )
 
+    # ------------------------------------------------------------
+    # Multi-event shock summary (for Step 4 human text)
+    # ------------------------------------------------------------
+    shock_rows_clean = clean_events(
+        st.session_state.get("shock_events_rows", []),
+        weeks=int(weeks_n),
+    )
+
+    shock_count = len(shock_rows_clean)
+    shock_total = float(sum(float(r.get("amount", 0.0) or 0.0) for r in shock_rows_clean))
+
+    if shock_rows_clean:
+        max_row = max(shock_rows_clean, key=lambda r: float(r.get("amount", 0.0) or 0.0))
+        shock_max_amount = float(max_row.get("amount", 0.0) or 0.0)
+        shock_max_week = int(max_row.get("week", 0) or 0)
+    else:
+        shock_max_amount = 0.0
+        shock_max_week = 0
+
+
     # Build reflection text (robust to old signature)
-    try:
-        text = build_human_reflection_text(metrics, shocks_active=events_active)
-    except TypeError:
-        text = build_human_reflection_text(metrics)
+        try:
+            text = build_human_reflection_text(
+                metrics,
+                shocks_active=events_active,
+                shock_count=shock_count,
+                shock_total=shock_total,
+                shock_max_amount=shock_max_amount,
+                shock_max_week=shock_max_week,
+            )
+        except TypeError:
+            # fallback if explain.py is still old
+            text = build_human_reflection_text(metrics)
 
           # --- 1) Human-first summary ---
     st.markdown("### What you get if you follow each plan")
