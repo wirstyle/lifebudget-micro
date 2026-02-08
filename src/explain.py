@@ -305,25 +305,10 @@ def _fmt_pct(p: Optional[float]) -> str:
 def build_human_reflection_text(
     metrics: ReflectionMetrics,
     *,
-    # ✅ NEW multi-event API (preferred)
-    shocks_active: bool = False,
-    shock_count: int = 0,
-    shock_total: float = 0.0,
-    shock_max_amount: float = 0.0,
-    shock_max_week: int = 0,
-
-    # ✅ Legacy API (kept for backward compatibility)
-    shock_enabled: Optional[bool] = None,
-    shock_amount: float = 0.0,
-    shock_week: int = 1,
+    shock_events: Optional[list] = None,
 ) -> Dict[str, str]:
     """
     Returns text blocks for Streamlit rendering (keeps app.py thin).
-
-    Supports:
-      - NEW multi-event shocks: shocks_active + (count/total/max)
-      - LEGACY single shock: shock_enabled + shock_amount + shock_week
-
     Keys:
       - what_you_get
       - pick_primary
@@ -372,36 +357,23 @@ def build_human_reflection_text(
                 "So one option wins on average, but the other is slightly more resilient in a bad draw."
             )
 
-    # ------------------------------------------------------------
-    # ✅ Multi-event shock note (with legacy fallback)
-    # ------------------------------------------------------------
+        shock_note = ""
 
+    if shock_events:
+        valid = [
+            r for r in shock_events
+            if float(r.get("amount", 0.0) or 0.0) > 0
+        ]
+        if valid:
+            total = sum(float(r.get("amount", 0.0) or 0.0) for r in valid)
+            count = len(valid)
+            worst = max(valid, key=lambda r: float(r.get("amount", 0.0) or 0.0))
 
-    shock_note = ""
-
-    # If legacy args were explicitly passed, override the new scheme
-    if shock_enabled is not None:
-        active = bool(shock_enabled) and float(shock_amount) > 0
-        shocks_active = active
-        shock_count = 1 if active else 0
-        shock_total = float(shock_amount) if active else 0.0
-        shock_max_amount = float(shock_amount) if active else 0.0
-        shock_max_week = int(shock_week) if active else 0
-
-    if shocks_active and (shock_count > 0 or float(shock_total) > 0):
-        if int(shock_count) <= 1:
-            # single-event phrasing (still works for "1 event" in multi-event mode)
-            wk = int(shock_max_week) if int(shock_max_week) > 0 else 1
             shock_note = (
-                f"One-off event included: **{_fmt_gbp0(float(shock_total))}** happens in **week {wk}** "
-                "(it reduces the balance from that week onward)."
-            )
-        else:
-            wk = int(shock_max_week) if int(shock_max_week) > 0 else 1
-            shock_note = (
-                f"One-off events included: **{int(shock_count)} events** "
-                f"(total impact ≈ **{_fmt_gbp0(float(shock_total))}**). "
-                f"Largest event: **{_fmt_gbp0(float(shock_max_amount))}** in **week {wk}**."
+                f"One-off events included: **{count} event(s)** "
+                f"(total impact **{_fmt_gbp0(total)}**).\n\n"
+                f"Largest event: **{_fmt_gbp0(float(worst.get('amount', 0.0) or 0.0))}** "
+                f"in week **{int(worst.get('week', 0) or 0)}**."
             )
 
     variability = "\n".join(
