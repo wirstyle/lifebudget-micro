@@ -4,7 +4,7 @@
 #
 # Key concepts:
 # - Step 1: describe current position (no behaviour change)
-# - Step 2: scenarios are EXTRA SAVINGS (cuts to discretionary only)
+# - Step 2: scenarios are TARGET SAVINGS (use Margin first, then cut discretionary if needed)
 # - Baseline already keeps any positive Margin as savings by default
 # - Essentials are never auto-modified (MVP scope)
 # ------------------------------------------------------------
@@ -25,6 +25,7 @@ from src.explain import (
     build_explanation,
     compute_reflection_metrics,
     build_human_reflection_text,
+    build_structural_deficit_tips,
 )
 
 from src.expenses import (
@@ -393,6 +394,42 @@ with st.expander("Rough breakdown for variable essentials (optional)"):
         household_period=st.session_state["var_household_period"],
     )
 
+    # ✅ Save raw parts (optional, useful for debugging / future UI)
+    st.session_state["variable_parts"] = parts
+
+    # ✅ NEW: label map for cleaner tip labels
+    LABEL_MAP = {
+        "Utilities Base": "Utilities",
+        "Commute": "Commuting",
+        "Commute Days": "Commuting",
+        "Commute Cost Per Day": "Commuting",
+        "Groceries": "Groceries",
+        "Household": "Household basics",
+    }
+
+    # ✅ NEW: normalised rows for smart tips
+    variable_items_weekly = []
+    for k, v in parts.items():
+        if k.endswith("_weekly") and k != "total_weekly":
+            raw_label = k.replace("_weekly", "").replace("_", " ").title()
+            label = LABEL_MAP.get(raw_label, raw_label)  # ✅ apply nicer label
+            if float(v) > 0:
+                variable_items_weekly.append({"name": label, "weekly": float(v)})
+
+    # Keep stable ordering (highest first)
+    variable_items_weekly.sort(key=lambda r: r["weekly"], reverse=True)
+
+    # Optional: if multiple keys map to the same label, merge them (prevents duplicates)
+    merged = {}
+    for row in variable_items_weekly:
+        merged[row["name"]] = merged.get(row["name"], 0.0) + float(row["weekly"])
+
+    variable_items_weekly = [{"name": k, "weekly": v} for k, v in merged.items()]
+    variable_items_weekly.sort(key=lambda r: r["weekly"], reverse=True)
+
+    st.session_state["variable_items_rows_weekly"] = variable_items_weekly
+    st.session_state["variable_top_driver"] = variable_items_weekly[0] if variable_items_weekly else None
+
     st.markdown(f"**Estimated total:** £{parts['total_weekly']:,.2f}/week")
 
     st.button(
@@ -401,6 +438,7 @@ with st.expander("Rough breakdown for variable essentials (optional)"):
         on_click=apply_variable_total,
         args=(parts["total_weekly"],),
     )
+
 
 # ------------------------------------------------------------
 # Discretionary
@@ -448,7 +486,6 @@ if not st.session_state.get("position_confirmed", False):
     st.info("Fill in your income and expenses, then confirm to see your baseline breakdown.")
     st.stop()
 
-
 # ------------------------------------------------------------
 # Weekly snapshot + comparison (restored)
 # ------------------------------------------------------------
@@ -461,10 +498,39 @@ fixed_total_w = fixed_w + var_w
 margin_w = income_w - fixed_total_w - disc_w
 
 # Persist weekly-normalised values (used by Step 2)
-st.session_state["income_w"] = income_w
-st.session_state["fixed_total_w"] = fixed_total_w
-st.session_state["discretionary_w"] = disc_w
-st.session_state["weekly_margin"] = margin_w
+st.session_state["income_w"] = float(income_w)
+st.session_state["fixed_total_w"] = float(fixed_total_w)
+st.session_state["discretionary_w"] = float(disc_w)   # (esto lo sigues usando para el simulador)
+st.session_state["weekly_margin"] = float(margin_w)
+
+st.session_state["fixed_w"] = float(fixed_w)
+st.session_state["var_w"] = float(var_w)
+st.session_state["disc_w"] = float(disc_w)
+
+# ------------------------------------------------------------
+# NEW: persist fixed items with weekly-normalised values
+# (used for intelligent structural deficit tips)
+# ------------------------------------------------------------
+def _rows_with_weekly(rows):
+    out = []
+    for r in (rows or []):
+        try:
+            name = str(r.get("name", "")).strip()
+            amount = float(r.get("amount", 0.0) or 0.0)
+            period = str(r.get("period", "Weekly"))
+            weekly = float(to_weekly(amount, period))
+            if weekly > 0:
+                out.append({
+                    "name": name,
+                    "weekly": weekly,
+                })
+        except Exception:
+            continue
+    return out
+
+st.session_state["fixed_items_rows_weekly"] = _rows_with_weekly(
+    st.session_state.get("fixed_items_rows", [])
+)
 
 # ============================================================
 # 1) GRAPH FIRST
@@ -589,15 +655,23 @@ st.write(
     f"Essentials: **£{ess_w:,.0f}/w** · Discretionary: **£{disc_w:,.0f}/w**"
 )
 
-# ------------------------------------------------------------
-# IMPORTANT: baseline assumption (clarity) — UPDATED for Option A
-# ------------------------------------------------------------
-st.info(
-    "In this version, any **positive Margin** (leftover money) is assumed to **stay in your balance** "
-    "(i.e., it becomes savings by default). "
-    "Step 2 scenarios test **extra savings** by cutting **discretionary spending only** "
-    "(essentials are not changed automatically)."
-)
+# IMPORTANT: baseline assumption (clarity) — UPDATED for Option B
+if margin_w >= 0:
+    st.info(
+        "In this version, any **positive Margin** (leftover money) is assumed to **stay in your balance** "
+        "(i.e., it becomes savings by default). "
+        "Step 2 scenarios set **target savings** amounts. The model uses your Margin first; "
+        "only the remainder requires cutting **discretionary** spending (essentials are not changed automatically)."
+    )
+else:
+    deficit_w = abs(float(margin_w))
+    st.warning(
+        f"Right now you have a **weekly deficit** of about **£{deficit_w:,.0f}/w** "
+        "(your essentials + discretionary are higher than your income). "
+        "Step 2 scenarios can still be used, but the **first priority is to reach break-even** "
+        "(Margin ≥ £0/w). In this MVP, only **discretionary** is adjusted automatically — "
+        "if the deficit exceeds discretionary, structural changes are required."
+    )
 
 # ============================================================
 # 3) FULL TABLE (optional)
@@ -614,8 +688,9 @@ with st.expander("See full breakdown (Weekly / Monthly / Yearly)"):
         })
 
     cmp_df = pd.DataFrame(rows)
+    cmp_df_display = cmp_df.reset_index(drop=True)
     st.dataframe(
-        cmp_df.style.format({
+        cmp_df_display.style.format({
             "Income": "£{:,.2f}",
             "Essentials (fixed+variable)": "£{:,.2f}",
             "Discretionary": "£{:,.2f}",
@@ -625,23 +700,26 @@ with st.expander("See full breakdown (Weekly / Monthly / Yearly)"):
     )
 
 # ============================================================
-# Step 2 — Scenarios (A & B EXTRA savings)
+# # Step 2 — Scenarios (A & B target savings)
 # ============================================================
 st.divider()
 st.subheader("Step 2 — Explore behavioural change")
 
-st.caption(
-    "Baseline already keeps any positive **Margin** as savings by default. "
-    "Below, define two scenarios (A and B) as **extra weekly savings** achieved by cutting "
-    "**discretionary** spending only. Essentials are not changed automatically."
-)
+baseline_margin = max(float(margin_w), 0.0)
 
-# ------------------------------------------------------------
-# Guard: require Step 1 confirmation
-# ------------------------------------------------------------
-if not st.session_state.get("position_confirmed", False):
-    st.info("Confirm your current position in Step 1 to unlock scenarios.")
-    st.stop()
+if margin_w >= 0:
+    st.caption(
+        "Baseline already keeps any positive **Margin** as savings by default. "
+        "Below, set two scenarios (A and B) as **target weekly savings** amounts. "
+        "The model uses your Margin first; only the remainder requires cutting "
+        "**discretionary** spending. Essentials are not changed automatically."
+    )
+else:
+    st.caption(
+        "Below, set two scenarios (A and B) as **target weekly savings** amounts. "
+        "These targets describe what you aim to save **after reaching break-even**. "
+        "In the current situation, the priority is reducing spending and/or increasing income."
+    )
 
 # -----------------------
 # ✅ Baseline status state
@@ -741,7 +819,7 @@ weeks = st.slider(
 # One-off events
 # -----------------------
 with st.expander("Optional — One-off events (unexpected expenses)"):
-    shock_enabled = st.checkbox(
+    st.checkbox(
         "Enable one-off events",
         key="shock_enabled",
         on_change=mark_baseline_stale,
@@ -752,7 +830,7 @@ with st.expander("Optional — One-off events (unexpected expenses)"):
         key="shock_events_editor",
         hide_index=True,
         num_rows=3,
-        disabled=not shock_enabled,
+        disabled=not st.session_state.get("shock_enabled", False),
         column_config={
             "name": st.column_config.TextColumn("Event (optional)"),
             "amount": st.column_config.NumberColumn("Amount (£)", min_value=0.0),
@@ -762,6 +840,7 @@ with st.expander("Optional — One-off events (unexpected expenses)"):
     )
 
     st.session_state["shock_events_rows"] = shock_rows
+
 
 shock_map = {}
 if st.session_state.get("shock_enabled", False):
@@ -857,64 +936,170 @@ st.caption(
 )
 
 # -----------------------
-# Scenario EXTRA savings (Option A)
+# Scenario TARGET savings (Option B)
 # -----------------------
 disc = float(st.session_state.get("discretionary_w", 0.0))
 margin = float(st.session_state.get("weekly_margin", 0.0))
 baseline_margin = max(float(margin), 0.0)
 
-st.info(
-    f"Baseline savings from your current Margin: **£{baseline_margin:,.0f}/w**. "
-    "Scenarios below add **extra savings** by cutting discretionary spending."
-)
+# -----------------------------------------
+# Deficit mode: recoverable vs structural
+# -----------------------------------------
+max_possible_margin = float(margin) + float(disc)
+structural_deficit = max_possible_margin < 0
+can_save_scenarios = not structural_deficit
+
+# ✅ Single breakdown snapshot (one source of truth)
+breakdown = {
+    "income_w": float(st.session_state.get("income_w", 0.0)),
+    "fixed_w": float(st.session_state.get("fixed_w", 0.0)),
+    "var_w": float(st.session_state.get("var_w", 0.0)),
+    "disc_w": float(st.session_state.get("disc_w", 0.0)),
+    "fixed_total_w": float(st.session_state.get("fixed_total_w", 0.0)),
+    "discretionary_w": float(st.session_state.get("discretionary_w", 0.0)),  # alias seguro
+    "margin_w": float(st.session_state.get("weekly_margin", 0.0)),
+
+    # ✅ Itemised rows (para tips menos genéricos) — van DENTRO del breakdown
+    # (usa las keys que ya estás guardando en Step 1)
+    "fixed_items_rows": st.session_state.get("fixed_items_rows_weekly", []),
+    "variable_items_rows_weekly": st.session_state.get("variable_items_rows_weekly", []),
+
+    # ✅ opcional (si lo guardas)
+    "variable_parts": st.session_state.get("variable_parts", {}),
+    "fixed_items_raw_rows": st.session_state.get("fixed_items_rows", []),  # por si quieres debug/UI luego
+}
+
+if structural_deficit:
+    st.error(
+        f"Your current situation shows a **structural deficit** of about "
+        f"**£{abs(float(breakdown['margin_w'])):,.0f}/w**. "
+        "Even eliminating all discretionary spending would not reach break-even.\n\n"
+        "Scenarios below represent **longer-term goals**, not actions you can take immediately. "
+        "Short-term solutions likely require **income changes or major essential cost reductions**."
+    )
+
+    # ✅ Smart tips right where the user hits the wall
+    with st.expander("Tips to fix this structural deficit (based on your data)", expanded=True):
+        tips_md = build_structural_deficit_tips(
+            breakdown=breakdown,
+            deficit_w=abs(float(breakdown["margin_w"])),
+        )
+        st.markdown(tips_md)
+
+elif margin < 0:
+    st.info(
+        f"Current situation: **deficit £{abs(float(margin)):,.0f}/w**. "
+        "Targets in Step 2 should be interpreted as **minimum savings commitments** once you reach break-even. "
+        "For now, the key is reducing spending and/or increasing income to close the deficit."
+    )
+else:
+    st.info(
+        f"Baseline savings from your current Margin: **£{baseline_margin:,.0f}/w**. "
+        "Set a **target savings** amount for each scenario. "
+        "The model uses your Margin first; only the remainder requires cutting discretionary spending."
+    )
+
+# Max target you can model via discretionary cuts
+if margin >= 0:
+    max_target = max(baseline_margin + disc, 0.0)
+else:
+    max_target = max(disc, 0.0)
 
 colA, colB = st.columns(2)
 with colA:
-    extra_a = st.number_input(
-        "Scenario A — Extra savings (£/week)",
+    target_a = st.number_input(
+        "Scenario A — Target savings (£/week)",
         min_value=0.0,
-        max_value=max(disc, 0.0),
-        value=10.0,
+        max_value=max_target,
+        value=min(120.0, max_target),
         step=5.0,
-        key="extra_a",
+        key="target_a",
         on_change=clear_ab_silent,
-        help=(
-            "Extra weekly savings achieved by reducing discretionary spending. "
-            "Baseline already keeps any positive Margin as savings."
-        ),
+        disabled=structural_deficit,
     )
-
 with colB:
-    extra_b = st.number_input(
-        "Scenario B — Extra savings (£/week)",
+    target_b = st.number_input(
+        "Scenario B — Target savings (£/week)",
         min_value=0.0,
-        max_value=max(disc, 0.0),
-        value=20.0,
+        max_value=max_target,
+        value=min(160.0, max_target),
         step=5.0,
-        key="extra_b",
+        key="target_b",
         on_change=clear_ab_silent,
-        help="A second extra-savings level to compare against Scenario A.",
+        disabled=structural_deficit,
     )
 
-st.markdown("**Policy (Option A):** baseline saves your Margin; scenarios add savings by cutting discretionary.")
+st.markdown("**Policy (Option B):** targets use your Margin first; only the remainder requires cutting discretionary.")
 
-def extra_status(extra: float, name: str) -> bool:
-    extra = float(extra)
-    if extra > disc + 1e-9:
-        st.error(f"{name}: you only have £{disc:,.0f}/w discretionary available to cut.")
-        return False
-    if extra <= 1e-9:
-        st.info(f"{name}: no behaviour change vs baseline (extra savings £0/w).")
+def target_status(target: float, name: str) -> tuple[bool, float, float, float]:
+    """
+    Returns:
+      ok, cut_needed, from_margin, from_discretionary
+    """
+    t = float(target)
+
+    # In deficit, targets are interpreted as post-break-even commitments.
+    in_deficit_now = float(margin) < 0
+
+    # How much must be cut from discretionary to reach the target?
+    cut_needed = max(0.0, t - baseline_margin)
+
+    # Split for explanation
+    from_margin = min(t, baseline_margin)
+    from_discretionary = cut_needed
+
+    # Feasibility cap:
+    # - If margin>=0: supported by margin + discretionary
+    # - If margin<0: supported by discretionary only
+    cap = (baseline_margin + disc) if float(margin) >= 0 else disc
+
+    if t > cap + 1e-9:
+        if float(margin) >= 0:
+            st.error(
+                f"{name}: target £{t:,.0f}/w exceeds what you can support "
+                f"(Margin £{baseline_margin:,.0f}/w + Discretionary £{disc:,.0f}/w)."
+            )
+        else:
+            st.error(
+                f"{name}: target £{t:,.0f}/w exceeds your current discretionary (£{disc:,.0f}/w). "
+                "While you are in deficit, targets are interpreted as goals **after break-even**."
+            )
+        return False, cut_needed, from_margin, from_discretionary
+
+    # Status messaging
+    if cut_needed <= 1e-9:
+        if in_deficit_now:
+            st.info(
+                f"{name}: this target would be fully covered by margin **after break-even** "
+                "(no discretionary cut needed)."
+            )
+        else:
+            st.success(f"{name}: fully covered by your current Margin (no discretionary cut needed).")
     else:
-        st.warning(f"{name}: requires cutting discretionary spending by ≈ £{extra:,.0f}/w.")
-    return True
+        if in_deficit_now:
+            st.warning(
+                f"{name}: once you reach break-even, this target would require cutting discretionary "
+                f"by ≈ £{cut_needed:,.0f}/w."
+            )
+        else:
+            st.warning(
+                f"{name}: £{from_margin:,.0f}/w comes from Margin, "
+                f"and requires cutting discretionary by ≈ £{cut_needed:,.0f}/w."
+            )
 
-ok_a = extra_status(extra_a, "Scenario A")
-ok_b = extra_status(extra_b, "Scenario B")
+    return True, cut_needed, from_margin, from_discretionary
+
+if structural_deficit:
+    ok_a, cut_a_w, from_margin_a, from_disc_a = False, 0.0, 0.0, 0.0
+    ok_b, cut_b_w, from_margin_b, from_disc_b = False, 0.0, 0.0, 0.0
+else:
+    ok_a, cut_a_w, from_margin_a, from_disc_a = target_status(target_a, "Scenario A")
+    ok_b, cut_b_w, from_margin_b, from_disc_b = target_status(target_b, "Scenario B")
 
 # -----------------------
 # Save / Clear + persistent messages
 # -----------------------
+
 st.caption("Save Scenario A and Scenario B to compare outcomes side-by-side.")
 
 def clear_ab():
@@ -922,12 +1107,17 @@ def clear_ab():
     st.session_state["scenario_b"] = None
     st.session_state["saved_a_msg"] = False
     st.session_state["saved_b_msg"] = False
-    st.session_state["cleared_msg"] = False
+    st.session_state["cleared_msg"] = True
 
 b1, b2, b3 = st.columns(3)
 
 with b1:
-    clicked_a = st.button("Save Scenario A", use_container_width=True, key="save_a")
+    clicked_a = st.button(
+        "Save Scenario A",
+        use_container_width=True,
+        key="save_a",
+        disabled=not can_save_scenarios
+    )
     if clicked_a:
         if st.session_state.get("baseline_df") is None:
             st.error("Generate the baseline trajectory first (Step 2).")
@@ -939,17 +1129,19 @@ with b1:
 
         elif not ok_a:
             st.error(
-                f"Scenario A cannot be saved: extra savings must be ≤ your discretionary (£{disc:,.0f}/w)."
+                f"Scenario A cannot be saved: target exceeds what you can support "
+                f"(Margin £{baseline_margin:,.0f}/w + Discretionary £{disc:,.0f}/w)."
             )
 
         else:
-            extra_a_f = float(extra_a)
+            target_a_f = float(target_a)
+            cut_a_f = float(cut_a_w)
 
             df_a, params_a = simulate_scenario_df_with_seed_offset(
                 income=float(st.session_state["income_w"]),
                 fixed_expenses=float(st.session_state["fixed_total_w"]),
                 variable_expenses=float(st.session_state["discretionary_w"]),
-                delta_savings=extra_a_f,  # ✅ Option A: EXTRA savings only
+                delta_savings=cut_a_f,  # ✅ discretionary cut required to reach target
                 weeks=int(weeks),
                 iterations=int(iterations),
                 seed=int(seed),
@@ -968,18 +1160,19 @@ with b1:
             # --- UI / reproducibility metadata ---
             params_a["preset"] = str(st.session_state["preset_name"])
             params_a["variability_pct"] = int(variability_pct)
-
-            # --- Option A semantic truth ---
-            params_a["baseline_margin"] = float(baseline_margin)
-            params_a["extra_savings"] = extra_a_f
-            params_a["discretionary_cut"] = extra_a_f
-
-            # --- Keep Step 4 compatible keys (total saving intent = margin + extra cut) ---
-            params_a["target_savings"] = float(baseline_margin + extra_a_f)
-            params_a["from_margin"] = float(baseline_margin)
-            params_a["from_discretionary"] = float(extra_a_f)
-            params_a["uncovered"] = 0.0
             params_a["iterations"] = int(iterations)
+
+            # --- Core financial semantics (Option B: target-first) ---
+            params_a["baseline_margin"] = float(baseline_margin)
+
+            params_a["target_savings"] = float(target_a_f)         
+            params_a["from_margin"] = float(from_margin_a)          
+            params_a["from_discretionary"] = float(from_disc_a)    
+            params_a["discretionary_cut"] = float(cut_a_f)          
+
+            # --- Derived / safety ---
+            params_a["extra_savings"] = float(from_disc_a)          
+            params_a["uncovered"] = 0.0
 
             st.session_state["scenario_a"] = {"df": df_a.round(2), "params": params_a}
             st.session_state["saved_a_msg"] = True
@@ -987,9 +1180,13 @@ with b1:
     if st.session_state.get("saved_a_msg", False):
         saved_badge("Scenario A saved.")
 
-
 with b2:
-    clicked_b = st.button("Save Scenario B", use_container_width=True, key="save_b")
+    clicked_b = st.button(
+        "Save Scenario B",
+        use_container_width=True,
+        key="save_b",
+        disabled=not can_save_scenarios
+    )
     if clicked_b:
         if st.session_state.get("baseline_df") is None:
             st.error("Generate the baseline trajectory first (Step 2).")
@@ -1001,17 +1198,19 @@ with b2:
 
         elif not ok_b:
             st.error(
-                f"Scenario B cannot be saved: extra savings must be ≤ your discretionary (£{disc:,.0f}/w)."
+                f"Scenario B cannot be saved: target exceeds what you can support "
+                f"(Margin £{baseline_margin:,.0f}/w + Discretionary £{disc:,.0f}/w)."
             )
 
         else:
-            extra_b_f = float(extra_b)
+            target_b_f = float(target_b)
+            cut_b_f = float(cut_b_w)
 
             df_b, params_b = simulate_scenario_df_with_seed_offset(
                 income=float(st.session_state["income_w"]),
                 fixed_expenses=float(st.session_state["fixed_total_w"]),
                 variable_expenses=float(st.session_state["discretionary_w"]),
-                delta_savings=extra_b_f,  # ✅ Option A: EXTRA savings only
+                delta_savings=cut_b_f,  # ✅ discretionary cut required to reach target
                 weeks=int(weeks),
                 iterations=int(iterations),
                 seed=int(seed),
@@ -1029,18 +1228,18 @@ with b2:
             # --- UI / reproducibility metadata ---
             params_b["preset"] = str(st.session_state["preset_name"])
             params_b["variability_pct"] = int(variability_pct)
-
-            # --- Option A semantic truth ---
-            params_b["baseline_margin"] = float(baseline_margin)
-            params_b["extra_savings"] = extra_b_f
-            params_b["discretionary_cut"] = extra_b_f
-
-            # --- Keep Step 4 compatible keys ---
-            params_b["target_savings"] = float(baseline_margin + extra_b_f)
-            params_b["from_margin"] = float(baseline_margin)
-            params_b["from_discretionary"] = float(extra_b_f)
-            params_b["uncovered"] = 0.0
             params_b["iterations"] = int(iterations)
+
+            # --- Core financial semantics (Option B: target-first) ---
+            params_b["baseline_margin"] = float(baseline_margin)
+            params_b["target_savings"] = float(target_b_f)
+            params_b["from_margin"] = float(from_margin_b)
+            params_b["from_discretionary"] = float(from_disc_b)
+            params_b["discretionary_cut"] = float(cut_b_f)
+
+            # --- Derived / safety (optional compatibility) ---
+            params_b["extra_savings"] = float(from_disc_b)
+            params_b["uncovered"] = 0.0
 
             st.session_state["scenario_b"] = {"df": df_b.round(2), "params": params_b}
             st.session_state["saved_b_msg"] = True
@@ -1166,7 +1365,7 @@ if ready_for_compare:
     )
 
     st.subheader("Summary")
-    st.dataframe(summary, use_container_width=True)
+    st.dataframe(summary, use_container_width=True, hide_index=True)
 
 # ============================================================
 # Step 4 — Reflect on impact (HUMAN-FIRST)
@@ -1174,6 +1373,11 @@ if ready_for_compare:
 st.divider()
 st.subheader("Step 4 — Reflect on impact")
 st.caption("Plain-English summary: what your weekly targets could mean for your money.")
+
+st.caption(
+    "Scenarios reflect **minimum savings commitments**, not spending caps. "
+    "If a target is already covered by your current margin, the scenario does not change the baseline."
+)
 
 if not ready_for_compare:
     st.info("Complete Step 3 (baseline + saved Scenario A and B) to see the reflection summary.")
@@ -1194,7 +1398,7 @@ else:
 
     weeks_n = int(st.session_state["weeks"])
 
-    # Total weekly "saving intent" (baseline margin + extra cut)
+    # Total weekly saving intent (user target)
     target_a_w = float(params_a.get("target_savings", 0.0))
     target_b_w = float(params_b.get("target_savings", 0.0))
 
@@ -1223,10 +1427,31 @@ else:
         else []
     )
 
+    # ✅ NEW: pass breakdown to reflection builder (for structural deficit insights)
+    breakdown = {
+        "income_w": float(st.session_state.get("income_w", 0.0)),
+        "fixed_total_w": float(st.session_state.get("fixed_total_w", 0.0)),
+        "fixed_w": float(to_weekly(st.session_state.get("fixed_essential_raw", 0.0),
+                              st.session_state.get("fixed_essential_period", "Weekly"))),
+        "var_w": float(to_weekly(st.session_state.get("variable_essential_raw", 0.0),
+                            st.session_state.get("variable_essential_period", "Weekly"))),
+        "disc_w": float(st.session_state.get("discretionary_w", 0.0)),
+        "margin_w": float(st.session_state.get("weekly_margin", 0.0)),
+    }
+
+    max_possible_margin = float(st.session_state.get("weekly_margin", 0.0)) +              float(st.session_state.get("discretionary_w", 0.0))
+    is_structural_deficit = max_possible_margin < 0
+
     text = build_human_reflection_text(
         metrics,
         shock_events=shock_events,
+        structural_deficit=structural_deficit,
+        breakdown=breakdown, 
     )
+
+    # ✅ NEW: structural deficit block (only shown if explain.py provides it)
+    if text.get("structural_deficit"):
+        st.markdown(text["structural_deficit"])
 
     st.markdown("### What you get if you follow each plan")
     st.markdown(text.get("what_you_get", ""))
@@ -1250,7 +1475,7 @@ else:
         fixed_expenses=float(st.session_state["fixed_total_w"]),
         variable_expenses=float(st.session_state["discretionary_w"]),
         weeks=int(st.session_state["weeks"]),
-        # ✅ Option A: explanation deltas are EXTRA savings (cuts), not total savings targets
+        # ✅ Explanation deltas represent the discretionary cut (behaviour change), not the total target
         delta_a=float(cut_a_w),
         delta_b=float(cut_b_w),
         variability_pct=float(variability_pct),
@@ -1286,8 +1511,8 @@ else:
             f"""
 **Scenario semantics (traceability):**
 - Baseline margin saved by default: **£{baseline_margin:,.0f}/w**
-- Scenario A extra savings (discretionary cut): **£{cut_a_w:,.0f}/w** → total saving intent **£{target_a_w:,.0f}/w**
-- Scenario B extra savings (discretionary cut): **£{cut_b_w:,.0f}/w** → total saving intent **£{target_b_w:,.0f}/w**
+- Scenario A discretionary cut required: **£{cut_a_w:,.0f}/w** → target savings **£{target_a_w:,.0f}/w**
+- Scenario B discretionary cut required: **£{cut_b_w:,.0f}/w** → target savings **£{target_b_w:,.0f}/w**
 """.strip()
         )
 

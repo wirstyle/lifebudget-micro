@@ -62,45 +62,48 @@ class ExpenseItem(TypedDict, total=False):
     name: str
     amount: float
     period: str
-    enabled: bool
-
 
 def total_weekly_from_items(items: Sequence[dict]) -> float:
     """
     Sum a list of itemised expenses into a weekly total.
+
     Expected fields per dict:
       - amount (numeric)
       - period ("Weekly"|"Monthly"|"Yearly")  [optional; defaults Weekly]
-      - enabled (bool)                        [optional; defaults True]
+
+    Back-compat:
+      - If legacy 'enabled' exists, it is respected (False => row ignored).
     """
     total = 0.0
     for it in items or []:
         try:
-            enabled = bool(it.get("enabled", True))
-            if not enabled:
+            # Back-compat: respect legacy "enabled" if present
+            if "enabled" in it and not bool(it.get("enabled", True)):
                 continue
+
             amount = _safe_float(it.get("amount", 0.0))
             period = it.get("period", "Weekly") or "Weekly"
+
             if amount <= 0:
                 continue
+
             total += to_weekly(amount, str(period))
         except Exception:
             continue
-    return float(total)
 
+    return float(total)
 
 def default_fixed_items_rows() -> List[ExpenseItem]:
     """Default rows for a 'Fixed essentials' data_editor."""
     return [
-        {"name": "Rent / housing", "amount": 0.0, "period": "Monthly", "enabled": True},
-        {"name": "Utilities (gas/electric/water)", "amount": 0.0, "period": "Monthly", "enabled": True},
-        {"name": "Council tax", "amount": 0.0, "period": "Monthly", "enabled": True},
-        {"name": "Internet / phone", "amount": 0.0, "period": "Monthly", "enabled": True},
-        {"name": "Transport pass", "amount": 0.0, "period": "Weekly", "enabled": True},
-        {"name": "Insurance", "amount": 0.0, "period": "Monthly", "enabled": True},
-        {"name": "Subscriptions (fixed)", "amount": 0.0, "period": "Monthly", "enabled": False},
+        {"name": "Rent / housing", "amount": 0.0, "period": "Monthly"},
+        {"name": "Utilities (gas/electric/water)", "amount": 0.0, "period": "Monthly"},
+        {"name": "Council tax", "amount": 0.0, "period": "Monthly"},
+        {"name": "Internet / phone", "amount": 0.0, "period": "Monthly"},
+        {"name": "Transport pass", "amount": 0.0, "period": "Weekly"},
+        {"name": "Insurance", "amount": 0.0, "period": "Monthly"},
+        {"name": "Subscriptions (fixed)", "amount": 0.0, "period": "Monthly"},
     ]
-
 
 # ============================================================
 # Discretionary presets (matches Step 1 UI buttons)
