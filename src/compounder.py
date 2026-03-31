@@ -1,12 +1,28 @@
 # src/compounder.py
 """
-Compounder+ (Scenario Simulation Module)
+Short-horizon weekly scenario simulation for LifeBudget Micro.
 
-This module intentionally contains **pure computation** (no Streamlit):
-- Monte Carlo scenario simulation (uncertainty on variable spending)
-- Optional one-off shock (unexpected expense) application to trajectories
-- Helpers to build a tidy scenario DataFrame for the UI
-- Lightweight schema validation for scenario outputs
+Responsibilities
+----------------
+This module handles the weekly uncertainty layer used by the core budgeting
+engine. In particular, it is responsible for:
+
+- weekly scenario simulation
+- uncertainty in variable/discretionary spending
+- one-off shock/event adjustments to balances
+- building scenario DataFrames for app.py visualisation
+
+Scope note
+----------
+This module is intentionally limited to short-horizon weekly budgeting logic.
+
+Long-horizon savings growth / investment projection is handled separately in
+`investment.py`, which was added as an optional module for probabilistic
+investment-growth exploration under risk and volatility assumptions.
+
+This separation is intentional:
+- `compounder.py` supports weekly budgeting decisions
+- `investment.py` supports optional long-term growth exploration
 """
 
 from __future__ import annotations

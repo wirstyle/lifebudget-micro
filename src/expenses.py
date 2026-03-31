@@ -7,6 +7,7 @@
 # - Variable essentials breakdown model (utilities/season/commute/groceries/household)
 # - One-off events cleaning + shock_map building (weekly)
 # - Apply cumulative shock_map to a time series (used by compounder.py)
+# - Shared period conversion helpers (weekly / monthly / yearly)
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -16,10 +17,14 @@ import math
 
 
 # --- Conversions (kept here to avoid circular imports) ---
+WEEKS_PER_YEAR = 52.0
+MONTHS_PER_YEAR = 12.0
+WEEKS_PER_MONTH = WEEKS_PER_YEAR / MONTHS_PER_YEAR
+
 PERIOD_TO_WEEK = {
     "Weekly": 1.0,
-    "Monthly": 12.0 / 52.0,  # approx, consistent with app.py
-    "Yearly": 1.0 / 52.0,
+    "Monthly": MONTHS_PER_YEAR / WEEKS_PER_YEAR,  # approx, consistent with app.py
+    "Yearly": 1.0 / WEEKS_PER_YEAR,
 }
 
 
@@ -28,6 +33,54 @@ def to_weekly(amount: Union[int, float], period: str) -> float:
     if period not in PERIOD_TO_WEEK:
         raise ValueError(f"Unknown period: {period!r}. Expected one of {list(PERIOD_TO_WEEK)}")
     return float(amount) * float(PERIOD_TO_WEEK[period])
+
+
+# ------------------------------------------------------------
+# Period conversion helpers (shared across budgeting & investment)
+# ------------------------------------------------------------
+
+def weekly_to_monthly(amount: Union[int, float]) -> float:
+    """
+    Convert weekly amount to monthly equivalent.
+
+    Uses 52 weeks / 12 months convention.
+    """
+    return float(amount) * WEEKS_PER_MONTH
+
+
+def monthly_to_weekly(amount: Union[int, float]) -> float:
+    """
+    Convert monthly amount to weekly equivalent.
+    """
+    return float(amount) / WEEKS_PER_MONTH
+
+
+def monthly_to_yearly(amount: Union[int, float]) -> float:
+    """
+    Convert monthly amount to yearly equivalent.
+    """
+    return float(amount) * MONTHS_PER_YEAR
+
+
+def yearly_to_monthly(amount: Union[int, float]) -> float:
+    """
+    Convert yearly amount to monthly equivalent.
+    """
+    return float(amount) / MONTHS_PER_YEAR
+
+
+def weekly_to_yearly(amount: Union[int, float]) -> float:
+    """
+    Convert weekly amount to yearly equivalent.
+    """
+    return float(amount) * WEEKS_PER_YEAR
+
+
+def yearly_to_weekly(amount: Union[int, float]) -> float:
+    """
+    Convert yearly amount to weekly equivalent.
+    """
+    return float(amount) / WEEKS_PER_YEAR
 
 
 def _safe_float(x) -> float:
@@ -63,6 +116,7 @@ class ExpenseItem(TypedDict, total=False):
     amount: float
     period: str
 
+
 def total_weekly_from_items(items: Sequence[dict]) -> float:
     """
     Sum a list of itemised expenses into a weekly total.
@@ -93,6 +147,7 @@ def total_weekly_from_items(items: Sequence[dict]) -> float:
 
     return float(total)
 
+
 def default_fixed_items_rows() -> List[ExpenseItem]:
     """Default rows for a 'Fixed essentials' data_editor."""
     return [
@@ -104,6 +159,7 @@ def default_fixed_items_rows() -> List[ExpenseItem]:
         {"name": "Insurance", "amount": 0.0, "period": "Monthly"},
         {"name": "Subscriptions (fixed)", "amount": 0.0, "period": "Monthly"},
     ]
+
 
 # ============================================================
 # Discretionary presets (matches Step 1 UI buttons)
