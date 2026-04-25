@@ -43,6 +43,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from src.coherence import evaluate_config_coherence, suggest_coherence_repairs
+
 
 # ============================================================
 # Dataclasses
@@ -95,6 +97,329 @@ def _safe_float(x: Any) -> float:
         return v if np.isfinite(v) else np.nan
     except Exception:
         return np.nan
+
+
+DEFAULT_COHERENCE_PHILOSOPHY = "Balanced"
+EXPERIMENTAL_COHERENCE_OBJECTIVE_NAME = "coherence_score"
+
+# Phase 2 soft-gating thresholds.
+# Keep these conservative and aligned with the existing penalty ladder:
+# - below 0.40: structurally too stretched for automatic selection
+# - below 0.60: still valid, but discouraged unless no better candidate exists
+COHERENCE_AUTO_EXCLUDED_THRESHOLD = 0.40
+COHERENCE_DISCOURAGED_THRESHOLD = 0.60
+
+
+def _coerce_numeric_frame(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
+    """Safely coerce a column subset to numeric without calling pd.to_numeric on a DataFrame."""
+    use_cols = [str(c) for c in list(cols or []) if str(c) in df.columns]
+    if not use_cols:
+        return pd.DataFrame(index=pd.Index(df.index))
+    return df[use_cols].apply(pd.to_numeric, errors="coerce")
+
+
+def _resolve_multiobjective_objective_names(
+    objective_names: Sequence[str],
+    *,
+    include_coherence_objective: bool = False,
+) -> List[str]:
+    obj_cols: List[str] = []
+    seen = set()
+    for raw in list(objective_names or []):
+        name = str(raw).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        obj_cols.append(name)
+    if bool(include_coherence_objective) and EXPERIMENTAL_COHERENCE_OBJECTIVE_NAME not in seen:
+        obj_cols.append(EXPERIMENTAL_COHERENCE_OBJECTIVE_NAME)
+    return obj_cols
+
+
+def _objective_directions_from_specs(
+    objective_names: Sequence[str],
+    *,
+    objective_specs: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Dict[str, str]:
+    specs = _coerce_objective_specs_for_hv(objective_names, objective_specs=objective_specs)
+    return {
+        str(col): ("minimize" if str(specs.get(str(col), {}).get("sense", "max")).strip().lower() == "min" else "maximize")
+        for col in [str(x) for x in list(objective_names or []) if str(x).strip()]
+    }
+
+
+def _coerce_coherence_philosophy(value: Any) -> str:
+    raw = str(value or DEFAULT_COHERENCE_PHILOSOPHY).strip()
+    if raw in {"Growth", "Balanced", "Defensive"}:
+        return raw
+    return DEFAULT_COHERENCE_PHILOSOPHY
+
+
+def _json_to_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value is None:
+        return {}
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _extract_candidate_cfg_payload_from_row(row: Any, *, base_cfg_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if row is None:
+        return dict(base_cfg_payload or {})
+    row_map = dict(row.to_dict()) if hasattr(row, "to_dict") else dict(row) if isinstance(row, dict) else {}
+    for key in ("full_candidate_payload_json", "effective_cfg_payload_json", "applied_cfg_payload_json", "config_payload_json"):
+        payload = _json_to_dict(row_map.get(key))
+        if payload:
+            return payload
+    patch = _json_to_dict(row_map.get("candidate_params_json"))
+    if patch:
+        merged = dict(base_cfg_payload or {})
+        merged.update(patch)
+        return merged
+    return dict(base_cfg_payload or {})
+
+
+def _evaluate_coherence_from_cfg_payload(cfg_payload: Dict[str, Any], *, philosophy: Any = None) -> Dict[str, Any]:
+    payload = dict(cfg_payload or {})
+    philosophy_name = _coerce_coherence_philosophy(philosophy)
+    if not payload:
+        return {
+            "label": "unavailable",
+            "score": 0.0,
+            "score_continuous": 0.5,
+            "reasons": [],
+            "warnings": ["empty_cfg_payload"],
+            "philosophy": philosophy_name,
+        }
+    try:
+        result = dict(evaluate_config_coherence(payload, philosophy_name) or {})
+    except Exception as exc:
+        result = {
+            "label": "unavailable",
+            "score": 0.0,
+            "score_continuous": 0.5,
+            "reasons": [],
+            "warnings": [f"coherence_eval_failed: {exc}"],
+        }
+    result["philosophy"] = philosophy_name
+    result["score_continuous"] = float(np.clip(_safe_float(result.get("score_continuous", 0.5)), 0.0, 1.0))
+    return result
+
+
+def _coherence_penalty_from_score(coherence_score: Any) -> float:
+    score = _safe_float(coherence_score)
+    if not np.isfinite(score):
+        return 0.0
+    if score < 0.40:
+        return -0.30
+    if score < 0.50:
+        return -0.15
+    if score < 0.60:
+        return -0.05
+    return 0.0
+
+def _coherence_selection_penalty_from_score(coherence_score: Any) -> float:
+    """Soft selection-time penalty for frontier choice (Phase 3A).
+
+    Keep this gentler than the Phase 1 objective penalty. Phase 2 gating still
+    handles hard exclusion / discouraged fallback.
+    """
+    score = _safe_float(coherence_score)
+    if not np.isfinite(score):
+        return 0.0
+    if score < COHERENCE_AUTO_EXCLUDED_THRESHOLD:
+        return -0.10
+    if score < COHERENCE_DISCOURAGED_THRESHOLD:
+        return -0.06
+    if score < 0.70:
+        return -0.02
+    return 0.0
+
+
+def _apply_coherence_selection_penalty(
+    df: pd.DataFrame,
+    *,
+    base_score_col: str,
+    adjusted_score_col: str,
+    coherence_philosophy: Optional[str] = None,
+    base_cfg_payload: Optional[Dict[str, Any]] = None,
+) -> pd.DataFrame:
+    work = pd.DataFrame(df).copy()
+    if work.empty:
+        if adjusted_score_col not in work.columns:
+            work[adjusted_score_col] = pd.Series(dtype="float64")
+        if "coherence_selection_penalty" not in work.columns:
+            work["coherence_selection_penalty"] = pd.Series(dtype="float64")
+        return work
+
+    if coherence_philosophy is not None:
+        need_annotate = any(col not in work.columns for col in [
+            "coherence_score",
+            "coherence_gate_status",
+            "coherence_auto_excluded",
+            "coherence_discouraged",
+        ])
+        if need_annotate:
+            work = _annotate_candidate_table_with_coherence(
+                work,
+                philosophy=coherence_philosophy,
+                base_cfg_payload=base_cfg_payload,
+            )
+
+    if "coherence_score" not in work.columns:
+        work["coherence_selection_penalty"] = 0.0
+        work[adjusted_score_col] = pd.to_numeric(work.get(base_score_col), errors="coerce")
+        return work
+
+    penalties = pd.to_numeric(work.get("coherence_score"), errors="coerce").map(_coherence_selection_penalty_from_score).astype(float)
+    work["coherence_selection_penalty"] = penalties
+    base_scores = pd.to_numeric(work.get(base_score_col), errors="coerce")
+    work[adjusted_score_col] = base_scores + penalties
+    return work
+
+
+def _apply_coherence_selection_gating(
+    df: pd.DataFrame,
+    *,
+    higher_is_better: bool = True,
+    score_sort_col: Optional[str] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+    """Phase 2 soft gating for final selection."""
+    work = pd.DataFrame(df).copy()
+    if work.empty:
+        return work, work, {
+            "selection_reason": "no_candidates_available",
+            "used_fallback": False,
+            "n_total": 0,
+            "n_ok": 0,
+            "n_discouraged": 0,
+            "n_auto_excluded": 0,
+        }
+
+    if "coherence_auto_excluded" not in work.columns:
+        xs = pd.to_numeric(work.get("coherence_score"), errors="coerce")
+        work["coherence_auto_excluded"] = xs < COHERENCE_AUTO_EXCLUDED_THRESHOLD
+    else:
+        work["coherence_auto_excluded"] = work["coherence_auto_excluded"].astype(bool)
+
+    if "coherence_discouraged" not in work.columns:
+        xs = pd.to_numeric(work.get("coherence_score"), errors="coerce")
+        work["coherence_discouraged"] = (xs < COHERENCE_DISCOURAGED_THRESHOLD) & ~(work["coherence_auto_excluded"].astype(bool))
+    else:
+        work["coherence_discouraged"] = work["coherence_discouraged"].astype(bool)
+
+    if "coherence_gate_status" not in work.columns:
+        gate_status = np.where(
+            work["coherence_auto_excluded"].astype(bool),
+            "auto_excluded",
+            np.where(work["coherence_discouraged"].astype(bool), "discouraged", "ok"),
+        )
+        work["coherence_gate_status"] = pd.Series(gate_status, index=work.index, dtype="object")
+
+    allowed = work.loc[~work["coherence_auto_excluded"].astype(bool)].copy()
+
+    if score_sort_col and score_sort_col in work.columns:
+        sort_scores = pd.to_numeric(work[score_sort_col], errors="coerce")
+    else:
+        sort_scores = pd.Series(np.arange(len(work), 0, -1), index=work.index, dtype="float64")
+
+    meta = {
+        "used_fallback": False,
+        "n_total": int(work.shape[0]),
+        "n_ok": int((work["coherence_gate_status"].astype(str) == "ok").sum()),
+        "n_discouraged": int(work["coherence_discouraged"].astype(bool).sum()),
+        "n_auto_excluded": int(work["coherence_auto_excluded"].astype(bool).sum()),
+    }
+
+    ok_df = allowed.loc[~allowed["coherence_discouraged"].astype(bool)].copy()
+    if not ok_df.empty:
+        meta["selection_reason"] = "selected_from_ok_candidates"
+        return ok_df, work, meta
+
+    if not allowed.empty:
+        meta["selection_reason"] = "selected_from_discouraged_candidates_only"
+        meta["used_fallback"] = True
+        return allowed, work, meta
+
+    ordered = work.assign(__sort_score=sort_scores).sort_values(
+        "__sort_score",
+        ascending=not bool(higher_is_better),
+        na_position="last",
+    ).drop(columns="__sort_score")
+
+    fallback = ordered.iloc[:1].copy() if not ordered.empty else ordered
+    meta["selection_reason"] = "all_candidates_auto_excluded_fallback"
+    meta["used_fallback"] = True
+    if not fallback.empty:
+        work.loc[fallback.index, "coherence_selected_with_fallback"] = True
+    return fallback, work, meta
+
+
+def _annotate_candidate_table_with_coherence(
+    df: pd.DataFrame,
+    *,
+    philosophy: Any = None,
+    base_cfg_payload: Optional[Dict[str, Any]] = None,
+    source_score_col: Optional[str] = None,
+    adjusted_score_col: Optional[str] = None,
+) -> pd.DataFrame:
+    work = pd.DataFrame(df).copy()
+    if work.empty:
+        if adjusted_score_col and adjusted_score_col not in work.columns:
+            work[adjusted_score_col] = pd.Series(dtype="float64")
+        return work
+
+    philosophy_name = _coerce_coherence_philosophy(philosophy)
+    coherence_scores: List[float] = []
+    coherence_labels: List[str] = []
+    coherence_penalties: List[float] = []
+    coherence_gate_status: List[str] = []
+    coherence_auto_excluded: List[bool] = []
+    coherence_discouraged: List[bool] = []
+    coherence_issue_counts: List[int] = []
+    coherence_repair_patches: List[str] = []
+    for _, row in work.iterrows():
+        payload = _extract_candidate_cfg_payload_from_row(row, base_cfg_payload=base_cfg_payload)
+        coherence = _evaluate_coherence_from_cfg_payload(payload, philosophy=philosophy_name)
+        repair_plan = suggest_coherence_repairs(payload, philosophy_name)
+        score = float(np.clip(_safe_float(coherence.get("score_continuous", 0.5)), 0.0, 1.0))
+        penalty = float(_coherence_penalty_from_score(score))
+        gate_status = 'ok'
+        if score < COHERENCE_AUTO_EXCLUDED_THRESHOLD or bool(repair_plan.get('incompatible')):
+            gate_status = 'auto_excluded'
+        elif score < COHERENCE_DISCOURAGED_THRESHOLD or int(repair_plan.get('n_issues', 0) or 0) > 0:
+            gate_status = 'discouraged'
+        coherence_scores.append(score)
+        coherence_labels.append(str(coherence.get("label", "mixed") or "mixed"))
+        coherence_penalties.append(penalty)
+        coherence_gate_status.append(gate_status)
+        coherence_auto_excluded.append(gate_status == 'auto_excluded')
+        coherence_discouraged.append(gate_status == 'discouraged')
+        coherence_issue_counts.append(int(repair_plan.get('n_issues', 0) or 0))
+        try:
+            coherence_repair_patches.append(json.dumps(dict(repair_plan.get('suggested_patch', {}) or {}), sort_keys=True))
+        except Exception:
+            coherence_repair_patches.append('{}')
+
+    work["coherence_philosophy"] = philosophy_name
+    work["coherence_score"] = pd.Series(coherence_scores, index=work.index, dtype="float64")
+    work["coherence_label"] = pd.Series(coherence_labels, index=work.index, dtype="object")
+    work["coherence_penalty"] = pd.Series(coherence_penalties, index=work.index, dtype="float64")
+    work["coherence_gate_status"] = pd.Series(coherence_gate_status, index=work.index, dtype="object")
+    work["coherence_auto_excluded"] = pd.Series(coherence_auto_excluded, index=work.index, dtype="bool")
+    work["coherence_discouraged"] = pd.Series(coherence_discouraged, index=work.index, dtype="bool")
+    work["coherence_issue_count"] = pd.Series(coherence_issue_counts, index=work.index, dtype="int64")
+    work["coherence_suggested_patch_json"] = pd.Series(coherence_repair_patches, index=work.index, dtype="object")
+
+    if source_score_col and adjusted_score_col:
+        base_scores = pd.to_numeric(work.get(source_score_col), errors="coerce")
+        penalties = pd.to_numeric(work.get("coherence_penalty"), errors="coerce").fillna(0.0)
+        work[adjusted_score_col] = base_scores + penalties
+    return work
 
 
 
@@ -211,6 +536,19 @@ def _validate_signal_and_target(panel: pd.DataFrame, signal_col: str, target_col
         raise KeyError(f"panel missing required columns: {missing}")
 
 
+def _groupby_apply_series_agg(df: pd.DataFrame, by: str, func) -> pd.DataFrame:
+    """Compatibility wrapper for pandas groupby.apply on per-group Series aggregations.
+
+    Uses include_groups=False when available to avoid future pandas behaviour changes
+    while preserving the existing output shape after reset_index().
+    """
+    grouped = df.groupby(by, dropna=False)
+    try:
+        return grouped.apply(func, include_groups=False).reset_index()
+    except TypeError:
+        return grouped.apply(func).reset_index()
+
+
 # ============================================================
 # Point forecast error metrics
 # ============================================================
@@ -250,7 +588,7 @@ def compute_error_metrics(
 
     if by is None:
         return _agg(df).to_frame().T.reset_index(drop=True)
-    out = df.groupby(by, dropna=False).apply(_agg).reset_index()
+    out = _groupby_apply_series_agg(df, by, _agg)
     return out
 
 
@@ -289,7 +627,7 @@ def compute_pinball_loss(
 
     if by is None:
         return _agg(df).to_frame().T.reset_index(drop=True)
-    return df.groupby(by, dropna=False).apply(_agg).reset_index()
+    return _groupby_apply_series_agg(df, by, _agg)
 
 
 def compute_interval_metrics(
@@ -351,7 +689,7 @@ def compute_interval_metrics(
 
     if by is None:
         return _agg(df).to_frame().T.reset_index(drop=True)
-    return df.groupby(by, dropna=False).apply(_agg).reset_index()
+    return _groupby_apply_series_agg(df, by, _agg)
 
 
 def summarize_probabilistic_forecast(
@@ -4364,6 +4702,11 @@ def _run_objective_once(
 
     cfg = config_from_dict(payload)
     run = run_micro_investment_pipeline(panel_df, cfg=cfg)
+    try:
+        coherence_eval = evaluate_config_coherence(payload, DEFAULT_COHERENCE_PHILOSOPHY) or {}
+        coherence_score = _safe_float(coherence_eval.get("score_continuous", coherence_eval.get("score")))
+    except Exception:
+        coherence_score = np.nan
     val = _extract_tuning_objective_value(run, objective=objective)
     perf = _run_perf_dict(run)
     risk = run.get("risk_summary", {}) or {}
@@ -4390,6 +4733,7 @@ def _run_objective_once(
         "mean_active_assets": _safe_float(uni.get("mean_active_assets")),
         "mean_effective_n_assets": _safe_float(div.get("mean_effective_n_assets")),
         "inverse_concentration": _safe_float(_extract_inverse_concentration_proxy(run)),
+        "coherence_score": coherence_score,
     }
     summary.update(composite_summary)
     return val, run, summary
@@ -5542,8 +5886,8 @@ def _select_stage1_refinement_seeds(
     eligible = stage1_df.copy()
     if "status" in eligible.columns:
         eligible = eligible[eligible["status"].fillna("ok").astype(str).eq("ok")].copy()
-    if objective_col in eligible.columns:
-        eligible = eligible[pd.to_numeric(eligible[objective_col], errors="coerce").notna()].copy()
+    if objective_sort_col in eligible.columns:
+        eligible = eligible[pd.to_numeric(eligible[objective_sort_col], errors="coerce").notna()].copy()
     if "candidate_stage" in eligible.columns:
         eligible = eligible[eligible["candidate_stage"].astype(str).eq("stage1")].copy()
     if eligible.empty:
@@ -5645,12 +5989,15 @@ def choose_best_tuning_candidate_payload(
     objective_col: str = "objective_value",
     higher_is_better: bool = True,
     status_col: str = "status",
+    coherence_philosophy: Optional[str] = None,
 ) -> Dict[str, Any]:
     best_row, table = choose_best_tuning_trial(
         trials_df,
         objective_col=objective_col,
         higher_is_better=higher_is_better,
         status_col=status_col,
+        coherence_philosophy=coherence_philosophy,
+        base_cfg_payload=base_cfg_payload,
     )
     payload = extract_best_candidate_payload_from_row(best_row, base_cfg_payload=base_cfg_payload)
     payload["best_row"] = None if best_row is None else best_row.to_dict()
@@ -5795,6 +6142,7 @@ def run_simple_auto_optimize(
     status_col: str = "status",
     min_abs_improvement: float = 1e-9,
     min_rel_improvement: float = 1e-4,
+    coherence_philosophy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the backend for Phase 5 Simple-mode auto optimization.
 
@@ -5892,12 +6240,18 @@ def run_simple_auto_optimize(
             objective_col=objective_col,
             higher_is_better=higher_is_better,
             status_col=status_col,
+            coherence_philosophy=coherence_philosophy,
         )
         selection_table = pd.DataFrame(best_payload_bundle.get("selection_table", pd.DataFrame())).copy()
         best_row_dict = best_payload_bundle.get("best_row")
         best_row = pd.Series(best_row_dict) if isinstance(best_row_dict, dict) and best_row_dict else None
         baseline_row = _extract_baseline_tuning_row(selection_table if not selection_table.empty else trials_df)
         result["selection_table"] = selection_table
+        if isinstance(selection_table, pd.DataFrame) and not selection_table.empty:
+            if "coherence_auto_excluded" in selection_table.columns:
+                result["coherence_auto_excluded_count"] = int(selection_table["coherence_auto_excluded"].fillna(False).astype(bool).sum())
+            if "coherence_discouraged" in selection_table.columns:
+                result["coherence_discouraged_count"] = int(selection_table["coherence_discouraged"].fillna(False).astype(bool).sum())
         result["best_payload"] = dict(best_payload_bundle)
         result["best_row"] = best_row
         result["baseline_row"] = baseline_row
@@ -6260,24 +6614,383 @@ def choose_best_tuning_trial(
     objective_col: str = "objective_value",
     higher_is_better: bool = True,
     status_col: str = "status",
+    coherence_philosophy: Optional[str] = None,
+    base_cfg_payload: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[pd.Series], pd.DataFrame]:
     """Choose the best valid tuning trial and return (best_row, sorted_table)."""
     table = build_tuning_trials_table(trials_df, objective_col=objective_col, sort_desc=higher_is_better)
     if table.empty:
         return None, table
+    objective_sort_col = objective_col
+    if coherence_philosophy is not None:
+        table = _annotate_candidate_table_with_coherence(
+            table,
+            philosophy=coherence_philosophy,
+            base_cfg_payload=base_cfg_payload,
+            source_score_col=objective_col,
+            adjusted_score_col=f"{objective_col}_adjusted",
+        )
+        if f"{objective_col}_adjusted" in table.columns:
+            objective_sort_col = f"{objective_col}_adjusted"
     eligible = table.copy()
     if status_col in eligible.columns:
         eligible = eligible[eligible[status_col].fillna("ok").astype(str).eq("ok")].copy()
     if objective_col in eligible.columns:
         eligible = eligible[pd.to_numeric(eligible[objective_col], errors="coerce").notna()].copy()
+    if coherence_philosophy is not None and not eligible.empty and "coherence_auto_excluded" in eligible.columns:
+        non_excluded = eligible[~eligible["coherence_auto_excluded"].fillna(False)].copy()
+        if not non_excluded.empty:
+            eligible = non_excluded
+        if "coherence_discouraged" in eligible.columns:
+            preferred = eligible[~eligible["coherence_discouraged"].fillna(False)].copy()
+            if not preferred.empty:
+                eligible = preferred
     if eligible.empty:
         return None, table
+    sort_cols = [objective_sort_col, "sharpe", "cagr", "trial"]
+    ascending = [not bool(higher_is_better), False, False, True]
+    if coherence_philosophy is not None and "coherence_score" in eligible.columns:
+        sort_cols = [objective_sort_col, "coherence_score", "sharpe", "cagr", "trial"]
+        ascending = [not bool(higher_is_better), False, False, False, True]
     eligible = eligible.sort_values(
-        [objective_col, "sharpe", "cagr", "trial"],
-        ascending=[not bool(higher_is_better), False, False, True],
+        sort_cols,
+        ascending=ascending,
         na_position="last",
     ).reset_index(drop=True)
-    return eligible.iloc[0], table
+
+# ============================================================
+# Step 5 candidate selection / stability integration
+# ============================================================
+
+def _step5_candidate_perf_dict(row_map: Dict[str, Any]) -> Dict[str, Any]:
+    perf = row_map.get("performance_summary")
+    if isinstance(perf, dict) and perf:
+        return dict(perf)
+    perf = row_map.get("perf")
+    if isinstance(perf, dict) and perf:
+        return dict(perf)
+    run = row_map.get("run")
+    if isinstance(run, dict):
+        return _run_perf_dict(run)
+    return {}
+
+
+def _step5_candidate_cfg_payload(
+    row_map: Dict[str, Any],
+    *,
+    base_cfg_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = _extract_candidate_cfg_payload_from_row(row_map, base_cfg_payload=base_cfg_payload)
+    if payload:
+        return payload
+    cfg_patch = row_map.get("cfg_patch")
+    if isinstance(cfg_patch, dict):
+        payload = dict(base_cfg_payload or {})
+        payload.update(cfg_patch)
+        return payload
+    return dict(base_cfg_payload or {})
+
+
+def _step5_candidate_acceptance_dict(row_map: Dict[str, Any]) -> Dict[str, Any]:
+    decision = row_map.get("acceptance_decision")
+    if isinstance(decision, dict):
+        return dict(decision)
+    return {}
+
+
+def _build_step5_candidate_selection_table(
+    candidate_evaluations: Sequence[Dict[str, Any]],
+    *,
+    coherence_philosophy: Optional[str] = None,
+    base_cfg_payload: Optional[Dict[str, Any]] = None,
+) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for idx, item in enumerate(list(candidate_evaluations or []), start=1):
+        row_map = dict(item or {})
+        perf = _step5_candidate_perf_dict(row_map)
+        acceptance = _step5_candidate_acceptance_dict(row_map)
+        sharpe = _safe_float(row_map.get("sharpe", perf.get("sharpe")))
+        cagr = _safe_float(row_map.get("cagr", perf.get("cagr")))
+        max_drawdown = _safe_float(row_map.get("max_drawdown", perf.get("max_drawdown")))
+        annual_volatility = _safe_float(row_map.get("annual_volatility", perf.get("annual_volatility", perf.get("annualized_volatility"))))
+        mean_turnover = _safe_float(row_map.get("mean_turnover", perf.get("mean_turnover")))
+        information_ratio = _safe_float(row_map.get("information_ratio", perf.get("information_ratio")))
+
+        base_score = _safe_float(row_map.get("base_score"))
+        if not np.isfinite(base_score):
+            base_score = float(sharpe if np.isfinite(sharpe) else 0.0)
+            if np.isfinite(max_drawdown):
+                base_score -= 0.50 * float(max_drawdown)
+            if np.isfinite(cagr):
+                base_score += 0.30 * float(cagr)
+
+        instability_penalty = _safe_float(row_map.get("instability_penalty", row_map.get("acceptance_penalty")))
+        robustness_score = _safe_float(row_map.get("robustness_score"))
+        robustness_label = row_map.get("robustness_label")
+        if not np.isfinite(instability_penalty) or not np.isfinite(robustness_score) or robustness_label in {None, ""}:
+            stability_payload = row_map.get("candidate_stability_payload", {})
+            if isinstance(stability_payload, dict):
+                if not np.isfinite(instability_penalty):
+                    instability_penalty = _safe_float(stability_payload.get("instability_penalty"))
+                if not np.isfinite(robustness_score):
+                    robustness_score = _safe_float(stability_payload.get("robustness_score"))
+                if robustness_label in {None, ""}:
+                    robustness_label = stability_payload.get("robustness_label")
+        if not np.isfinite(instability_penalty):
+            instability_penalty = 0.0
+        if not np.isfinite(robustness_score):
+            robustness_score = 0.0
+        robustness_label = str(robustness_label or "Unknown")
+
+        adjusted_score = _safe_float(row_map.get("adjusted_score"))
+        if not np.isfinite(adjusted_score):
+            adjusted_score = float(base_score) - float(instability_penalty)
+
+        candidate_idx = int(row_map.get("candidate_idx", idx) or idx)
+        candidate_label = str(row_map.get("candidate_label", f"Candidate {candidate_idx}") or f"Candidate {candidate_idx}")
+        cfg_payload = _step5_candidate_cfg_payload(row_map, base_cfg_payload=base_cfg_payload)
+        cfg_patch = row_map.get("cfg_patch", {})
+        if not isinstance(cfg_patch, dict):
+            cfg_patch = _json_to_dict(row_map.get("candidate_params_json"))
+        candidate_params_json = row_map.get("candidate_params_json")
+        if not isinstance(candidate_params_json, str) or not candidate_params_json.strip():
+            try:
+                candidate_params_json = json.dumps(dict(cfg_patch or {}), sort_keys=True, default=str)
+            except Exception:
+                candidate_params_json = "{}"
+
+        accepted_pre = bool(acceptance.get("accepted", False))
+        rows.append({
+            **row_map,
+            "trial": int(candidate_idx),
+            "status": str(row_map.get("status", "ok") or "ok"),
+            "candidate_idx": candidate_idx,
+            "candidate_label": candidate_label,
+            "candidate_source": str(row_map.get("candidate_source", "")),
+            "candidate_params_json": candidate_params_json,
+            "full_candidate_payload_json": json.dumps(dict(cfg_payload or {}), sort_keys=True, default=str),
+            "cfg_patch_json": json.dumps(dict(cfg_patch or {}), sort_keys=True, default=str),
+            "sharpe": sharpe,
+            "cagr": cagr,
+            "max_drawdown": max_drawdown,
+            "annual_volatility": annual_volatility,
+            "mean_turnover": mean_turnover,
+            "information_ratio": information_ratio,
+            "base_score": float(base_score) if np.isfinite(base_score) else np.nan,
+            "adjusted_score": float(adjusted_score) if np.isfinite(adjusted_score) else np.nan,
+            "robustness_score": float(robustness_score) if np.isfinite(robustness_score) else np.nan,
+            "robustness_label": robustness_label,
+            "instability_penalty": float(instability_penalty) if np.isfinite(instability_penalty) else np.nan,
+            "accepted_pre_coherence": bool(accepted_pre),
+            "accepted": bool(accepted_pre),
+        })
+
+    work = pd.DataFrame(rows)
+    if work.empty:
+        return work
+
+    work = _annotate_candidate_table_with_coherence(
+        work,
+        philosophy=coherence_philosophy,
+        base_cfg_payload=base_cfg_payload,
+        source_score_col="adjusted_score",
+        adjusted_score_col="adjusted_score_with_coherence",
+    )
+    work = _apply_coherence_selection_penalty(
+        work,
+        base_score_col="adjusted_score_with_coherence" if "adjusted_score_with_coherence" in work.columns else "adjusted_score",
+        adjusted_score_col="selection_score",
+        coherence_philosophy=coherence_philosophy,
+        base_cfg_payload=base_cfg_payload,
+    )
+
+    if "selection_score" not in work.columns:
+        work["selection_score"] = pd.to_numeric(work.get("adjusted_score"), errors="coerce")
+
+    auto_excluded = work.get("coherence_auto_excluded", pd.Series(False, index=work.index)).astype(bool)
+    work["accepted_final"] = work["accepted_pre_coherence"].astype(bool) & ~auto_excluded
+    work["accepted"] = work["accepted_final"].astype(bool)
+
+    final_decisions: List[Dict[str, Any]] = []
+    for _, row in work.iterrows():
+        original = _step5_candidate_acceptance_dict(dict(row.to_dict()))
+        final_decision = dict(original)
+        if bool(row.get("coherence_auto_excluded", False)):
+            final_decision["accepted"] = False
+            final_decision["decision"] = "reject_coherence_auto_excluded"
+            final_decision["reason"] = "Rejected by coherence gating before final selection."
+        elif bool(row.get("coherence_discouraged", False)) and bool(original.get("accepted", False)):
+            final_decision["accepted"] = True
+            final_decision["decision"] = "accept_discouraged"
+            final_decision["reason"] = "Accepted, but coherence discourages this candidate relative to cleaner alternatives."
+        else:
+            final_decision["accepted"] = bool(row.get("accepted_final", False))
+            final_decision.setdefault("decision", "accept" if bool(row.get("accepted_final", False)) else "reject_score")
+        final_decision["candidate_raw_final_score"] = round(_safe_float(row.get("base_score")), 4)
+        final_decision["candidate_final_score"] = round(_safe_float(row.get("selection_score")), 4)
+        final_decision["candidate_adjusted_score"] = round(_safe_float(row.get("adjusted_score")), 4)
+        final_decision["selection_score"] = round(_safe_float(row.get("selection_score")), 4)
+        final_decision["instability_penalty"] = round(_safe_float(row.get("instability_penalty")), 4)
+        final_decision["robustness_score"] = round(_safe_float(row.get("robustness_score")), 4)
+        final_decision["stability_flag"] = (
+            "stable" if _safe_float(row.get("instability_penalty")) <= 0.05 else
+            ("moderate_sensitivity" if _safe_float(row.get("instability_penalty")) <= 0.10 else "fragile")
+        )
+        final_decision["coherence_score"] = round(_safe_float(row.get("coherence_score")), 4)
+        final_decision["coherence_gate_status"] = str(row.get("coherence_gate_status", "ok") or "ok")
+        final_decision["coherence_selection_reason"] = str(row.get("coherence_selection_reason", "") or "")
+        final_decisions.append(final_decision)
+
+    work["acceptance_decision"] = final_decisions
+    work = work.sort_values(
+        ["accepted_final", "selection_score", "coherence_score", "sharpe", "cagr", "candidate_idx"],
+        ascending=[False, False, False, False, False, True],
+        na_position="last",
+    ).reset_index(drop=True)
+    return work
+
+
+def _build_step5_governance_payload(
+    selected_row: Optional[pd.Series],
+    *,
+    simple_cfg: Optional[Dict[str, Any]] = None,
+    coherence_selection_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if selected_row is None:
+        return {}
+    row = selected_row.to_dict() if hasattr(selected_row, "to_dict") else dict(selected_row)
+    simple_cfg = dict(simple_cfg or {})
+    meta = dict(coherence_selection_meta or {})
+
+    warnings: List[str] = []
+    instability_penalty = _safe_float(row.get("instability_penalty"))
+    robustness_score = _safe_float(row.get("robustness_score"))
+    sharpe = _safe_float(row.get("sharpe"))
+    max_dd = _safe_float(row.get("max_drawdown"))
+    gate_status = str(row.get("coherence_gate_status", "ok") or "ok")
+    if np.isfinite(instability_penalty) and instability_penalty > 0.08:
+        warnings.append("Governance is discounting temporal fragility in the selected candidate.")
+    if np.isfinite(max_dd) and max_dd > 0.20:
+        warnings.append("Drawdown remains elevated for the intended philosophy.")
+    if np.isfinite(sharpe) and sharpe < 0.70:
+        warnings.append("Sharpe remains modest after stability adjustment.")
+    if gate_status == "discouraged":
+        warnings.append("Selected candidate is coherence-discouraged and was kept only after gating fallback or score trade-off.")
+    if bool(meta.get("used_fallback", False)):
+        warnings.append("Selection required a fallback because no fully coherent candidate survived the gating preference.")
+
+    selected_final = bool(row.get("accepted_final", row.get("accepted", False)))
+    coherence_score = float(np.clip(_safe_float(row.get("coherence_score", 0.5)), 0.0, 1.0))
+    coherence_label = str(row.get("coherence_label", "mixed") or "mixed")
+    return {
+        "philosophy": str(meta.get("philosophy") or row.get("coherence_philosophy") or "Balanced"),
+        "coherence_label": coherence_label,
+        "coherence_score": round(coherence_score, 3),
+        "coherence_gate_status": gate_status,
+        "coherence_selection_reason": str(meta.get("selection_reason", row.get("coherence_selection_reason", "")) or ""),
+        "coherence_selected_with_fallback": bool(meta.get("used_fallback", row.get("coherence_selected_with_fallback", False))),
+        "warnings": warnings,
+        "suggested_repairs": [
+            "Increase diversification or lower concentration if robustness remains weak.",
+            "Prefer candidates with lower temporal instability when adjusted scores are close.",
+        ],
+        "tradeoff_explanation": (
+            "Governance now uses the real Step 4 panel, real engine reruns, temporal stability penalties and coherence gating "
+            "inside the same Step 5 candidate-selection pipeline."
+        ),
+        "source": "evaluation_step5_governance",
+        "style_preset": str(simple_cfg.get("style_preset", simple_cfg.get("preset", ""))),
+        "strategy_template": str(simple_cfg.get("strategy_template", "")),
+        "robustness_score": robustness_score,
+        "instability_penalty": instability_penalty,
+        "selection_score": _safe_float(row.get("selection_score")),
+        "adjusted_score": _safe_float(row.get("adjusted_score")),
+        "stability_flag": (
+            "stable" if _safe_float(row.get("instability_penalty")) <= 0.05 else
+            ("moderate_sensitivity" if _safe_float(row.get("instability_penalty")) <= 0.10 else "fragile")
+        ),
+        "accepted": selected_final,
+    }
+
+
+def evaluate_step5_candidate_pipeline(
+    candidate_evaluations: Sequence[Dict[str, Any]],
+    *,
+    simple_cfg: Optional[Dict[str, Any]] = None,
+    coherence_philosophy: Optional[str] = None,
+    base_cfg_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    table = _build_step5_candidate_selection_table(
+        candidate_evaluations,
+        coherence_philosophy=coherence_philosophy,
+        base_cfg_payload=base_cfg_payload,
+    )
+    if table.empty:
+        return {
+            "selection_table": pd.DataFrame(),
+            "candidate_evaluations": [],
+            "best_candidate_eval": {},
+            "best_accepted_eval": None,
+            "governance_payload": {},
+            "coherence_selection_meta": {"selection_reason": "no_candidates_available", "used_fallback": False},
+        }
+
+    eligible, table_all, gating_meta = _apply_coherence_selection_gating(
+        table,
+        higher_is_better=True,
+        score_sort_col="selection_score",
+    )
+    eligible = eligible.sort_values(
+        ["accepted_final", "selection_score", "coherence_score", "sharpe", "cagr", "candidate_idx"],
+        ascending=[False, False, False, False, False, True],
+        na_position="last",
+    ).reset_index(drop=True)
+    best_row = eligible.iloc[0] if not eligible.empty else table_all.iloc[0]
+    accepted_pool = eligible.loc[eligible["accepted_final"].astype(bool)].copy()
+    best_accepted_row = accepted_pool.iloc[0] if not accepted_pool.empty else None
+
+    eval_map_by_idx = {
+        int((item or {}).get("candidate_idx", idx + 1)): dict(item or {})
+        for idx, item in enumerate(list(candidate_evaluations or []))
+    }
+    enriched_rows: List[Dict[str, Any]] = []
+    for _, row in table_all.iterrows():
+        row_map = row.to_dict()
+        idx = int(row_map.get("candidate_idx", 0) or 0)
+        original = dict(eval_map_by_idx.get(idx, {}))
+        original.update(row_map)
+        enriched_rows.append(original)
+
+    best_eval = dict(best_row.to_dict()) if best_row is not None else {}
+    if best_eval:
+        src = dict(eval_map_by_idx.get(int(best_eval.get("candidate_idx", 0) or 0), {}))
+        src.update(best_eval)
+        best_eval = src
+
+    best_accepted_eval = None
+    if best_accepted_row is not None:
+        best_accepted_eval = dict(best_accepted_row.to_dict())
+        src = dict(eval_map_by_idx.get(int(best_accepted_eval.get("candidate_idx", 0) or 0), {}))
+        src.update(best_accepted_eval)
+        best_accepted_eval = src
+
+    governance_payload = _build_step5_governance_payload(
+        best_row,
+        simple_cfg=simple_cfg,
+        coherence_selection_meta={
+            **gating_meta,
+            "philosophy": _coerce_coherence_philosophy(coherence_philosophy),
+        },
+    )
+
+    return {
+        "selection_table": table_all.reset_index(drop=True),
+        "candidate_evaluations": enriched_rows,
+        "best_candidate_eval": best_eval,
+        "best_accepted_eval": best_accepted_eval,
+        "governance_payload": governance_payload,
+        "coherence_selection_meta": gating_meta,
+    }
 
 # ============================================================
 # Classifier signal reporting
@@ -7268,6 +7981,8 @@ def compute_fixed_composite_score(
     objective_specs: Optional[Dict[str, Dict[str, str]]] = None,
     score_col: str = "fixed_composite_score",
     prefix: str = "fixed_comp_norm_",
+    coherence_philosophy: Optional[str] = None,
+    base_cfg_payload: Optional[Dict[str, Any]] = None,
 ) -> pd.DataFrame:
     """Add a canonical fixed composite score to a frontier/population DataFrame."""
     work, weights, _ = normalize_fixed_composite_objective_matrix(
@@ -7317,6 +8032,21 @@ def compute_fixed_composite_score(
     work["fixed_composite_missing_components"] = "|".join(missing_components)
     for name, w in weights.items():
         work[f"fixed_composite_weight_{name}"] = float(_safe_float(w))
+    if coherence_philosophy is not None:
+        work = _annotate_candidate_table_with_coherence(
+            work,
+            philosophy=coherence_philosophy,
+            base_cfg_payload=base_cfg_payload,
+            source_score_col=score_col,
+            adjusted_score_col=f"{score_col}_adjusted",
+        )
+        work = _apply_coherence_selection_penalty(
+            work,
+            base_score_col=score_col,
+            adjusted_score_col=f"{score_col}_coherence_adjusted",
+            coherence_philosophy=coherence_philosophy,
+            base_cfg_payload=base_cfg_payload,
+        )
     return work
 
 
@@ -7326,6 +8056,8 @@ def choose_solution_by_fixed_composite_score(
     profile: str | Dict[str, float] = "composite_balanced",
     objective_specs: Optional[Dict[str, Dict[str, str]]] = None,
     score_col: str = "fixed_composite_score",
+    coherence_philosophy: Optional[str] = None,
+    base_cfg_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Choose the best row by explicit fixed composite score.
 
@@ -7360,8 +8092,16 @@ def choose_solution_by_fixed_composite_score(
         weight_profile=weights,
         objective_specs=objective_specs,
         score_col=score_col,
+        coherence_philosophy=coherence_philosophy,
+        base_cfg_payload=base_cfg_payload,
     )
-    xs = pd.to_numeric(scored.get(score_col), errors="coerce")
+    if coherence_philosophy is not None and f"{score_col}_coherence_adjusted" in scored.columns:
+        score_col_effective = f"{score_col}_coherence_adjusted"
+    elif coherence_philosophy is not None and f"{score_col}_adjusted" in scored.columns:
+        score_col_effective = f"{score_col}_adjusted"
+    else:
+        score_col_effective = score_col
+    xs = pd.to_numeric(scored.get(score_col_effective), errors="coerce")
     if not xs.notna().any():
         first_row = dict(scored.iloc[0].to_dict())
         return {
@@ -7376,11 +8116,11 @@ def choose_solution_by_fixed_composite_score(
     selected = dict(scored.loc[pick_idx].to_dict())
     selected["weight_profile"] = dict(weights)
     selected["weight_profile_name"] = weight_profile_name
-    selected["score_col"] = str(score_col)
+    selected["score_col"] = str(score_col_effective)
     return {
         "selected_row": selected,
         "frontier_df": scored,
-        "score_col": str(score_col),
+        "score_col": str(score_col_effective),
         "weight_profile": dict(weights),
         "weight_profile_name": weight_profile_name,
     }
@@ -7419,6 +8159,8 @@ def choose_multiobjective_solution_by_policy(
     composite_profile: str | Dict[str, float] = "balanced",
     hypervolume_preset: str = "balanced",
     score_col: str = "fixed_composite_score",
+    coherence_philosophy: Optional[str] = None,
+    base_cfg_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Choose one row from a frontier/population DataFrame using a named policy.
 
@@ -7455,6 +8197,8 @@ def choose_multiobjective_solution_by_policy(
             profile=resolved_profile,
             objective_specs=objective_specs,
             score_col=score_col,
+            coherence_philosophy=coherence_philosophy,
+            base_cfg_payload=base_cfg_payload,
         )
         fixed["selection_policy"] = "fixed_composite_score"
         fixed["selection_policy_requested"] = policy_raw
@@ -7468,6 +8212,8 @@ def choose_multiobjective_solution_by_policy(
             profile=resolved_profile,
             objective_specs=objective_specs,
             score_col=score_col,
+            coherence_philosophy=coherence_philosophy,
+            base_cfg_payload=base_cfg_payload,
         )
         fixed["selection_policy"] = "fixed_composite_score"
         fixed["selection_policy_requested"] = policy_raw
@@ -7488,15 +8234,39 @@ def choose_multiobjective_solution_by_policy(
         frontier_scored = pd.DataFrame(picked.get("frontier_df", df)).copy()
         if frontier_scored.empty:
             frontier_scored = df.copy()
-        xs = pd.to_numeric(frontier_scored.get("hv_contribution"), errors="coerce")
+        if coherence_philosophy is not None:
+            frontier_scored = _annotate_candidate_table_with_coherence(
+                frontier_scored,
+                philosophy=coherence_philosophy,
+                base_cfg_payload=base_cfg_payload,
+            )
+            frontier_scored = _apply_coherence_selection_penalty(
+                frontier_scored,
+                base_score_col="hv_contribution",
+                adjusted_score_col="selection_score_weighted_hypervolume_coherence_adjusted",
+                coherence_philosophy=coherence_philosophy,
+                base_cfg_payload=base_cfg_payload,
+            )
+        eligible_scored, frontier_scored_all, gating_meta = _apply_coherence_selection_gating(
+            frontier_scored,
+            higher_is_better=True,
+            score_sort_col=("selection_score_weighted_hypervolume_coherence_adjusted" if coherence_philosophy is not None and "selection_score_weighted_hypervolume_coherence_adjusted" in frontier_scored.columns else "hv_contribution"),
+        )
+        xs = pd.to_numeric(eligible_scored.get("selection_score_weighted_hypervolume_coherence_adjusted"), errors="coerce")
+        if not xs.notna().any():
+            xs = pd.to_numeric(eligible_scored.get("hv_contribution"), errors="coerce")
         if xs.notna().any():
             pick_idx = xs.astype(float).idxmax()
-            selected = dict(frontier_scored.loc[pick_idx].to_dict())
+            selected = dict(eligible_scored.loc[pick_idx].to_dict())
         else:
             selected = dict((picked.get("selected_row") or {}))
-            if not selected and not frontier_scored.empty:
-                selected = dict(frontier_scored.iloc[0].to_dict())
+            if not selected and not eligible_scored.empty:
+                selected = dict(eligible_scored.iloc[0].to_dict())
+        selected["coherence_selection_reason"] = str(gating_meta.get("selection_reason", selected.get("coherence_selection_reason", "")) or "")
+        selected["coherence_selected_with_fallback"] = bool(gating_meta.get("used_fallback", selected.get("coherence_selected_with_fallback", False)))
         picked["selected_row"] = selected
+        picked["frontier_df"] = frontier_scored_all
+        picked["score_col"] = "selection_score_weighted_hypervolume_coherence_adjusted" if coherence_philosophy is not None and "selection_score_weighted_hypervolume_coherence_adjusted" in frontier_scored_all.columns else "hv_contribution"
         return picked
 
     cols = list(objective_cols or [c for c in ["sharpe", "cagr", "max_drawdown", "mean_turnover", "diversification", "stability"] if c in df.columns])
@@ -7514,12 +8284,13 @@ def choose_multiobjective_solution_by_policy(
     work["__crowding_rank"] = crowd
 
     if norm_cols:
-        work["balanced_compromise_score"] = pd.to_numeric(work[norm_cols], errors="coerce").mean(axis=1)
-        dist_to_ideal = np.sqrt(np.square(pd.to_numeric(work[norm_cols], errors="coerce").fillna(0.0) - 1.0).sum(axis=1))
+        norm_numeric = _coerce_numeric_frame(work, norm_cols)
+        work["balanced_compromise_score"] = norm_numeric.mean(axis=1)
+        dist_to_ideal = np.sqrt(np.square(norm_numeric.fillna(0.0) - 1.0).sum(axis=1))
         work["knee_point_score"] = (1.0 - dist_to_ideal) + 0.10 * crowd
     else:
         fallback_numeric = [c for c in ["sharpe", "cagr", "diversification", "stability"] if c in work.columns]
-        work["balanced_compromise_score"] = pd.to_numeric(work[fallback_numeric], errors="coerce").mean(axis=1) if fallback_numeric else 0.0
+        work["balanced_compromise_score"] = _coerce_numeric_frame(work, fallback_numeric).mean(axis=1) if fallback_numeric else 0.0
         work["knee_point_score"] = pd.to_numeric(work["balanced_compromise_score"], errors="coerce").fillna(0.0) + 0.10 * crowd
 
     if policy_raw == "knee_point":
@@ -7528,18 +8299,46 @@ def choose_multiobjective_solution_by_policy(
         local_score_col = "balanced_compromise_score"
         policy_raw = "balanced_compromise"
 
-    xs = pd.to_numeric(work.get(local_score_col), errors="coerce")
+    if coherence_philosophy is not None:
+        work = _annotate_candidate_table_with_coherence(
+            work,
+            philosophy=coherence_philosophy,
+            base_cfg_payload=base_cfg_payload,
+        )
+        adjusted_local_score_col = f"{local_score_col}_coherence_adjusted"
+        work = _apply_coherence_selection_penalty(
+            work,
+            base_score_col=local_score_col,
+            adjusted_score_col=adjusted_local_score_col,
+            coherence_philosophy=coherence_philosophy,
+            base_cfg_payload=base_cfg_payload,
+        )
+        eligible_work, work_all, gating_meta = _apply_coherence_selection_gating(
+            work,
+            higher_is_better=True,
+            score_sort_col=adjusted_local_score_col if adjusted_local_score_col in work.columns else local_score_col,
+        )
+        score_col_effective = adjusted_local_score_col if adjusted_local_score_col in work_all.columns else local_score_col
+    else:
+        eligible_work = work
+        work_all = work
+        gating_meta = {"selection_reason": "selected_without_coherence", "used_fallback": False}
+        score_col_effective = local_score_col
+
+    xs = pd.to_numeric(eligible_work.get(score_col_effective), errors="coerce")
     if xs.notna().any():
         pick_idx = xs.astype(float).idxmax()
-        selected = dict(work.loc[pick_idx].to_dict())
+        selected = dict(eligible_work.loc[pick_idx].to_dict())
     else:
-        selected = dict(work.iloc[0].to_dict()) if not work.empty else {}
+        selected = dict(eligible_work.iloc[0].to_dict()) if not eligible_work.empty else {}
 
-    selected["score_col"] = local_score_col
+    selected["score_col"] = score_col_effective
+    selected["coherence_selection_reason"] = str(gating_meta.get("selection_reason", selected.get("coherence_selection_reason", "")) or "")
+    selected["coherence_selected_with_fallback"] = bool(gating_meta.get("used_fallback", selected.get("coherence_selected_with_fallback", False)))
     return {
         "selected_row": selected,
-        "frontier_df": work,
-        "score_col": local_score_col,
+        "frontier_df": work_all,
+        "score_col": score_col_effective,
         "selection_policy": policy_raw,
         "selection_policy_requested": str(policy or "balanced_compromise"),
         "composite_profile": None,
@@ -7973,6 +8772,8 @@ def run_nsga2_tuning(
     seed: int = 42,
     objective_specs: Optional[Dict[str, Dict[str, str]]] = None,
     seed_payloads: Optional[Sequence[Dict[str, Any]]] = None,
+    include_coherence_objective: bool = False,
+    coherence_philosophy: Optional[str] = None,
 ) -> dict:
     """Minimal functional NSGA-II tuner over discrete param-space candidates."""
     if panel_df is None or not isinstance(panel_df, pd.DataFrame) or panel_df.empty:
@@ -7984,8 +8785,9 @@ def run_nsga2_tuning(
     rng = np.random.default_rng(int(seed))
     pop_size = max(4, int(population_size))
     n_gen = max(1, int(generations))
-    obj_cols = [str(x) for x in list(objective_names or []) if str(x).strip()]
+    obj_cols = _resolve_multiobjective_objective_names(objective_names, include_coherence_objective=include_coherence_objective)
     specs = _coerce_objective_specs_for_hv(obj_cols, objective_specs=objective_specs)
+    objective_directions = _objective_directions_from_specs(obj_cols, objective_specs=specs)
 
     eval_cache: Dict[str, Dict[str, Any]] = {}
     trial_counter = 0
@@ -7999,11 +8801,12 @@ def run_nsga2_tuning(
         trial_counter += 1
         merged = _recursive_merge_payloads(base_cfg_payload, candidate_patch)
         try:
-            _, _, summary = _run_objective_once(
+            _, _, summary = _run_multiobjective_once(
                 panel_df,
                 base_cfg_payload=merged,
                 param_dict={},
-                objective=obj_cols[0] if obj_cols else "sharpe",
+                objective_names=obj_cols,
+                coherence_philosophy=coherence_philosophy,
             )
             row = _trial_row_from_result(
                 trial_counter,
@@ -8074,7 +8877,7 @@ def run_nsga2_tuning(
     if not final_frontier.empty:
         frontier_norm = normalize_objective_matrix(final_frontier, objective_cols=obj_cols, objective_specs=specs, prefix="pick_norm_")
         norm_cols = [f"pick_norm_{c}" for c in obj_cols]
-        frontier_norm["balanced_compromise_score"] = pd.to_numeric(frontier_norm[norm_cols], errors="coerce").mean(axis=1)
+        frontier_norm["balanced_compromise_score"] = _coerce_numeric_frame(frontier_norm, norm_cols).mean(axis=1)
         pick_idx = frontier_norm["balanced_compromise_score"].astype(float).idxmax()
         best_patch = _extract_candidate_patch_from_row(final_frontier.loc[pick_idx], initial_param_space=space)
         best_compromise_payload = _recursive_merge_payloads(base_cfg_payload, best_patch)
@@ -8084,6 +8887,9 @@ def run_nsga2_tuning(
         "frontier_df": final_frontier,
         "history_df": history_df,
         "best_compromise_payload": best_compromise_payload,
+        "objective_names": list(obj_cols),
+        "objective_directions": dict(objective_directions),
+        "objective_specs": dict(specs),
     }
 
 
@@ -8504,9 +9310,10 @@ def _run_multiobjective_once(
     base_cfg_payload: Dict[str, Any],
     param_dict: Dict[str, Any],
     objective_names: Sequence[str],
+    coherence_philosophy: Optional[str] = None,
 ) -> Tuple[float, Dict[str, Any], Dict[str, Any]]:
     """Run pipeline once and extract all requested objectives explicitly from the same run."""
-    obj_cols = [str(x) for x in list(objective_names or []) if str(x).strip()]
+    obj_cols = _resolve_multiobjective_objective_names(objective_names)
     primary_objective = obj_cols[0] if obj_cols else "sharpe"
 
     try:
@@ -8533,14 +9340,31 @@ def _run_multiobjective_once(
     cfg = config_from_dict(payload)
     run = run_micro_investment_pipeline(panel_df, cfg=cfg)
     perf = _run_perf_dict(run)
+    coherence_score = np.nan
+    coherence_payload = dict(payload)
+    if EXPERIMENTAL_COHERENCE_OBJECTIVE_NAME in obj_cols:
+        run_cfg_payload = _json_to_dict(run.get("config_dict")) if isinstance(run, dict) else {}
+        if run_cfg_payload:
+            coherence_payload = run_cfg_payload
+        coherence_result = _evaluate_coherence_from_cfg_payload(
+            coherence_payload,
+            philosophy=coherence_philosophy,
+        )
+        coherence_score = float(np.clip(_safe_float(coherence_result.get("score_continuous", 0.5)), 0.0, 1.0))
     risk = run.get("risk_summary", {}) or {}
     div = run.get("diversification_summary", {}) or {}
     uni = run.get("universe_summary", {}) or {}
 
+    primary_objective_value = (
+        coherence_score
+        if str(primary_objective) == EXPERIMENTAL_COHERENCE_OBJECTIVE_NAME
+        else _safe_float(_extract_tuning_objective_value(run, objective=primary_objective))
+    )
+
     summary = {
         "objective_name": str(primary_objective),
         "objective_names": tuple(obj_cols),
-        "objective_value": _extract_tuning_objective_value(run, objective=primary_objective),
+        "objective_value": primary_objective_value,
         "config_fingerprint": config_fingerprint(cfg),
         "sharpe": _safe_float(perf.get("sharpe")),
         "cagr": _safe_float(perf.get("cagr")),
@@ -8556,8 +9380,12 @@ def _run_multiobjective_once(
         "mean_active_assets": _safe_float(uni.get("mean_active_assets")),
         "mean_effective_n_assets": _safe_float(div.get("mean_effective_n_assets")),
         "inverse_concentration": _safe_float(_extract_inverse_concentration_proxy(run)),
+        "coherence_score": coherence_score,
     }
     for obj in obj_cols:
+        if str(obj) == EXPERIMENTAL_COHERENCE_OBJECTIVE_NAME:
+            summary[str(obj)] = _safe_float(summary.get(EXPERIMENTAL_COHERENCE_OBJECTIVE_NAME))
+            continue
         summary[str(obj)] = _safe_float(_extract_tuning_objective_value(run, objective=obj))
         if str(obj).startswith("composite_"):
             summary.update(compute_multi_objective_score(run, objective=str(obj)))
@@ -8582,7 +9410,7 @@ def _objective_score_from_population_row(
     norm_cols = [f"global_pick_norm_{c}" for c in obj_cols if f"global_pick_norm_{c}" in norm.columns]
     if not norm_cols:
         return np.nan
-    return float(pd.to_numeric(norm.iloc[0][norm_cols], errors="coerce").mean())
+    return float(pd.to_numeric(pd.Series(norm.iloc[0][norm_cols]), errors="coerce").mean())
 
 
 
@@ -8594,6 +9422,8 @@ def run_global_multiobjective_search(
     objective_names: Sequence[str],
     budget: int = 200,
     method: str = "hybrid",
+    coherence_philosophy: Optional[str] = None,
+    include_coherence_objective: bool = False,
 ) -> dict:
     """Global discrete/quasi-random multi-objective search guided by param_schema.
 
@@ -8615,7 +9445,7 @@ def run_global_multiobjective_search(
         }
 
     schema = dict(param_schema or {})
-    obj_cols = [str(x) for x in list(objective_names or []) if str(x).strip()]
+    obj_cols = _resolve_multiobjective_objective_names(objective_names, include_coherence_objective=include_coherence_objective)
     if not schema or not obj_cols:
         return {
             "population_df": pd.DataFrame(),
@@ -8633,6 +9463,7 @@ def run_global_multiobjective_search(
         method_req = "hybrid"
 
     objective_specs = _coerce_objective_specs_for_hv(obj_cols, objective_specs=None)
+    objective_directions = _objective_directions_from_specs(obj_cols, objective_specs=objective_specs)
     rng = np.random.default_rng(42)
     eval_cache: Dict[str, Dict[str, Any]] = {}
     rows: List[Dict[str, Any]] = []
@@ -8651,6 +9482,7 @@ def run_global_multiobjective_search(
                     base_cfg_payload=merged,
                     param_dict={},
                     objective_names=obj_cols,
+                    coherence_philosophy=coherence_philosophy,
                 )
                 row = _trial_row_from_result(
                     sample_step,
@@ -8782,10 +9614,13 @@ def run_global_multiobjective_search(
     if not frontier_df.empty:
         picked = choose_multiobjective_solution_by_policy(
             frontier_df,
-            policy="weighted_hypervolume",
+            policy="fixed_composite_score",
             objective_cols=obj_cols,
             objective_specs=objective_specs,
+            composite_profile="balanced",
             hypervolume_preset="balanced",
+            coherence_philosophy=coherence_philosophy,
+            base_cfg_payload=base_payload,
         )
         picked_frontier = pd.DataFrame(picked.get("frontier_df", frontier_df)).copy()
         best_row_dict = dict(picked.get("selected_row") or {})
@@ -8807,6 +9642,9 @@ def run_global_multiobjective_search(
         "best_compromise_payload": best_compromise_payload,
         "frontier_hypervolume": frontier_hypervolume,
         "search_method_effective": method_req,
+        "objective_names": list(obj_cols),
+        "objective_directions": dict(objective_directions),
+        "objective_specs": dict(objective_specs),
     }
 
 
@@ -8855,13 +9693,14 @@ def _select_seed_configs_from_frontier_details(
         work["__crowding_rank"] = 0.0
 
     if norm_cols:
-        work["__balanced_score"] = pd.to_numeric(work[norm_cols], errors="coerce").mean(axis=1)
-        dist_to_ideal = np.sqrt(np.square(pd.to_numeric(work[norm_cols], errors="coerce").fillna(0.0) - 1.0).sum(axis=1))
+        norm_numeric = _coerce_numeric_frame(work, norm_cols)
+        work["__balanced_score"] = norm_numeric.mean(axis=1)
+        dist_to_ideal = np.sqrt(np.square(norm_numeric.fillna(0.0) - 1.0).sum(axis=1))
         crowd = pd.to_numeric(work["__crowding_rank"], errors="coerce").fillna(0.0)
         work["__knee_score"] = (1.0 - dist_to_ideal) + 0.10 * crowd
     else:
         fallback_numeric = [c for c in ["sharpe", "cagr", "diversification", "stability"] if c in work.columns]
-        work["__balanced_score"] = pd.to_numeric(work[fallback_numeric], errors="coerce").mean(axis=1) if fallback_numeric else 0.0
+        work["__balanced_score"] = _coerce_numeric_frame(work, fallback_numeric).mean(axis=1) if fallback_numeric else 0.0
         work["__knee_score"] = work["__balanced_score"] + 0.10 * pd.to_numeric(work["__crowding_rank"], errors="coerce").fillna(0.0)
 
     hv_n = max(1, int(round(target_n * 0.40)))
@@ -8906,9 +9745,9 @@ def _select_seed_configs_from_frontier_details(
     remaining = work.loc[[idx for idx in work.index if idx not in chosen_reasons]].copy()
     if diverse_n > 0 and not remaining.empty:
         if norm_cols:
-            feature_mat = pd.to_numeric(remaining[norm_cols], errors="coerce").fillna(0.0).to_numpy(dtype="float64")
+            feature_mat = _coerce_numeric_frame(remaining, norm_cols).fillna(0.0).to_numpy(dtype="float64")
         else:
-            feature_mat = pd.to_numeric(remaining[["__balanced_score", "__crowding_rank"]], errors="coerce").fillna(0.0).to_numpy(dtype="float64")
+            feature_mat = _coerce_numeric_frame(remaining, ["__balanced_score", "__crowding_rank"]).fillna(0.0).to_numpy(dtype="float64")
         selected_local: List[int] = []
         if feature_mat.shape[0] > 0:
             knee_order = list(np.argsort(-pd.to_numeric(remaining["__knee_score"], errors="coerce").fillna(0.0).to_numpy(dtype="float64")))
@@ -9166,6 +10005,8 @@ def run_recursive_multiobjective_search(
     shrink_factor: float = 0.5,
     convergence_tol: float = 1e-3,
     seed_frontier_size: int = 3,
+    include_coherence_objective: bool = False,
+    coherence_philosophy: Optional[str] = None,
 ) -> dict:
     """Recursive frontier-level multi-objective search.
 
@@ -9223,6 +10064,9 @@ def run_recursive_multiobjective_search(
             "convergence_reason": str(convergence_reason or ""),
             "best_frontier_df": best_frontier,
             "best_population_df": best_population,
+            "objective_names": list(obj_cols),
+            "objective_directions": dict(objective_directions),
+            "objective_specs": dict(specs),
         }
 
     if panel_df is None or not isinstance(panel_df, pd.DataFrame) or panel_df.empty:
@@ -9239,8 +10083,9 @@ def run_recursive_multiobjective_search(
     else:
         requested_seed_frontier_size = 3
     requested_seed_frontier_size = max(1, requested_seed_frontier_size)
-    obj_cols = [str(x) for x in list(objective_names or []) if str(x).strip()]
+    obj_cols = _resolve_multiobjective_objective_names(objective_names, include_coherence_objective=include_coherence_objective)
     specs = _coerce_objective_specs_for_hv(obj_cols, objective_specs=None)
+    objective_directions = _objective_directions_from_specs(obj_cols, objective_specs=specs)
     current_space = _recursive_param_space_sanitized(initial_param_space, base_cfg_payload=base_cfg_payload)
 
     all_population_parts: List[pd.DataFrame] = []
@@ -9278,6 +10123,8 @@ def run_recursive_multiobjective_search(
                 seed=42 + round_idx,
                 objective_specs=specs,
                 seed_payloads=seed_payloads,
+                include_coherence_objective=include_coherence_objective,
+                coherence_philosophy=coherence_philosophy,
             )
             population_df = pd.DataFrame(round_result.get("population_df", pd.DataFrame())).copy()
             frontier_df = pd.DataFrame(round_result.get("frontier_df", pd.DataFrame())).copy()

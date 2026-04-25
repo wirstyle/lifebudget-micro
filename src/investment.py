@@ -64,6 +64,7 @@ import hashlib
 import json
 from pathlib import Path
 from statistics import NormalDist
+import time
 
 from src.expenses import weekly_to_monthly
 
@@ -603,6 +604,9 @@ class MicroPipelineConfig:
     lookback_mu: int = 12
     lookback_sigma: int = 12
     sigma_floor: float = 0.02
+    max_oos_points: Optional[int] = None
+    enable_probabilistic: bool = True
+    enable_diagnostics: bool = True
 
     # Allocation controls
     temperature: float = 1.0
@@ -847,6 +851,10 @@ class MicroPipelineConfig:
     feature_mu_k: int = 24
     feature_mu_min_obs: int = 12
     feature_mu_cols_max: int = 8
+    feature_mu_scale_mode: Literal["none", "zscore", "vol_adjusted"] = "none"
+    feature_mu_apply_quantile: Optional[float] = None
+    feature_mu_rank_aware: bool = False
+    feature_mu_sigma_epsilon: float = 1e-6
 
     # Regime-dependent universe selection
     regime_dependent_universe_enabled: bool = False
@@ -1345,15 +1353,21 @@ def resolve_simple_ui_tuning_policy(spec: SimpleUISpec) -> Dict[str, Any]:
         "max_candidates_hint": int(max_candidates),
     }
 
-def resolve_simple_ui_to_micro_cfg(spec: SimpleUISpec) -> Tuple[MicroPipelineConfig, Dict[str, Any]]:
-    universe_bucket = _detect_universe_bucket(spec.universe_size)
-    style_preset = str(spec.style_preset or "Balanced")
-    strategy_template = str(spec.strategy_template or "Balanced Risk-Controlled")
 
-    base = config_to_dict(MicroPipelineConfig())
-    base.update(_base_cfg_for_strategy_template(strategy_template))
-    base.update(_style_preset_overrides(style_preset))
 
+def resolve_simple_ui_to_micro_cfg(
+    spec: SimpleUISpec,
+) -> Tuple[MicroPipelineConfig, Dict[str, Any]]:
+    """Resolve the Simple UI semantic preset into a concrete MicroPipelineConfig.
+
+    This is intentionally conservative: it only maps the current Simple-mode
+    controls into a coherent base config and applies a small UX stabilisation so
+    the default preset does not start in an obviously stretched state.
+    """
+    if not isinstance(spec, SimpleUISpec):
+        raise TypeError("spec must be a SimpleUISpec")
+
+    universe_bucket = _detect_universe_bucket(int(spec.universe_size or 0))
     risk_appetite = _clip01(spec.risk_appetite)
     diversification = _clip01(spec.diversification)
     stability = _clip01(spec.stability)
@@ -1363,154 +1377,118 @@ def resolve_simple_ui_to_micro_cfg(spec: SimpleUISpec) -> Tuple[MicroPipelineCon
     signal_confidence = _clip01(spec.signal_confidence)
     simplicity = _clip01(spec.simplicity)
 
-    # signal contract / template family
-    if strategy_template == "Hybrid Research":
-        base["signal_mode"] = "lambdarank_like"
+    base = dict(_base_cfg_for_strategy_template(spec.strategy_template))
+    base.update(_style_preset_overrides(spec.style_preset))
+
+    style_name = str(spec.style_preset or "Balanced")
+    template_name = str(spec.strategy_template or "Balanced Risk-Controlled")
+
+    top_k = _resolve_simple_top_k(int(spec.universe_size or 0), style_name, diversification)
+    if top_k is not None:
+        base["top_k"] = int(top_k)
+
+    base["weight_shrink"] = _resolve_simple_weight_shrink(style_name, universe_bucket, diversification, simplicity)
+    base["temperature"] = _resolve_simple_temperature(style_name, universe_bucket, diversification, risk_appetite)
+    base["probabilistic_mode"] = _resolve_simple_overlay_mode(style_name, template_name, overlay_intensity, signal_confidence)
+
+    if template_name == "Hybrid Research":
+        signal_mode = "lambdarank_like" if simplicity <= 0.70 else "mu_sigma"
+    elif style_name in {"Conservative", "Defensive"}:
+        signal_mode = "huber_mu"
     else:
-        base["signal_mode"] = "mu_sigma"
+        signal_mode = "mu_sigma"
+    base["signal_mode"] = signal_mode
 
-    # lookbacks / responsiveness
-    if stability >= 0.67:
-        base["lookback_mu"] = 24
-        base["lookback_sigma"] = 24
-        base["min_train"] = max(int(base.get("min_train", 120)), 120)
-        base["inertia"] = 0.15 + 0.20 * stability
-        base["deadband"] = True
-        base["deadband_threshold"] = 0.02 + 0.03 * stability
-    elif stability <= 0.33:
-        base["lookback_mu"] = 6
-        base["lookback_sigma"] = 6
-        base["min_train"] = 60
-        base["inertia"] = 0.00 + 0.05 * stability
-        base["deadband"] = False
-        base["deadband_threshold"] = 0.0
+    base["feature_mu_enabled"] = bool(template_name == "Hybrid Research" or signal_confidence <= 0.45)
+    base["regime_dependent_universe_enabled"] = bool(
+        int(spec.universe_size or 0) >= 50 and (drawdown_protection >= 0.65 or style_name in {"Conservative", "Defensive"})
+    )
+
+    overlay_strength = 0.45 + 0.45 * overlay_intensity
+    if style_name in {"Conservative", "Defensive"}:
+        overlay_strength += 0.05
+    elif style_name == "Research":
+        overlay_strength -= 0.10
+    if base.get("probabilistic_mode") == "none":
+        overlay_strength = 0.0
+    base["probabilistic_overlay_strength"] = float(np.clip(overlay_strength, 0.0, 0.90))
+    base["probabilistic_overlay_blend"] = float(np.clip(0.70 + 0.20 * overlay_intensity, 0.55, 0.90))
+
+    base["dispersion_gate"] = True
+    base["dispersion_gate_threshold"] = float(np.clip(0.09 + 0.06 * (0.5 - risk_appetite) + 0.04 * drawdown_protection, 0.06, 0.16))
+
+    correlation_penalty = 0.20 + 0.70 * drawdown_protection + 0.15 * diversification
+    if style_name in {"Conservative", "Defensive"}:
+        correlation_penalty += 0.10
+    elif style_name == "Growth":
+        correlation_penalty -= 0.10
+    base["correlation_penalty_strength"] = float(np.clip(correlation_penalty, 0.10, 0.95))
+
+    if bool(base.get("vol_targeting", False)):
+        current_target_vol = float(base.get("target_portfolio_vol_monthly", 0.04) or 0.04)
+        target_vol = current_target_vol
+        target_vol += 0.010 * (risk_appetite - 0.5)
+        target_vol -= 0.008 * drawdown_protection
+        target_vol -= 0.004 * stability
+        if style_name in {"Conservative", "Defensive"}:
+            target_vol = min(target_vol, 0.028)
+        elif style_name == "Balanced":
+            target_vol = min(target_vol, 0.040)
+        else:
+            target_vol = min(target_vol, 0.055)
+        target_vol = max(target_vol, 0.018 if style_name in {"Conservative", "Defensive"} else 0.024)
+        base["target_portfolio_vol_monthly"] = float(target_vol)
+
+    # Keep the base presets operationally calm by default. The app can still
+    # move into more aggressive regions via manual overrides or tuning.
+    adaptive_bias = turnover_pref
+    stabiliser = 0.5 * stability + 0.5 * drawdown_protection
+    if style_name == "Defensive":
+        # Defensive defaults should start in a calm operational zone so
+        # governance does not flag the untouched base preset as stretched.
+        turnover_penalty_strength = 0.12 + 0.05 * stabiliser + 0.03 * (1.0 - adaptive_bias)
+        turnover_constraint_max_turnover = 0.44 - 0.02 * stabiliser
+        inertia = 0.12 + 0.12 * stability + 0.03 * (1.0 - adaptive_bias)
+    elif style_name == "Conservative":
+        turnover_penalty_strength = 0.14 + 0.06 * stabiliser + 0.04 * (1.0 - adaptive_bias)
+        turnover_constraint_max_turnover = 0.43 - 0.02 * stabiliser
+        inertia = 0.10 + 0.12 * stability + 0.04 * (1.0 - adaptive_bias)
+    elif style_name == "Growth":
+        turnover_penalty_strength = 0.08 + 0.06 * stability + 0.04 * (1.0 - adaptive_bias)
+        turnover_constraint_max_turnover = 0.45
+        inertia = 0.02 + 0.06 * stability
+    elif style_name == "Research":
+        turnover_penalty_strength = 0.10 + 0.05 * stability + 0.03 * (1.0 - adaptive_bias)
+        turnover_constraint_max_turnover = 0.45
+        inertia = 0.03 + 0.05 * stability
     else:
-        base["lookback_mu"] = 12
-        base["lookback_sigma"] = 12
-        base["min_train"] = 120
-        base["inertia"] = 0.10
-        base["deadband"] = True
-        base["deadband_threshold"] = 0.02
+        turnover_penalty_strength = 0.14 + 0.08 * stabiliser + 0.04 * (1.0 - adaptive_bias)
+        turnover_constraint_max_turnover = 0.44 - 0.02 * stabiliser
+        inertia = 0.05 + 0.08 * stability + 0.02 * (1.0 - adaptive_bias)
 
-    # top-k / concentration should come primarily from universe size + style,
-    # with diversification acting as the user-facing fine-tuner.
-    base["top_k"] = _resolve_simple_top_k(spec.universe_size, style_preset, diversification)
-    base["weight_shrink"] = _resolve_simple_weight_shrink(style_preset, universe_bucket, diversification, simplicity)
-    base["temperature"] = _resolve_simple_temperature(style_preset, universe_bucket, diversification, risk_appetite)
+    base["turnover_penalty_strength"] = float(np.clip(turnover_penalty_strength, 0.06, 0.26))
+    base["turnover_constraint_max_turnover"] = float(np.clip(turnover_constraint_max_turnover, 0.32, 0.45))
 
-    # turnover preference
-    base["turnover_penalty_strength"] = float(np.clip(2.2 * (1.0 - turnover_pref), 0.0, 2.5))
-    base["turnover_penalty_target"] = float(np.clip(0.08 + 0.25 * turnover_pref, 0.05, 0.35))
-    base["turnover_constraint_max_turnover"] = float(np.clip(0.10 + 0.38 * turnover_pref, 0.08, 0.50))
-
-    # drawdown protection / vol targeting should be style-led, with sliders only
-    # nudging the final posture instead of completely rewriting it.
-    base_vol_targeting = bool(base.get("vol_targeting", True))
-    if style_preset == "Research" and drawdown_protection <= 0.70:
-        base["vol_targeting"] = False
-    else:
-        base["vol_targeting"] = base_vol_targeting or style_preset in {"Conservative", "Balanced", "Growth", "Defensive"}
-    base["covariance_aware_vol_targeting"] = bool(base["vol_targeting"])
-    target_base = float(base.get("target_portfolio_vol_monthly", 0.04))
-    target_adj = -0.015 * drawdown_protection + 0.015 * risk_appetite
-    if style_preset == "Growth":
-        target_adj += 0.004
-    elif style_preset in {"Conservative", "Defensive"}:
-        target_adj -= 0.003
-    base["target_portfolio_vol_monthly"] = float(np.clip(target_base + target_adj, 0.015, 0.060))
-    base["vol_target_floor_mult"] = 0.5
-    base["vol_target_ceiling_mult"] = 1.5
-    base["regime_derisk_high"] = float(np.clip(float(base.get("regime_derisk_high", 0.80)) - 0.10 * drawdown_protection, 0.55, 1.00))
-    base["regime_derisk_mid"] = float(np.clip(float(base.get("regime_derisk_mid", 0.95)) - 0.05 * drawdown_protection, 0.75, 1.00))
-    base["regime_derisk_low"] = float(np.clip(float(base.get("regime_derisk_low", 1.00)) - 0.02 * drawdown_protection, 0.90, 1.05))
-
-    # probabilistic overlay high-level mapping only
-    overlay_mode = _resolve_simple_overlay_mode(style_preset, strategy_template, overlay_intensity, signal_confidence)
-    base["probabilistic_mode"] = overlay_mode
-    if overlay_mode == "none":
-        base["probabilistic_overlay_strength"] = 0.0
-        base["probabilistic_overlay_blend"] = 0.0
-        base["probabilistic_interval_penalty_weight"] = 0.0
-        base["probabilistic_downside_penalty_weight"] = 0.0
-    else:
-        style_overlay_bias = {
-            "Conservative": 0.25,
-            "Defensive": 0.30,
-            "Balanced": 0.12,
-            "Growth": -0.05,
-            "Research": -0.25,
-        }.get(style_preset, 0.10)
-        base["probabilistic_overlay_strength"] = float(np.clip(0.20 + style_overlay_bias + 1.10 * overlay_intensity, 0.0, 1.5))
-        base["probabilistic_overlay_blend"] = float(np.clip(0.20 + 0.65 * overlay_intensity + 0.20 * signal_confidence, 0.0, 1.0))
-        base["probabilistic_interval_penalty_weight"] = float(np.clip(0.08 + 0.55 * overlay_intensity, 0.0, 1.0))
-        base["probabilistic_downside_penalty_weight"] = float(np.clip(0.12 + 0.65 * drawdown_protection, 0.0, 1.0))
-
-    base["probabilistic_confidence_scale"] = float(np.clip(0.25 + 1.5 * signal_confidence, 0.0, 2.0))
-    base["probabilistic_confidence_min_mult"] = float(np.clip(0.60 + 0.20 * signal_confidence, 0.5, 1.0))
-    base["probabilistic_confidence_max_mult"] = float(np.clip(1.00 + 0.50 * signal_confidence, 1.0, 1.75))
-    base["probabilistic_min_obs"] = 12 if stability >= 0.5 else 6
-
-    # dispersion gate should mostly depend on universe size, with a mild user nudge.
-    size_gate_default = {"small": False, "medium": True, "large": True}.get(universe_bucket, True)
-    base["dispersion_gate"] = bool(size_gate_default)
-    gate_base = {"small": 0.06, "medium": 0.10, "large": 0.14}.get(universe_bucket, 0.10)
-    base["dispersion_gate_threshold"] = float(np.clip(gate_base + 0.06 * (1.0 - signal_confidence), 0.04, 0.25))
-    base["dispersion_gate_min_active_weight"] = float(np.clip(0.20 + 0.10 * diversification, 0.15, 0.35))
-
-    # simplicity / sophistication governs only the master extension flags, not the
-    # deep sub-parameter families.
-    if simplicity >= 0.67:
-        base["feature_mu_enabled"] = False
-        base["factor_model_active"] = False
-        base["factor_covariance_active"] = False
-        base["regime_dependent_universe_enabled"] = False
-    elif simplicity <= 0.33:
-        if str(base.get("probabilistic_mode", "none")) != "none":
-            base["feature_mu_enabled"] = True
-        base["correlation_aware_allocation"] = True
-
-    if strategy_template == "Hybrid Research" and style_preset == "Research":
-        base["feature_mu_enabled"] = True
-    if style_preset in {"Conservative", "Defensive"} and universe_bucket in {"medium", "large"}:
-        base["regime_dependent_universe_enabled"] = True
-    elif simplicity >= 0.67:
-        base["regime_dependent_universe_enabled"] = False
-
-    # correlation-aware allocation should stay on semantically, but with intensity
-    # modulated by the style / drawdown posture instead of hard switching.
-    base["correlation_aware_allocation"] = bool(base.get("correlation_aware_allocation", True))
-    if bool(base["correlation_aware_allocation"]):
-        base["correlation_allocator_blend"] = float(np.clip(0.12 + 0.45 * diversification + 0.18 * drawdown_protection, 0.0, 0.8))
-        style_penalty_bias = {
-            "Conservative": 0.35,
-            "Defensive": 0.45,
-            "Balanced": 0.15,
-            "Growth": -0.10,
-            "Research": -0.20,
-        }.get(style_preset, 0.0)
-        base["correlation_penalty_strength"] = float(np.clip(0.6 + style_penalty_bias + 1.2 * drawdown_protection, 0.20, 2.5))
-        base["correlation_use_abs"] = True
-
-    # regime behaviour
-    if drawdown_protection >= 0.5 or stability >= 0.5 or style_preset in {"Conservative", "Defensive"}:
-        base["regime_mode"] = "quantile"
-        base["mu_regime_mode"] = "pooled"
-    else:
-        base["regime_mode"] = "none"
+    if style_name == "Defensive":
+        # Coherence currently classifies turnover_control as medium when the
+        # turnover ceiling is <= 0.40. Keep untouched Defensive presets above
+        # that boundary so the base preset starts green by default.
+        base["turnover_penalty_strength"] = float(min(base.get("turnover_penalty_strength", 0.20) or 0.20, 0.20))
+        base["turnover_constraint_max_turnover"] = float(max(base.get("turnover_constraint_max_turnover", 0.42) or 0.42, 0.41))
+    base["turnover_penalty_target"] = float(np.clip(base.get("turnover_penalty_target", 0.20) or 0.20, 0.12, 0.25))
+    base["inertia"] = float(np.clip(inertia, 0.00, 0.18))
+    base["deadband"] = bool(stability >= 0.45 or drawdown_protection >= 0.55)
+    base["deadband_threshold"] = float(np.clip(0.008 + 0.015 * stability + 0.005 * drawdown_protection, 0.008, 0.020))
 
     tuning_policy = resolve_simple_ui_tuning_policy(spec)
-
-    # Stamp the semantic Simple/Auto chooser contract directly into the resolved
-    # config, not only into the summary. This makes replay / downstream tuning /
-    # final-run diagnostics more robust because the config itself carries the same
-    # chooser semantics that the UI resolved for the user.
-    base["selection_policy"] = tuning_policy.get("selection_policy", "fixed_composite_score")
-    base["composite_profile"] = tuning_policy.get("composite_profile", "balanced")
+    base["selection_policy"] = str(tuning_policy.get("selection_policy", "fixed_composite_score") or "fixed_composite_score")
+    base["composite_profile"] = str(tuning_policy.get("composite_profile", "balanced") or "balanced")
     base["manual_composite_weights_enabled"] = False
     base["manual_composite_weights"] = None
 
     cfg_fields = {f.name for f in fields(MicroPipelineConfig)}
     cfg = MicroPipelineConfig(**{k: v for k, v in base.items() if k in cfg_fields})
+
     summary = {
         "strategy_template": spec.strategy_template,
         "style_preset": spec.style_preset,
@@ -1536,6 +1514,7 @@ def resolve_simple_ui_to_micro_cfg(spec: SimpleUISpec) -> Tuple[MicroPipelineCon
         "resolved_vol_targeting": cfg.vol_targeting,
         "resolved_turnover_penalty_strength": cfg.turnover_penalty_strength,
         "resolved_target_portfolio_vol_monthly": cfg.target_portfolio_vol_monthly,
+        "resolved_base_config": config_to_dict(cfg),
         "tuning_policy": tuning_policy,
         "resolved_tuning_objective": tuning_policy.get("objective"),
         "resolved_tuning_preferred_dims": tuning_policy.get("preferred_dims", []),
@@ -1543,7 +1522,921 @@ def resolve_simple_ui_to_micro_cfg(spec: SimpleUISpec) -> Tuple[MicroPipelineCon
         "resolved_tuning_stage2_bias": tuning_policy.get("stage2_bias"),
         "resolved_tuning_search_budget": tuning_policy.get("search_budget"),
     }
+
     return cfg, summary
+
+
+# ============================================================
+# Philosophy-aware config normalization (5C / 5D)
+# ============================================================
+
+def _coerce_philosophy_name_for_simple_flow(value: Any) -> str:
+    raw = str(value or "Balanced").strip().capitalize()
+    return raw if raw in {"Growth", "Balanced", "Defensive"} else "Balanced"
+
+
+def _caps_strength_to_cap_value(strength: Any) -> float | None:
+    raw = str(strength or "").strip().lower()
+    if raw == "strong":
+        return 0.10
+    if raw == "medium":
+        return 0.20
+    if raw == "soft":
+        return 0.30
+    return None
+
+
+def _normalise_top_k_to_range(current_top_k: Any, top_k_range: Any) -> int | None:
+    if not isinstance(top_k_range, (list, tuple)) or len(top_k_range) != 2:
+        return current_top_k if current_top_k is None else int(current_top_k)
+    try:
+        low_k = max(int(top_k_range[0]), 2)
+        high_k = max(int(top_k_range[1]), low_k)
+    except Exception:
+        return current_top_k if current_top_k is None else int(current_top_k)
+    if current_top_k is None:
+        midpoint = int(round((low_k + high_k) / 2.0))
+        return int(np.clip(midpoint, low_k, high_k))
+    try:
+        return int(np.clip(int(current_top_k), low_k, high_k))
+    except Exception:
+        midpoint = int(round((low_k + high_k) / 2.0))
+        return int(np.clip(midpoint, low_k, high_k))
+
+
+def generate_coherent_config(
+    philosophy: str,
+    base_cfg: MicroPipelineConfig,
+    constraints: Dict[str, Any] | None = None,
+) -> Tuple[MicroPipelineConfig, Dict[str, Any]]:
+    """
+    Normalize a resolved Simple-mode config into a philosophy-coherent region.
+
+    This is intentionally lightweight and non-destructive:
+    - reuse the resolved base config
+    - only clamp / correct / complete a few structural fields
+    - do not execute the engine
+    - keep backward-compatible defaults whenever already coherent
+    """
+    philosophy_name = _coerce_philosophy_name_for_simple_flow(philosophy)
+    constraints_map = dict(constraints or {})
+    payload = config_to_dict(base_cfg if isinstance(base_cfg, MicroPipelineConfig) else MicroPipelineConfig())
+    changes: Dict[str, Dict[str, Any]] = {}
+
+    def _set_field(name: str, value: Any) -> None:
+        old = payload.get(name)
+        if old != value:
+            changes[str(name)] = {"old": old, "new": value}
+            payload[name] = value
+
+    top_k_range = constraints_map.get("top_k_range")
+    new_top_k = _normalise_top_k_to_range(payload.get("top_k"), top_k_range)
+    if new_top_k is not None:
+        _set_field("top_k", int(new_top_k))
+
+    allowed_overlay_modes = [str(x) for x in list(constraints_map.get("allowed_overlay_modes", [])) if str(x)]
+    preferred_overlay_modes = [str(x) for x in list(constraints_map.get("preferred_overlay_modes", [])) if str(x)]
+    current_overlay = str(payload.get("probabilistic_mode", "none") or "none")
+    if allowed_overlay_modes and current_overlay not in allowed_overlay_modes:
+        fallback_overlay = preferred_overlay_modes[0] if preferred_overlay_modes else allowed_overlay_modes[0]
+        _set_field("probabilistic_mode", fallback_overlay)
+        current_overlay = str(fallback_overlay)
+    if philosophy_name == "Defensive":
+        defensive_overlay = "historical_by_regime" if "historical_by_regime" in allowed_overlay_modes else (preferred_overlay_modes[0] if preferred_overlay_modes else current_overlay)
+        _set_field("probabilistic_mode", defensive_overlay)
+        _set_field("probabilistic_downside_penalty_weight", max(float(payload.get("probabilistic_downside_penalty_weight", 0.0) or 0.0), 0.35))
+        _set_field("probabilistic_interval_penalty_weight", max(float(payload.get("probabilistic_interval_penalty_weight", 0.0) or 0.0), 0.20))
+    elif philosophy_name == "Growth" and current_overlay == "historical_by_regime" and "historical" in allowed_overlay_modes:
+        _set_field("probabilistic_mode", "historical")
+
+    preferred_signal_modes = [str(x) for x in list(constraints_map.get("preferred_signal_modes", [])) if str(x)]
+    current_signal = str(payload.get("signal_mode", "mu_sigma") or "mu_sigma")
+    if preferred_signal_modes and current_signal not in preferred_signal_modes:
+        _set_field("signal_mode", preferred_signal_modes[0])
+
+    covariance_required = bool(constraints_map.get("covariance_required", False))
+    preferred_covariance_models = [str(x) for x in list(constraints_map.get("preferred_covariance_models", [])) if str(x)]
+    current_cov_mode = str(payload.get("covariance_mode", "ewma_cov") or "ewma_cov")
+    if covariance_required:
+        _set_field("vol_targeting", True)
+        _set_field("covariance_aware_vol_targeting", True)
+        _set_field("correlation_aware_allocation", True)
+        if current_cov_mode not in {"corr_sigma", "ewma_cov"}:
+            _set_field("covariance_mode", "ewma_cov")
+        if philosophy_name == "Defensive":
+            _set_field("regime_mode", "quantile")
+            _set_field("regime_dependent_covariance", True)
+            _set_field("correlation_penalty_strength", max(float(payload.get("correlation_penalty_strength", 0.0) or 0.0), 1.0))
+            _set_field("target_portfolio_vol_monthly", min(float(payload.get("target_portfolio_vol_monthly", 0.04) or 0.04), 0.025))
+        elif philosophy_name == "Balanced":
+            _set_field("correlation_penalty_strength", max(float(payload.get("correlation_penalty_strength", 0.0) or 0.0), 0.6))
+    elif philosophy_name == "Growth":
+        _set_field("target_portfolio_vol_monthly", max(float(payload.get("target_portfolio_vol_monthly", 0.04) or 0.04), 0.035))
+
+    caps_strength = str(constraints_map.get("caps_strength", "") or "")
+    cap_value = _caps_strength_to_cap_value(caps_strength)
+    current_cap = payload.get("asset_weight_cap")
+    try:
+        current_cap_float = float(current_cap) if current_cap is not None else None
+    except Exception:
+        current_cap_float = None
+    if cap_value is not None and (current_cap_float is None or current_cap_float > cap_value):
+        _set_field("asset_weight_cap", float(cap_value))
+        _set_field("w_cap", float(cap_value))
+    elif cap_value is not None and payload.get("w_cap") is None:
+        _set_field("w_cap", float(cap_value))
+
+    turnover_tolerance = str(constraints_map.get("turnover_tolerance", "medium") or "medium").lower()
+    if turnover_tolerance == "low":
+        # Important UX fix:
+        # coherence.py currently labels turnover_control as "medium" when
+        # turnover_penalty_strength >= 0.30 or the turnover ceiling <= 0.40.
+        # For untouched Defensive / low-turnover-tolerance presets we want the
+        # governed base to remain in the calm / green zone by default, so keep
+        # the normalized values below those boundaries instead of tightening them
+        # into a structurally stretched state.
+        current_strength = float(payload.get("turnover_penalty_strength", 0.0) or 0.0)
+        current_limit = float(payload.get("turnover_constraint_max_turnover", 0.45) or 0.45)
+        _set_field("turnover_penalty_strength", float(np.clip(max(current_strength, 0.12), 0.12, 0.20)))
+        _set_field("turnover_constraint_max_turnover", float(np.clip(max(current_limit, 0.41), 0.41, 0.50)))
+        _set_field("inertia", max(float(payload.get("inertia", 0.0) or 0.0), 0.10))
+        _set_field("deadband", True)
+        _set_field("deadband_threshold", max(float(payload.get("deadband_threshold", 0.0) or 0.0), 0.02))
+    elif turnover_tolerance == "medium":
+        _set_field("turnover_penalty_strength", max(float(payload.get("turnover_penalty_strength", 0.0) or 0.0), 0.20))
+        _set_field("turnover_constraint_max_turnover", min(float(payload.get("turnover_constraint_max_turnover", 0.50) or 0.50), 0.45))
+    else:
+        _set_field("turnover_penalty_strength", min(float(payload.get("turnover_penalty_strength", 0.0) or 0.0), 0.50))
+
+    concentration_level = str(constraints_map.get("concentration_level", "medium") or "medium").lower()
+    if concentration_level == "high":
+        _set_field("weight_shrink", min(float(payload.get("weight_shrink", 0.05) or 0.05), 0.10))
+        _set_field("temperature", min(float(payload.get("temperature", 1.0) or 1.0), 1.0))
+    elif concentration_level == "low":
+        _set_field("weight_shrink", max(float(payload.get("weight_shrink", 0.05) or 0.05), 0.12))
+        _set_field("temperature", max(float(payload.get("temperature", 1.0) or 1.0), 1.10))
+    else:
+        _set_field("weight_shrink", min(max(float(payload.get("weight_shrink", 0.05) or 0.05), 0.05), 0.18))
+
+    cfg_fields = {f.name for f in fields(MicroPipelineConfig)}
+    coherent_cfg = MicroPipelineConfig(**{k: v for k, v in payload.items() if k in cfg_fields})
+    meta = {
+        "philosophy": philosophy_name,
+        "constraints": constraints_map,
+        "changes": changes,
+        "changed": bool(changes),
+        "n_changes": int(len(changes)),
+    }
+    return coherent_cfg, meta
+
+
+def resolve_simple_ui_with_philosophy(
+    spec: SimpleUISpec,
+) -> Tuple[MicroPipelineConfig, Dict[str, Any], Dict[str, Any]]:
+    """
+    Extended Simple UI resolution that exposes philosophy-driven constraints
+    and returns a final coherent config.
+
+    Flow:
+        spec -> resolve_simple_ui_to_micro_cfg -> constraints -> coherent config
+    """
+    cfg_base, summary = resolve_simple_ui_to_micro_cfg(spec)
+
+    try:
+        from src.coherence import resolve_philosophy_to_constraints
+    except Exception:
+        return cfg_base, summary, {}
+
+    philosophy = _coerce_philosophy_name_for_simple_flow(spec.style_preset)
+    try:
+        constraints = resolve_philosophy_to_constraints(
+            philosophy=philosophy,
+            universe=spec.universe_size,
+            strategy_template=spec.strategy_template,
+            style_preset=spec.style_preset,
+        )
+    except Exception:
+        constraints = {}
+
+    coherent_cfg, coherence_meta = generate_coherent_config(
+        philosophy=philosophy,
+        base_cfg=cfg_base,
+        constraints=constraints,
+    )
+    coherent_summary = dict(summary or {})
+    coherent_summary["resolved_base_config"] = config_to_dict(cfg_base)
+    coherent_summary["resolved_coherent_config"] = config_to_dict(coherent_cfg)
+    coherent_summary["resolved_constraints"] = dict(constraints or {})
+    coherent_summary["resolved_philosophy"] = philosophy
+    coherent_summary["resolved_coherence_normalization"] = dict(coherence_meta or {})
+    coherent_summary["resolved_coherence_adjusted"] = bool((coherence_meta or {}).get("changed", False))
+    coherent_summary["resolved_coherence_adjustment_count"] = int((coherence_meta or {}).get("n_changes", 0))
+    return coherent_cfg, coherent_summary, dict(constraints or {})
+
+
+@dataclass(frozen=True)
+class GovernedConfigResolutionResult:
+    philosophy: str
+    status: str
+    base_intention: Dict[str, Any]
+    constraints: Dict[str, Any]
+    base_cfg: MicroPipelineConfig
+    coherent_base_cfg: MicroPipelineConfig
+    final_cfg: MicroPipelineConfig
+    overrides_applied: Dict[str, Any]
+    recommendation_patch_applied: Dict[str, Any]
+    repair_patch_applied: Dict[str, Any]
+    coherence: Dict[str, Any]
+    repairs: Dict[str, Any]
+    trace: List[Dict[str, Any]]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "philosophy": self.philosophy,
+            "status": self.status,
+            "base_intention": _json_safe(self.base_intention),
+            "constraints": _json_safe(self.constraints),
+            "base_cfg": _json_safe(config_to_dict(self.base_cfg)),
+            "coherent_base_cfg": _json_safe(config_to_dict(self.coherent_base_cfg)),
+            "final_cfg": _json_safe(config_to_dict(self.final_cfg)),
+            "overrides_applied": _json_safe(self.overrides_applied),
+            "recommendation_patch_applied": _json_safe(self.recommendation_patch_applied),
+            "repair_patch_applied": _json_safe(self.repair_patch_applied),
+            "coherence": _json_safe(self.coherence),
+            "repairs": _json_safe(self.repairs),
+            "trace": _json_safe(self.trace),
+        }
+
+    def to_governance_payload(self, *, results: Any = None) -> GovernancePayload:
+        merged_overrides: Dict[str, Any] = {}
+        for patch in [self.overrides_applied, self.recommendation_patch_applied, self.repair_patch_applied]:
+            merged_overrides.update(coerce_candidate_payload_for_config(_coerce_mapping_for_governance(patch)))
+        return build_standard_governance_payload(
+            philosophy=self.philosophy,
+            base_intention=self.base_intention,
+            coherent_base_cfg=self.coherent_base_cfg,
+            final_cfg=self.final_cfg,
+            overrides_applied=merged_overrides,
+            coherence=self.coherence,
+            repairs=self.repairs,
+            trace=self.trace,
+            results=results,
+        )
+
+
+@dataclass(frozen=True)
+class GovernancePayload:
+    philosophy_effective: str
+    base_intention: Dict[str, Any]
+    coherent_base_cfg: Dict[str, Any]
+    overrides_applied: Dict[str, Any]
+    final_effective_cfg: Dict[str, Any]
+    coherence_score: Optional[float]
+    coherence_status: str
+    warnings: List[str]
+    suggested_repairs: Dict[str, Any]
+    short_tradeoff_explanation: str
+    actionable_recommendations: List[Dict[str, Any]]
+    trace: List[Dict[str, Any]]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "philosophy_effective": self.philosophy_effective,
+            "base_intention": _json_safe(self.base_intention),
+            "coherent_base_cfg": _json_safe(self.coherent_base_cfg),
+            "overrides_applied": _json_safe(self.overrides_applied),
+            "final_effective_cfg": _json_safe(self.final_effective_cfg),
+            "coherence_score": _json_safe(self.coherence_score),
+            "coherence_status": self.coherence_status,
+            "warnings": _json_safe(self.warnings),
+            "suggested_repairs": _json_safe(self.suggested_repairs),
+            "short_tradeoff_explanation": self.short_tradeoff_explanation,
+            "actionable_recommendations": _json_safe(self.actionable_recommendations),
+            "trace": _json_safe(self.trace),
+        }
+
+
+@dataclass(frozen=True)
+class GovernedOverrideResult:
+    philosophy: str
+    status: str
+    label: str
+    base_coherent_cfg: MicroPipelineConfig
+    final_cfg: MicroPipelineConfig
+    manual_overrides_applied: Dict[str, Any]
+    coherence_before: Dict[str, Any]
+    coherence_after: Dict[str, Any]
+    repairs: Dict[str, Any]
+    warnings: List[str]
+    suggested_repair_patch: Dict[str, Any]
+    trace: List[Dict[str, Any]]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "philosophy": self.philosophy,
+            "status": self.status,
+            "label": self.label,
+            "base_coherent_cfg": _json_safe(config_to_dict(self.base_coherent_cfg)),
+            "final_cfg": _json_safe(config_to_dict(self.final_cfg)),
+            "manual_overrides_applied": _json_safe(self.manual_overrides_applied),
+            "coherence_before": _json_safe(self.coherence_before),
+            "coherence_after": _json_safe(self.coherence_after),
+            "repairs": _json_safe(self.repairs),
+            "warnings": _json_safe(self.warnings),
+            "suggested_repair_patch": _json_safe(self.suggested_repair_patch),
+            "trace": _json_safe(self.trace),
+        }
+
+
+def _coerce_mapping_for_governance(value: Any) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, pd.Series):
+        return value.to_dict()
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            mapped = to_dict()
+            if isinstance(mapped, dict):
+                return dict(mapped)
+        except Exception:
+            pass
+    try:
+        return dict(value)
+    except Exception:
+        return {}
+
+
+
+
+def _safe_float(value: Any, default: float = np.nan) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float(default)
+    if not np.isfinite(out):
+        return float(default)
+    return float(out)
+
+
+def apply_config_patch(base_cfg: MicroPipelineConfig, patch: Optional[Dict[str, Any]] = None) -> MicroPipelineConfig:
+    """Apply a shallow patch onto a MicroPipelineConfig safely.
+
+    Only known MicroPipelineConfig fields are accepted. Unknown keys are ignored
+    to preserve backward compatibility with partially-built governance patches.
+    """
+    payload = config_to_dict(base_cfg if isinstance(base_cfg, MicroPipelineConfig) else MicroPipelineConfig())
+    patch_map = _coerce_mapping_for_governance(patch)
+    if not patch_map:
+        return base_cfg if isinstance(base_cfg, MicroPipelineConfig) else MicroPipelineConfig(**payload)
+    valid_fields = {f.name for f in fields(MicroPipelineConfig)}
+    for k, v in patch_map.items():
+        key = str(k)
+        if key in valid_fields:
+            payload[key] = v
+    return MicroPipelineConfig(**{k: v for k, v in payload.items() if k in valid_fields})
+
+
+def _build_governed_status(coherence_result: Dict[str, Any], repair_plan: Dict[str, Any]) -> str:
+    coherence = dict(coherence_result or {})
+    repairs = dict(repair_plan or {})
+    explicit = str(repairs.get("status", coherence.get("status", "")) or "").strip().lower()
+    if explicit in {"incompatible", "discouraged", "repairable", "ok", "coherent", "stretched", "auto_repair_available"}:
+        if explicit == "incompatible":
+            return "discouraged"
+        if explicit == "repairable":
+            return "auto_repair_available"
+        if explicit == "ok":
+            return "coherent"
+        return explicit
+
+    label = str(coherence.get("label", "unavailable") or "unavailable").strip().lower()
+    try:
+        score = float(coherence.get("score_continuous", 0.5))
+    except Exception:
+        score = 0.5
+    score = float(np.clip(score, 0.0, 1.0))
+    has_patch = bool(_coerce_mapping_for_governance(repairs.get("suggested_patch", {})))
+    high_sev = int(repairs.get("n_high_severity", 0) or 0)
+    n_issues = int(repairs.get("n_issues", 0) or 0)
+
+    if bool(repairs.get("incompatible", False)) or label == "incoherent" or score < 0.35 or high_sev > 0:
+        return "discouraged"
+    if has_patch and (n_issues > 0 or label in {"mixed", "unavailable"} or score < 0.70):
+        return "auto_repair_available"
+    if n_issues > 0 or label == "mixed" or score < 0.60:
+        return "stretched"
+    if label == "coherent" and score >= 0.75:
+        return "coherent"
+    return "stretched"
+
+
+def _build_governed_override_label(status: str) -> str:
+    raw = str(status or "stretched").strip().lower()
+    mapping = {
+        "coherent": "coherent",
+        "stretched": "stretched",
+        "discouraged": "discouraged",
+        "auto_repair_available": "auto-repair available",
+    }
+    return mapping.get(raw, raw or "stretched")
+
+
+def _safe_governance_status(value: Any, *, default: str = "coherent") -> str:
+    raw = str(value or default).strip().lower()
+    allowed = {"coherent", "stretched", "discouraged", "auto_repair_available"}
+    return raw if raw in allowed else default
+
+
+def _build_actionable_governance_recommendations(
+    *,
+    philosophy: str,
+    coherence_result: Dict[str, Any],
+    repair_plan: Dict[str, Any],
+    explanation_payload: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    coherence_map = dict(coherence_result or {})
+    repairs = dict(repair_plan or {})
+    explanation = dict(explanation_payload or {})
+    recommendations: List[Dict[str, Any]] = []
+
+    suggested_patch = _coerce_mapping_for_governance(repairs.get("suggested_patch", {}))
+    actionable_warnings = [str(x) for x in list(repairs.get("actionable_warnings", []) or []) if str(x).strip()]
+    tradeoffs = [str(x) for x in list(explanation.get("tradeoffs", []) or []) if str(x).strip()]
+    drivers = [str(x) for x in list(explanation.get("drivers", []) or []) if str(x).strip()]
+    label = str(coherence_map.get("label") or "unavailable")
+
+    if suggested_patch:
+        recommendations.append({
+            "kind": "repair",
+            "title": "Apply coherence repair",
+            "why": actionable_warnings[0] if actionable_warnings else f"Improve structural alignment with {philosophy}.",
+            "tradeoff": tradeoffs[0] if tradeoffs else "May sacrifice some flexibility to recover a cleaner structural posture.",
+            "patch": suggested_patch,
+        })
+
+    if label in {"mixed", "unavailable", "incoherent"}:
+        recommendations.append({
+            "kind": "governance_review",
+            "title": "Review overridden blocks",
+            "why": f"The current configuration is {label} relative to the {philosophy} philosophy.",
+            "tradeoff": tradeoffs[0] if tradeoffs else "Keeping the current override path may preserve local upside but increases structural fragility.",
+            "patch": {},
+        })
+
+    if drivers:
+        recommendations.append({
+            "kind": "hold_or_document",
+            "title": "Document why this config is being kept",
+            "why": drivers[0],
+            "tradeoff": tradeoffs[0] if tradeoffs else "Even a coherent configuration should be justified in terms of its main trade-off.",
+            "patch": {},
+        })
+
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for rec in recommendations:
+        title = str(rec.get("title", "")).strip().lower()
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        out.append(rec)
+    return out[:4]
+
+
+def build_standard_governance_payload(
+    *,
+    philosophy: str,
+    base_intention: Optional[Dict[str, Any]] = None,
+    coherent_base_cfg: Optional[MicroPipelineConfig] = None,
+    final_cfg: Optional[MicroPipelineConfig] = None,
+    overrides_applied: Optional[Dict[str, Any]] = None,
+    coherence: Optional[Dict[str, Any]] = None,
+    repairs: Optional[Dict[str, Any]] = None,
+    trace: Optional[List[Dict[str, Any]]] = None,
+    results: Any = None,
+) -> GovernancePayload:
+    philosophy_name = _coerce_philosophy_name_for_simple_flow(philosophy)
+    coherence_map = dict(coherence or {})
+    repairs_map = dict(repairs or {})
+    trace_payload = list(trace or [])
+
+    warnings: List[str] = []
+    warnings.extend([str(x) for x in list(coherence_map.get("warnings", []) or []) if str(x).strip()])
+    warnings.extend([str(x) for x in list(repairs_map.get("actionable_warnings", []) or []) if str(x).strip()])
+    seen_warn = set()
+    deduped_warnings: List[str] = []
+    for warning in warnings:
+        if warning in seen_warn:
+            continue
+        seen_warn.add(warning)
+        deduped_warnings.append(warning)
+
+    explanation_payload: Dict[str, Any] = {}
+    short_tradeoff_explanation = ""
+    try:
+        from src.explain import explain_why_config_works
+        explanation_payload = dict(explain_why_config_works(
+            cfg=config_to_dict(final_cfg if isinstance(final_cfg, MicroPipelineConfig) else MicroPipelineConfig()),
+            results=results or {},
+            coherence=coherence_map,
+            philosophy=philosophy_name,
+        ) or {})
+    except Exception:
+        explanation_payload = {}
+
+    summary_lines = [str(x) for x in list(explanation_payload.get("summary", []) or []) if str(x).strip()]
+    tradeoffs = [str(x) for x in list(explanation_payload.get("tradeoffs", []) or []) if str(x).strip()]
+    if tradeoffs:
+        short_tradeoff_explanation = tradeoffs[0]
+    elif summary_lines:
+        short_tradeoff_explanation = summary_lines[-1]
+    elif deduped_warnings:
+        short_tradeoff_explanation = deduped_warnings[0]
+    else:
+        short_tradeoff_explanation = f"Configuration currently reads as {_safe_governance_status(coherence_map.get('status'), default='coherent')} for the {philosophy_name} philosophy."
+
+    actionable_recommendations = _build_actionable_governance_recommendations(
+        philosophy=philosophy_name,
+        coherence_result=coherence_map,
+        repair_plan=repairs_map,
+        explanation_payload=explanation_payload,
+    )
+
+    return GovernancePayload(
+        philosophy_effective=philosophy_name,
+        base_intention=_coerce_mapping_for_governance(base_intention),
+        coherent_base_cfg=config_to_dict(coherent_base_cfg if isinstance(coherent_base_cfg, MicroPipelineConfig) else MicroPipelineConfig()),
+        overrides_applied=coerce_candidate_payload_for_config(_coerce_mapping_for_governance(overrides_applied)),
+        final_effective_cfg=config_to_dict(final_cfg if isinstance(final_cfg, MicroPipelineConfig) else MicroPipelineConfig()),
+        coherence_score=_safe_float(coherence_map.get("score_continuous")),
+        coherence_status=_safe_governance_status(coherence_map.get("status") or repairs_map.get("status") or _build_governed_status(coherence_map, repairs_map)),
+        warnings=deduped_warnings,
+        suggested_repairs={
+            "status": str(repairs_map.get("status", "") or ""),
+            "suggested_patch": _coerce_mapping_for_governance(repairs_map.get("suggested_patch", {})),
+            "actionable_warnings": [str(x) for x in list(repairs_map.get("actionable_warnings", []) or []) if str(x).strip()],
+            "n_issues": int(repairs_map.get("n_issues", 0) or 0),
+            "n_high_severity": int(repairs_map.get("n_high_severity", 0) or 0),
+        },
+        short_tradeoff_explanation=short_tradeoff_explanation,
+        actionable_recommendations=actionable_recommendations,
+        trace=trace_payload,
+    )
+
+
+def serialize_governance_payload(payload: Any) -> Dict[str, Any]:
+    if isinstance(payload, GovernancePayload):
+        return payload.to_dict()
+    if isinstance(payload, GovernedConfigResolutionResult):
+        return payload.to_governance_payload().to_dict()
+    if isinstance(payload, dict):
+        return _json_safe(payload)
+    return _json_safe(_coerce_mapping_for_governance(payload))
+
+
+def _resolve_governance_constraints(
+    *,
+    philosophy: str,
+    universe: Any = None,
+    strategy_template: Any = None,
+    style_preset: Any = None,
+    explicit_constraints: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    constraints = dict(explicit_constraints or {})
+    if constraints:
+        return constraints
+    try:
+        from src.coherence import resolve_philosophy_to_constraints
+    except Exception:
+        return {}
+    try:
+        return dict(resolve_philosophy_to_constraints(
+            philosophy=philosophy,
+            universe=universe,
+            strategy_template=strategy_template,
+            style_preset=style_preset,
+        ) or {})
+    except Exception:
+        return {}
+
+
+def _evaluate_governed_coherence(
+    cfg: MicroPipelineConfig,
+    *,
+    philosophy: str,
+    universe: Any = None,
+    strategy_template: Any = None,
+    style_preset: Any = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    payload = config_to_dict(cfg if isinstance(cfg, MicroPipelineConfig) else MicroPipelineConfig())
+    coherence_result: Dict[str, Any]
+    repair_plan: Dict[str, Any]
+    try:
+        from src.coherence import evaluate_config_coherence, suggest_coherence_repairs
+    except Exception:
+        coherence_result = {
+            "label": "unavailable",
+            "score": 0.0,
+            "score_continuous": 0.5,
+            "reasons": [],
+            "warnings": ["coherence_module_unavailable"],
+            "philosophy": philosophy,
+        }
+        repair_plan = {"n_issues": 0, "suggested_patch": {}, "incompatible": False}
+        return coherence_result, repair_plan
+
+    coherence_kwargs = {
+        "universe": universe if universe is not None else "medium",
+        "strategy_template": strategy_template,
+        "style_preset": style_preset,
+    }
+    try:
+        coherence_result = dict(evaluate_config_coherence(payload, philosophy, **coherence_kwargs) or {})
+    except Exception as exc:
+        coherence_result = {
+            "label": "unavailable",
+            "score": 0.0,
+            "score_continuous": 0.5,
+            "reasons": [],
+            "warnings": [f"coherence_eval_failed: {exc}"],
+        }
+    try:
+        repair_plan = dict(suggest_coherence_repairs(payload, philosophy, **coherence_kwargs) or {})
+    except Exception as exc:
+        repair_plan = {
+            "n_issues": 0,
+            "suggested_patch": {},
+            "incompatible": False,
+            "warnings": [f"coherence_repair_failed: {exc}"],
+        }
+
+    coherence_result["philosophy"] = philosophy
+    try:
+        coherence_result["score_continuous"] = float(np.clip(float(coherence_result.get("score_continuous", 0.5)), 0.0, 1.0))
+    except Exception:
+        coherence_result["score_continuous"] = 0.5
+    return coherence_result, repair_plan
+
+
+def apply_governed_overrides(
+    *,
+    base_coherent_cfg: MicroPipelineConfig,
+    manual_overrides: Optional[Dict[str, Any]] = None,
+    philosophy: Optional[str] = None,
+    universe: Any = None,
+    strategy_template: Any = None,
+    style_preset: Any = None,
+    recheck_immediately: bool = True,
+) -> GovernedOverrideResult:
+    """
+    Governed manual-edit layer for advanced controls.
+
+    Treat any user edit as:
+    - an explicit override on top of a coherent base config
+    - followed by a structural re-check
+    - with warnings / status / suggested repair when coherence degrades
+    """
+    philosophy_name = _coerce_philosophy_name_for_simple_flow(philosophy or style_preset)
+    base_cfg = base_coherent_cfg if isinstance(base_coherent_cfg, MicroPipelineConfig) else MicroPipelineConfig()
+    overrides_payload = coerce_candidate_payload_for_config(_coerce_mapping_for_governance(manual_overrides))
+    trace: List[Dict[str, Any]] = [
+        {
+            "stage": "manual_override_input",
+            "n_override_keys": int(len(overrides_payload)),
+            "override_keys": sorted(list(overrides_payload.keys())),
+        }
+    ]
+
+    coherence_before, repairs_before = _evaluate_governed_coherence(
+        base_cfg,
+        philosophy=philosophy_name,
+        universe=universe,
+        strategy_template=strategy_template,
+        style_preset=style_preset,
+    )
+    trace.append({
+        "stage": "coherence_before_overrides",
+        "status": _build_governed_status(coherence_before, repairs_before),
+        "score_continuous": _safe_float(coherence_before.get("score_continuous")),
+        "label": coherence_before.get("label"),
+    })
+
+    final_cfg = base_cfg if not overrides_payload else apply_config_patch(base_cfg, overrides_payload)
+    trace.append({
+        "stage": "manual_override_merge",
+        "changed": bool(overrides_payload),
+        "override_count": int(len(overrides_payload)),
+    })
+
+    if recheck_immediately:
+        coherence_after, repairs_after = _evaluate_governed_coherence(
+            final_cfg,
+            philosophy=philosophy_name,
+            universe=universe,
+            strategy_template=strategy_template,
+            style_preset=style_preset,
+        )
+    else:
+        coherence_after, repairs_after = coherence_before, repairs_before
+
+    status = _build_governed_status(coherence_after, repairs_after)
+    label = _build_governed_override_label(status)
+    warnings: List[str] = []
+    warnings.extend([str(x) for x in list(coherence_after.get("warnings", []) or []) if str(x).strip()])
+    warnings.extend([str(x) for x in list(coherence_after.get("actionable_warnings", []) or []) if str(x).strip()])
+    if status == "stretched":
+        warnings.append("Manual overrides stretch the current philosophy; review suggested repair.")
+    elif status == "discouraged":
+        warnings.append("Manual overrides push the configuration into a discouraged region.")
+    elif status == "auto_repair_available":
+        warnings.append("Manual overrides remain usable, but a safer repaired version is available.")
+    seen_warn = set()
+    deduped_warnings: List[str] = []
+    for w in warnings:
+        key = str(w).strip()
+        if not key or key in seen_warn:
+            continue
+        seen_warn.add(key)
+        deduped_warnings.append(key)
+
+    trace.append({
+        "stage": "coherence_after_overrides",
+        "status": status,
+        "label": label,
+        "score_continuous": _safe_float(coherence_after.get("score_continuous")),
+        "repair_patch_available": bool(_coerce_mapping_for_governance(repairs_after.get("suggested_patch", {}))),
+    })
+
+    return GovernedOverrideResult(
+        philosophy=philosophy_name,
+        status=status,
+        label=label,
+        base_coherent_cfg=base_cfg,
+        final_cfg=final_cfg,
+        manual_overrides_applied=overrides_payload,
+        coherence_before=coherence_before,
+        coherence_after=coherence_after,
+        repairs=repairs_after,
+        warnings=deduped_warnings,
+        suggested_repair_patch=_coerce_mapping_for_governance(repairs_after.get("suggested_patch", {})),
+        trace=trace,
+    )
+
+
+def resolve_user_intention_to_governed_config(
+    *,
+    simple_spec: Optional[SimpleUISpec] = None,
+    base_cfg: Optional[MicroPipelineConfig] = None,
+    philosophy: Optional[str] = None,
+    universe: Any = None,
+    strategy_template: Any = None,
+    style_preset: Any = None,
+    overrides: Optional[Dict[str, Any]] = None,
+    recommendation_patch: Optional[Dict[str, Any]] = None,
+    repair_patch: Optional[Dict[str, Any]] = None,
+    constraints: Optional[Dict[str, Any]] = None,
+    trace_source: Any = None,
+) -> GovernedConfigResolutionResult:
+    """
+    Unified governed-resolution contract for configuration changes.
+
+    Official flow:
+        1) receive base intention
+        2) build coherent config
+        3) apply governed overrides / recommendation / repair patches
+        4) re-evaluate coherence
+        5) return final cfg + coherence + repairs + status + traceability
+
+    This function is intentionally lightweight and non-executing:
+    - it does not run the engine
+    - it does not change predictive-selection methodology
+    - it only resolves and validates config state
+    """
+    trace: List[Dict[str, Any]] = []
+    base_intention = {
+        "source": str(trace_source or ("simple_spec" if isinstance(simple_spec, SimpleUISpec) else "base_cfg")),
+        "philosophy_requested": philosophy,
+        "universe": universe,
+        "strategy_template": strategy_template,
+        "style_preset": style_preset,
+    }
+
+    if isinstance(simple_spec, SimpleUISpec):
+        philosophy_name = _coerce_philosophy_name_for_simple_flow(philosophy or simple_spec.style_preset)
+        base_intention.update({
+            "simple_spec": _json_safe(asdict(simple_spec)),
+            "strategy_template": simple_spec.strategy_template,
+            "style_preset": simple_spec.style_preset,
+            "universe": simple_spec.universe_size,
+        })
+        cfg_base, summary = resolve_simple_ui_to_micro_cfg(simple_spec)
+        trace.append({
+            "stage": "base_resolution",
+            "kind": "simple_spec",
+            "philosophy": philosophy_name,
+            "summary": _json_safe(summary),
+        })
+        if universe is None:
+            universe = simple_spec.universe_size
+        if strategy_template is None:
+            strategy_template = simple_spec.strategy_template
+        if style_preset is None:
+            style_preset = simple_spec.style_preset
+    else:
+        cfg_base = base_cfg if isinstance(base_cfg, MicroPipelineConfig) else MicroPipelineConfig()
+        philosophy_name = _coerce_philosophy_name_for_simple_flow(philosophy or style_preset)
+        base_intention["base_cfg"] = config_to_dict(cfg_base)
+        trace.append({
+            "stage": "base_resolution",
+            "kind": "base_cfg",
+            "philosophy": philosophy_name,
+        })
+
+    resolved_constraints = _resolve_governance_constraints(
+        philosophy=philosophy_name,
+        universe=universe,
+        strategy_template=strategy_template,
+        style_preset=style_preset,
+        explicit_constraints=constraints,
+    )
+    trace.append({
+        "stage": "constraints_resolution",
+        "constraints_available": bool(resolved_constraints),
+        "constraints": _json_safe(resolved_constraints),
+    })
+
+    coherent_base_cfg, coherent_meta = generate_coherent_config(
+        philosophy=philosophy_name,
+        base_cfg=cfg_base,
+        constraints=resolved_constraints,
+    )
+    trace.append({
+        "stage": "coherent_base_generation",
+        "changed": bool((coherent_meta or {}).get("changed", False)),
+        "n_changes": int((coherent_meta or {}).get("n_changes", 0) or 0),
+        "changes": _json_safe((coherent_meta or {}).get("changes", {})),
+    })
+
+    applied_overrides = coerce_candidate_payload_for_config(_coerce_mapping_for_governance(overrides))
+    applied_recommendation_patch = coerce_candidate_payload_for_config(_coerce_mapping_for_governance(recommendation_patch))
+    applied_repair_patch = coerce_candidate_payload_for_config(_coerce_mapping_for_governance(repair_patch))
+
+    combined_patch: Dict[str, Any] = {}
+    for patch_name, patch_payload in [
+        ("overrides", applied_overrides),
+        ("recommendation_patch", applied_recommendation_patch),
+        ("repair_patch", applied_repair_patch),
+    ]:
+        if not patch_payload:
+            continue
+        combined_patch.update(patch_payload)
+        trace.append({
+            "stage": "patch_application",
+            "patch_kind": patch_name,
+            "patch_payload": _json_safe(patch_payload),
+        })
+
+    override_result = apply_governed_overrides(
+        base_coherent_cfg=coherent_base_cfg,
+        manual_overrides=combined_patch,
+        philosophy=philosophy_name,
+        universe=universe,
+        strategy_template=strategy_template,
+        style_preset=style_preset,
+        recheck_immediately=True,
+    )
+    final_cfg = override_result.final_cfg
+    coherence_result = dict(override_result.coherence_after or {})
+    repair_plan = dict(override_result.repairs or {})
+    status = str(override_result.status or _build_governed_status(coherence_result, repair_plan))
+    trace.extend(list(override_result.trace or []))
+    trace.append({
+        "stage": "final_coherence_evaluation",
+        "status": status,
+        "coherence_label": coherence_result.get("label"),
+        "coherence_score": coherence_result.get("score_continuous"),
+        "repair_issue_count": int(repair_plan.get("n_issues", 0) or 0),
+        "repair_patch_available": bool(_coerce_mapping_for_governance(repair_plan.get("suggested_patch", {}))),
+    })
+
+    return GovernedConfigResolutionResult(
+        philosophy=philosophy_name,
+        status=status,
+        base_intention=base_intention,
+        constraints=resolved_constraints,
+        base_cfg=cfg_base,
+        coherent_base_cfg=coherent_base_cfg,
+        final_cfg=final_cfg,
+        overrides_applied=applied_overrides,
+        recommendation_patch_applied=applied_recommendation_patch,
+        repair_patch_applied=applied_repair_patch,
+        coherence=coherence_result,
+        repairs=repair_plan,
+        trace=trace,
+    )
 
 
 @dataclass(frozen=True)
@@ -3517,6 +4410,47 @@ def annual_vol_to_monthly(annual_vol: float) -> float:
 
 def monthly_vol_to_annual(monthly_vol: float) -> float:
     return float(monthly_vol) * np.sqrt(12.0)
+
+
+def _expand_monthly_return_to_daily_path(
+    monthly_return: float,
+    daily_steps: int,
+    rng: np.random.Generator,
+    *,
+    noise_scale: float = 0.35,
+) -> np.ndarray:
+    """Expand one monthly simple return into a synthetic daily path.
+
+    The daily path is constructed in log-return space and then re-centred so
+    that the compounded daily returns exactly match the original monthly
+    simple return. This keeps the Step 6 daily-hybrid projection compatible
+    with the monthly OOS engine path without changing the monthly result.
+    """
+    n_steps = max(int(daily_steps or 1), 1)
+    try:
+        monthly = float(monthly_return)
+    except Exception:
+        monthly = 0.0
+    if not np.isfinite(monthly):
+        monthly = 0.0
+
+    monthly = float(np.clip(monthly, -0.999999, None))
+    total_log_return = float(np.log1p(monthly))
+    base_log_return = total_log_return / float(n_steps)
+
+    if n_steps == 1 or float(noise_scale or 0.0) <= 0.0:
+        if n_steps == 1:
+            return np.asarray([float(np.expm1(total_log_return))], dtype="float64")
+        return np.full(n_steps, float(np.expm1(base_log_return)), dtype="float64")
+
+    scale = max(abs(base_log_return) * float(noise_scale), 1e-8)
+    log_path = base_log_return + rng.normal(0.0, scale, size=n_steps)
+
+    # Re-centre the noisy log path so the compounded daily path preserves the
+    # sampled monthly return exactly up to floating point precision.
+    log_path = log_path + ((total_log_return - float(np.sum(log_path))) / float(n_steps))
+    daily_returns = np.expm1(log_path).astype("float64")
+    return np.clip(daily_returns, -0.999999, None)
 
 
 def _coerce_1d_float_array(values: Iterable[float], name: str) -> np.ndarray:
@@ -6253,6 +7187,215 @@ def _resolve_probabilistic_feature_columns(asset_panel_df: pd.DataFrame) -> List
     return [c for c in candidates if c in cols]
 
 
+def _ensure_feature_mu_fallback_columns(asset_panel_df: pd.DataFrame, cfg: MicroPipelineConfig) -> pd.DataFrame:
+    if asset_panel_df is None or not isinstance(asset_panel_df, pd.DataFrame) or asset_panel_df.empty:
+        return asset_panel_df
+
+    req = {cfg.date_col, cfg.asset_col, cfg.return_col}
+    if not req.issubset(asset_panel_df.columns):
+        return asset_panel_df
+
+    fallback_cols = [
+        "feature_mu_ret_1m_lag",
+        "feature_mu_mom_3m",
+        "feature_mu_mom_6m",
+        "feature_mu_mom_12m",
+        "feature_mu_vol_3m",
+        "feature_mu_vol_6m",
+        "feature_mu_vol_12m",
+    ]
+
+    existing = set(asset_panel_df.columns)
+    if all(col in existing for col in fallback_cols):
+        return asset_panel_df
+
+    tmp = asset_panel_df.copy()
+    tmp[cfg.date_col] = pd.to_datetime(tmp[cfg.date_col], errors="coerce")
+    tmp[cfg.asset_col] = tmp[cfg.asset_col].astype(str)
+    tmp[cfg.return_col] = pd.to_numeric(tmp[cfg.return_col], errors="coerce")
+    tmp = tmp.sort_values([cfg.asset_col, cfg.date_col]).reset_index(drop=True)
+
+    g = tmp.groupby(cfg.asset_col)[cfg.return_col]
+    tmp["feature_mu_ret_1m_lag"] = g.shift(1)
+
+    for win in (3, 6, 12):
+        lagged = g.shift(1)
+        tmp[f"feature_mu_mom_{win}m"] = lagged.groupby(tmp[cfg.asset_col]).rolling(win, min_periods=max(2, min(win, 3))).mean().reset_index(level=0, drop=True)
+        tmp[f"feature_mu_vol_{win}m"] = lagged.groupby(tmp[cfg.asset_col]).rolling(win, min_periods=max(2, min(win, 3))).std(ddof=1).reset_index(level=0, drop=True)
+
+    return tmp
+
+
+def _feature_mu_family_and_priority(col: str) -> Tuple[str, int]:
+    name = str(col or "").strip().lower()
+    if not name:
+        return "other", 999
+    if any(tok in name for tok in ("regime", "stress", "dispersion", "pairwise_corr", "corr_stress", "vol_stress")):
+        return "regime", 60
+    if any(tok in name for tok in ("mom_", "momentum", "alpha_mom", "ret_1d", "ret_1m_lag", "mom_3m", "mom_6m", "mom_12m")):
+        return "momentum", 10
+    if any(tok in name for tok in ("over_vol", "efficiency", "strength", "channel", "dist_from", "pos_rate", "accel", "spread")):
+        return "quality", 20
+    if "reversal" in name:
+        return "reversal", 30
+    if any(tok in name for tok in ("vol", "risk", "range", "skew", "kurt", "downside", "upside")):
+        return "risk", 40
+    return "other", 50
+
+
+def _compute_feature_family_counts(selected_cols: Sequence[Any]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    if not selected_cols:
+        return counts
+    for raw_col in list(selected_cols):
+        col = str(raw_col or "").strip()
+        if not col:
+            continue
+        family, _ = _feature_mu_family_and_priority(col)
+        family_key = str(family or "other")
+        counts[family_key] = int(counts.get(family_key, 0) + 1)
+    return counts
+
+
+_DEF_FEATURE_MU_FAMILY_CAPS: Dict[str, int] = {
+    "momentum": 4,
+    "quality": 3,
+    "reversal": 1,
+    "risk": 2,
+    "regime": 1,
+    "other": 2,
+}
+
+
+def _inspect_feature_mu_selection(asset_panel_df: pd.DataFrame, candidate_cols: Sequence[str]) -> Dict[str, Any]:
+    info: Dict[str, Any] = {
+        "candidate_cols": [],
+        "selected_cols": [],
+        "selected_family_counts": {},
+        "excluded_low_quality_n": 0,
+        "excluded_preview": [],
+        "excluded_reasons": {},
+    }
+    if asset_panel_df is None or not isinstance(asset_panel_df, pd.DataFrame) or asset_panel_df.empty or not candidate_cols:
+        return info
+
+    info["candidate_cols"] = [str(c) for c in list(candidate_cols) if c is not None]
+    seen: set[str] = set()
+    family_counts: Dict[str, int] = {k: 0 for k in _DEF_FEATURE_MU_FAMILY_CAPS}
+    selected_rows: List[Tuple[str, int, float, float]] = []
+    excluded_preview: List[str] = []
+    excluded_reasons: Dict[str, int] = {}
+
+    def _mark_excluded(col: str, reason: str) -> None:
+        reason_key = str(reason or "unknown")
+        excluded_reasons[reason_key] = int(excluded_reasons.get(reason_key, 0) + 1)
+        if len(excluded_preview) < 12:
+            excluded_preview.append(f"{col}:{reason_key}")
+
+    for raw_col in list(candidate_cols):
+        col = str(raw_col)
+        if col in seen:
+            _mark_excluded(col, "duplicate")
+            continue
+        seen.add(col)
+        if col not in asset_panel_df.columns:
+            _mark_excluded(col, "missing_column")
+            continue
+
+        s = pd.to_numeric(asset_panel_df[col], errors="coerce")
+        valid = s.dropna()
+        if valid.empty:
+            _mark_excluded(col, "all_nan")
+            continue
+
+        n_obs = int(valid.shape[0])
+        if n_obs < 12:
+            _mark_excluded(col, "insufficient_obs")
+            continue
+
+        missing_share = float(1.0 - (n_obs / max(int(len(s)), 1)))
+        if missing_share > 0.60:
+            _mark_excluded(col, "high_missing_share")
+            continue
+
+        std = float(valid.std(ddof=1)) if n_obs > 1 else 0.0
+        if (not np.isfinite(std)) or std <= 1e-12:
+            _mark_excluded(col, "low_variance")
+            continue
+
+        nunique = int(valid.nunique(dropna=True))
+        if nunique <= 1:
+            _mark_excluded(col, "constant")
+            continue
+
+        family, priority = _feature_mu_family_and_priority(col)
+        family_cap = int(_DEF_FEATURE_MU_FAMILY_CAPS.get(family, 1))
+        if family_counts.get(family, 0) >= family_cap:
+            _mark_excluded(col, f"family_cap_{family}")
+            continue
+
+        family_counts[family] = int(family_counts.get(family, 0) + 1)
+        selected_rows.append((col, int(priority), float(missing_share), -float(std)))
+
+    selected_rows = sorted(selected_rows, key=lambda x: (x[1], x[2], x[3], x[0]))
+    selected_cols = [col for col, _, _, _ in selected_rows]
+    selected_family_counts: Dict[str, int] = {}
+    for col in selected_cols:
+        fam, _ = _feature_mu_family_and_priority(col)
+        selected_family_counts[fam] = int(selected_family_counts.get(fam, 0) + 1)
+
+    info["selected_cols"] = selected_cols
+    info["selected_family_counts"] = selected_family_counts
+    info["excluded_low_quality_n"] = int(sum(excluded_reasons.values()))
+    info["excluded_preview"] = excluded_preview
+    info["excluded_reasons"] = excluded_reasons
+    return info
+
+
+def _resolve_feature_mu_selection_debug(asset_panel_df: pd.DataFrame) -> Dict[str, Any]:
+    empty = {
+        "selection_source": "none",
+        "candidate_cols": [],
+        "selected_cols": [],
+        "selected_family_counts": {},
+        "excluded_low_quality_n": 0,
+        "excluded_preview": [],
+        "excluded_reasons": {},
+    }
+    if asset_panel_df is None or not isinstance(asset_panel_df, pd.DataFrame) or asset_panel_df.empty:
+        return empty
+
+    cols = list(asset_panel_df.columns)
+    cs_z = [c for c in cols if str(c).endswith("_cs_z")]
+    info = _inspect_feature_mu_selection(asset_panel_df, cs_z)
+    if info.get("selected_cols"):
+        info["selection_source"] = "cs_z"
+        return info
+
+    preferred_candidates = _resolve_probabilistic_feature_columns(asset_panel_df)
+    info = _inspect_feature_mu_selection(asset_panel_df, preferred_candidates)
+    if info.get("selected_cols"):
+        info["selection_source"] = "preferred"
+        return info
+
+    fallback = [
+        "feature_mu_ret_1m_lag",
+        "feature_mu_mom_3m",
+        "feature_mu_mom_6m",
+        "feature_mu_mom_12m",
+        "feature_mu_vol_3m",
+        "feature_mu_vol_6m",
+        "feature_mu_vol_12m",
+    ]
+    info = _inspect_feature_mu_selection(asset_panel_df, fallback)
+    info["selection_source"] = "fallback"
+    return info
+
+
+def _resolve_feature_mu_columns(asset_panel_df: pd.DataFrame) -> List[str]:
+    return list(_resolve_feature_mu_selection_debug(asset_panel_df).get("selected_cols", []))
+
+
 def _build_probabilistic_feature_pairs(asset_panel_df: pd.DataFrame, cfg: MicroPipelineConfig, feature_cols: List[str]) -> pd.DataFrame:
     if asset_panel_df is None or asset_panel_df.empty or not feature_cols:
         return pd.DataFrame(columns=[cfg.date_col, cfg.asset_col, "next_return", *feature_cols])
@@ -6283,6 +7426,7 @@ def _build_current_feature_state(asset_panel_df: pd.DataFrame, dt: pd.Timestamp,
 
 def _apply_feature_conditioned_mu(
     mu_hat: pd.Series,
+    sigma_hat: Optional[pd.Series] = None,
     *,
     historical_feature_pairs: Optional[pd.DataFrame],
     current_feature_state: Optional[pd.DataFrame],
@@ -6297,13 +7441,33 @@ def _apply_feature_conditioned_mu(
     out = base.copy()
     rows = []
     blend = float(np.clip(getattr(cfg, "feature_mu_blend", 0.25), 0.0, 1.0))
-    feature_cols = [c for c in current_feature_state.columns if c in historical_feature_pairs.columns][: max(int(getattr(cfg, "feature_mu_cols_max", 8)), 1)]
+    scale_mode = str(getattr(cfg, "feature_mu_scale_mode", "none") or "none").strip().lower()
+    if scale_mode not in {"none", "zscore", "vol_adjusted"}:
+        scale_mode = "none"
+    epsilon = float(getattr(cfg, "feature_mu_sigma_epsilon", 1e-6) or 1e-6)
+    if not np.isfinite(epsilon) or epsilon < 0.0:
+        epsilon = 1e-6
+    sigma_floor = max(float(getattr(cfg, "sigma_floor", 0.02) or 0.02), 1e-12)
+    selection_debug = _resolve_feature_mu_selection_debug(
+        historical_feature_pairs.drop(columns=["next_return"], errors="ignore")
+        if isinstance(historical_feature_pairs, pd.DataFrame)
+        else pd.DataFrame()
+    )
+    feature_cols_all = [c for c in selection_debug.get("candidate_cols", []) if c in current_feature_state.columns and c in historical_feature_pairs.columns]
+    raw_selected_cols = [c for c in selection_debug.get("selected_cols", []) if c in current_feature_state.columns and c in historical_feature_pairs.columns]
+    feature_cols = raw_selected_cols[: max(int(getattr(cfg, "feature_mu_cols_max", 8)), 1)]
+    selected_family_counts = _compute_feature_family_counts(feature_cols)
+    selected_family_counts_json = json.dumps(selected_family_counts, sort_keys=True)
+    feature_mu_pred = pd.Series(np.nan, index=base.index, dtype="float64")
+    feature_mu_distance_mean = pd.Series(np.nan, index=base.index, dtype="float64")
+    feature_mu_match_n = pd.Series(np.nan, index=base.index, dtype="float64")
+    feature_mu_cols_used = pd.Series(np.nan, index=base.index, dtype="float64")
+
     for asset in base.index:
         pred = np.nan
         dist_mean = np.nan
         match_n = 0
         cols_used = 0
-        active = False
         if asset in set(current_feature_state.index):
             asset_pairs = historical_feature_pairs.loc[historical_feature_pairs[cfg.asset_col].astype(str) == str(asset)].copy()
             if not asset_pairs.empty and feature_cols:
@@ -6330,21 +7494,90 @@ def _apply_feature_conditioned_mu(
                         pred = float(pd.to_numeric(block.iloc[nn]["next_return"], errors="coerce").mean())
                         dist_mean = float(np.mean(d[nn])) if len(nn) else np.nan
                         match_n = int(len(nn))
-                        if np.isfinite(pred) and blend > 0:
-                            out.loc[asset] = (1.0 - blend) * base.loc[asset] + blend * pred
-                            active = True
+        feature_mu_pred.loc[asset] = pred
+        feature_mu_distance_mean.loc[asset] = dist_mean
+        feature_mu_match_n.loc[asset] = float(match_n) if match_n else np.nan
+        feature_mu_cols_used.loc[asset] = float(cols_used) if cols_used else np.nan
+
+    feature_mu_adjustment = (pd.to_numeric(feature_mu_pred, errors="coerce") - base).astype(float)
+    feature_mu_adjustment = feature_mu_adjustment.replace([np.inf, -np.inf], np.nan)
+
+    if scale_mode == "zscore":
+        adj = pd.to_numeric(feature_mu_adjustment, errors="coerce")
+        adj_mean = float(adj.mean())
+        adj_std = max(float(adj.std(ddof=0)), 1e-8)
+        adjustment_scaled = (adj - adj_mean) / adj_std
+    elif scale_mode == "vol_adjusted":
+        sigma_safe = pd.to_numeric(sigma_hat.reindex(base.index) if isinstance(sigma_hat, pd.Series) else pd.Series(index=base.index, dtype="float64"), errors="coerce")
+        sigma_safe = sigma_safe.replace([np.inf, -np.inf], np.nan).fillna(sigma_floor)
+        sigma_safe = pd.Series(np.maximum(sigma_safe.to_numpy(dtype="float64"), sigma_floor), index=base.index, dtype="float64")
+        adjustment_scaled = pd.to_numeric(feature_mu_adjustment, errors="coerce") / (sigma_safe + epsilon)
+    else:
+        adjustment_scaled = feature_mu_adjustment
+
+    # Step 16 — optional quantile filter (post-scaling)
+    feature_mu_apply_quantile = getattr(cfg, "feature_mu_apply_quantile", None)
+    if feature_mu_apply_quantile is not None:
+        try:
+            q = float(feature_mu_apply_quantile)
+        except Exception:
+            q = None
+        if q is not None and 0.0 < q < 1.0:
+            adj_abs = pd.to_numeric(adjustment_scaled, errors="coerce").abs()
+            thr = float(adj_abs.quantile(q))
+            mask = adj_abs >= thr
+            adjustment_scaled = pd.to_numeric(adjustment_scaled, errors="coerce").where(mask, 0.0)
+
+    feature_mu_rank_aware = bool(getattr(cfg, "feature_mu_rank_aware", False))
+    if feature_mu_rank_aware:
+        adj_rank = pd.to_numeric(adjustment_scaled, errors="coerce")
+        valid_adj = adj_rank.dropna()
+        if len(valid_adj) >= 2:
+            rank_scaled = (valid_adj.rank(method="average", pct=True) - 0.5) * 2.0
+            adjustment_scaled = adj_rank.copy()
+            adjustment_scaled.loc[rank_scaled.index] = rank_scaled.astype(float)
+        else:
+            adjustment_scaled = adj_rank
+    else:
+        adjustment_scaled = pd.to_numeric(adjustment_scaled, errors="coerce")
+
+    active_mask = feature_mu_pred.notna() & np.isfinite(base) & np.isfinite(pd.to_numeric(adjustment_scaled, errors="coerce")) & (blend > 0)
+    out.loc[active_mask] = base.loc[active_mask] + blend * pd.to_numeric(adjustment_scaled.loc[active_mask], errors="coerce")
+
+    for asset in base.index:
         rows.append({
             "asset": str(asset),
-            "feature_mu_pred": pred,
-            "feature_mu_distance_mean": dist_mean,
-            "feature_mu_match_n": float(match_n) if match_n else np.nan,
-            "feature_mu_cols_used": float(cols_used) if cols_used else np.nan,
-            "feature_mu_active": bool(active),
+            "feature_mu_pred": float(feature_mu_pred.loc[asset]) if np.isfinite(feature_mu_pred.loc[asset]) else np.nan,
+            "feature_mu_distance_mean": float(feature_mu_distance_mean.loc[asset]) if np.isfinite(feature_mu_distance_mean.loc[asset]) else np.nan,
+            "feature_mu_match_n": float(feature_mu_match_n.loc[asset]) if np.isfinite(feature_mu_match_n.loc[asset]) else np.nan,
+            "feature_mu_cols_used": float(feature_mu_cols_used.loc[asset]) if np.isfinite(feature_mu_cols_used.loc[asset]) else np.nan,
+            "feature_mu_active": bool(active_mask.loc[asset]),
             "mu_hat_base": float(base.loc[asset]),
             "mu_hat_feature_tilted": float(out.loc[asset]),
+            "feature_mu_adjustment": float(feature_mu_adjustment.loc[asset]) if np.isfinite(feature_mu_adjustment.loc[asset]) else np.nan,
+            "feature_mu_adjustment_scaled": float(adjustment_scaled.loc[asset]) if np.isfinite(adjustment_scaled.loc[asset]) else np.nan,
+            "feature_mu_scale_mode": scale_mode,
             "feature_mu_abs_tilt": float(abs(out.loc[asset] - base.loc[asset])) if np.isfinite(base.loc[asset]) and np.isfinite(out.loc[asset]) else np.nan,
+            "feature_mu_candidate_cols_n": int(len(feature_cols_all)),
+            "feature_mu_selected_cols_n": int(len(feature_cols)),
+            "feature_mu_selected_cols": "|".join([str(c) for c in feature_cols]),
+            "feature_mu_selected_family_counts": selected_family_counts_json,
+            "feature_mu_excluded_low_quality_n": int(selection_debug.get("excluded_low_quality_n", 0)),
+            "feature_mu_excluded_preview": "|".join([str(x) for x in selection_debug.get("excluded_preview", [])]),
+            "feature_mu_excluded_reasons": json.dumps(selection_debug.get("excluded_reasons", {}), sort_keys=True),
+            "feature_mu_candidate_cols": "|".join([str(c) for c in feature_cols_all]),
+            "feature_mu_selection_source": str(selection_debug.get("selection_source", "none") or "none"),
+            "n_feature_candidates": int(len(feature_cols_all)),
+            "n_feature_selected": int(len(feature_cols)),
+            "selected_feature_columns": "|".join([str(c) for c in feature_cols]),
+            "feature_family_counts": selected_family_counts_json,
+            "excluded_feature_columns_preview": "|".join([str(x) for x in selection_debug.get("excluded_preview", [])]),
         })
     details = pd.DataFrame(rows).set_index("asset") if rows else empty_details
+    try:
+        details.to_csv("debug_feature_mu_details.csv")
+    except Exception:
+        pass
     meta = {
         "feature_mu_active_share": float(pd.to_numeric(details.get("feature_mu_active", pd.Series(dtype="float64")), errors="coerce").mean()) if not details.empty else 0.0,
         "feature_mu_match_n_mean": float(pd.to_numeric(details.get("feature_mu_match_n", pd.Series(dtype="float64")), errors="coerce").mean()) if not details.empty else np.nan,
@@ -6352,6 +7585,21 @@ def _apply_feature_conditioned_mu(
         "feature_mu_distance_mean": float(pd.to_numeric(details.get("feature_mu_distance_mean", pd.Series(dtype="float64")), errors="coerce").mean()) if not details.empty else np.nan,
         "feature_mu_abs_tilt_mean": float(pd.to_numeric(details.get("feature_mu_abs_tilt", pd.Series(dtype="float64")), errors="coerce").mean()) if not details.empty else 0.0,
         "feature_mu_abs_tilt_max": float(pd.to_numeric(details.get("feature_mu_abs_tilt", pd.Series(dtype="float64")), errors="coerce").max()) if not details.empty else 0.0,
+        "feature_mu_candidate_cols_n": int(len(feature_cols_all)),
+        "feature_mu_selected_cols_n": int(len(feature_cols)),
+        "feature_mu_selected_cols": "|".join([str(c) for c in feature_cols]),
+        "feature_mu_selected_family_counts": selected_family_counts_json,
+        "feature_mu_excluded_low_quality_n": int(selection_debug.get("excluded_low_quality_n", 0)),
+        "feature_mu_excluded_preview": "|".join([str(x) for x in selection_debug.get("excluded_preview", [])]),
+        "feature_mu_excluded_reasons": json.dumps(selection_debug.get("excluded_reasons", {}), sort_keys=True),
+        "feature_mu_candidate_cols": "|".join([str(c) for c in feature_cols_all]),
+        "feature_mu_selection_source": str(selection_debug.get("selection_source", "none") or "none"),
+        "feature_mu_scale_mode": scale_mode,
+        "n_feature_candidates": int(len(feature_cols_all)),
+        "n_feature_selected": int(len(feature_cols)),
+        "selected_feature_columns": "|".join([str(c) for c in feature_cols]),
+        "feature_family_counts": selected_family_counts_json,
+        "excluded_feature_columns_preview": "|".join([str(x) for x in selection_debug.get("excluded_preview", [])]),
     }
     return out.astype(float), meta, details
 
@@ -6483,6 +7731,8 @@ def _build_run_overlay_telemetry_summary(diag_df: pd.DataFrame, weights_df: pd.D
         summary["feature_mu_cols_used_mean"] = np.nan
         summary["feature_mu_distance_mean"] = np.nan
         summary["feature_mu_abs_tilt_mean"] = 0.0
+        summary["feature_mu_selected_cols"] = ""
+        summary["feature_mu_selected_family_counts"] = "{}"
         summary["regime_universe_enabled_rate"] = 1.0 if bool(getattr(cfg, "regime_dependent_universe_enabled", False)) else 0.0
         return summary
 
@@ -6525,6 +7775,8 @@ def _build_run_overlay_telemetry_summary(diag_df: pd.DataFrame, weights_df: pd.D
         "feature_mu_cols_used_mean": _col_mean("feature_mu_cols_used_mean", "feature_mu_cols_used"),
         "feature_mu_distance_mean": _col_mean("feature_mu_distance_mean"),
         "feature_mu_abs_tilt_mean": _col_mean("feature_mu_abs_tilt_mean", "feature_mu_abs_tilt"),
+        "feature_mu_selected_cols": _col_mode("feature_mu_selected_cols") or "",
+        "feature_mu_selected_family_counts": _col_mode("feature_mu_selected_family_counts") or "{}",
         "regime_universe_enabled_rate": _col_mean("regime_dependent_universe_enabled", "regime_universe_enabled", "regime_universe_active"),
         "regime_universe_keep_frac_mean": _col_mean("regime_universe_keep_frac"),
         "regime_universe_selected_assets_mean": _col_mean("regime_universe_selected_assets", "selected_assets_after_regime_filter"),
@@ -6622,7 +7874,7 @@ def _apply_signal_model_extension(mu_hat_used: pd.Series, sigma_hat: pd.Series, 
         z = base_score * float(getattr(cfg, f"{mode}_confidence_scale", 1.0) if hasattr(cfg, f"{mode}_confidence_scale") else 1.0)
         prob_up = 1.0 / (1.0 + np.exp(-z.clip(-20, 20)))
         details["signal_prob_up"] = prob_up.astype(float)
-        out = (prob_up - 0.5) * sigma
+        out = (prob_up - 0.5) * mu.abs()
     elif mode == "top_k_classifier":
         ranks = base_score.rank(method="average", pct=True)
         details["signal_top_k_prob"] = ranks.astype(float)
@@ -6662,6 +7914,25 @@ def _resolve_pipeline_research_profile(cfg: MicroPipelineConfig) -> MicroPipelin
 
 
 def run_micro_investment_pipeline(asset_panel_df: pd.DataFrame, *, cfg: Optional[MicroPipelineConfig] = None) -> Dict[str, Any]:
+    engine_t0 = time.perf_counter()
+    engine_timing: Dict[str, float] = {
+        "prepare_panel": 0.0,
+        "feature_pair_prep": 0.0,
+        "walk_forward_loop": 0.0,
+        "mu_sigma_total": 0.0,
+        "probabilistic_total": 0.0,
+        "feature_mu_total": 0.0,
+        "signal_model_total": 0.0,
+        "regime_filter_total": 0.0,
+        "covariance_sigma_total": 0.0,
+        "weight_build_total": 0.0,
+        "post_weights_total": 0.0,
+        "diagnostics_total": 0.0,
+        "finalize_total": 0.0,
+        "n_oos_dates": 0.0,
+        "n_loop_iterations": 0.0,
+    }
+
     cfg = _resolve_pipeline_research_profile(cfg or MicroPipelineConfig())
     if asset_panel_df is None or not isinstance(asset_panel_df, pd.DataFrame) or asset_panel_df.empty:
         raise ValueError("asset_panel_df must be a non-empty DataFrame")
@@ -6669,6 +7940,7 @@ def run_micro_investment_pipeline(asset_panel_df: pd.DataFrame, *, cfg: Optional
     if not req.issubset(asset_panel_df.columns):
         raise ValueError(f"asset_panel_df must contain columns {sorted(req)}")
 
+    t_prepare = time.perf_counter()
     df = asset_panel_df.copy()
     df[cfg.date_col] = pd.to_datetime(df[cfg.date_col], errors="coerce")
     df[cfg.asset_col] = df[cfg.asset_col].astype(str)
@@ -6677,15 +7949,27 @@ def run_micro_investment_pipeline(asset_panel_df: pd.DataFrame, *, cfg: Optional
     if df.empty:
         raise ValueError("asset_panel_df has no valid rows after cleaning")
 
+    df = _ensure_feature_mu_fallback_columns(df, cfg)
+
     ret_mat = df.pivot(index=cfg.date_col, columns=cfg.asset_col, values=cfg.return_col).sort_index()
     assets = list(ret_mat.columns)
     if len(ret_mat) <= int(cfg.min_train):
         raise ValueError("Not enough observations for min_train")
+    engine_timing["prepare_panel"] = float(time.perf_counter() - t_prepare)
 
-    feature_cols = _resolve_probabilistic_feature_columns(df)
+    t_feat_pairs = time.perf_counter()
+    feature_cols = _resolve_feature_mu_columns(df)
     historical_feature_pairs = _build_probabilistic_feature_pairs(df, cfg, feature_cols)
+    engine_timing["feature_pair_prep"] = float(time.perf_counter() - t_feat_pairs)
 
     oos_dates = ret_mat.index[int(cfg.min_train):]
+    max_oos_points = getattr(cfg, "max_oos_points", None)
+    try:
+        max_oos_points = int(max_oos_points) if max_oos_points is not None else None
+    except Exception:
+        max_oos_points = None
+    if max_oos_points is not None and max_oos_points > 0 and len(oos_dates) > max_oos_points:
+        oos_dates = oos_dates[-max_oos_points:]
     prev_weights = None
     cost_state = None
     oos_returns = []
@@ -6694,47 +7978,70 @@ def run_micro_investment_pipeline(asset_panel_df: pd.DataFrame, *, cfg: Optional
     risk_rows: List[pd.DataFrame] = []
     corr_snaps: Dict[pd.Timestamp, pd.DataFrame] = {}
     sigma_snaps: Dict[pd.Timestamp, pd.DataFrame] = {}
+    engine_timing["n_oos_dates"] = float(len(oos_dates))
 
+    t_loop = time.perf_counter()
     for dt in oos_dates:
+        engine_timing["n_loop_iterations"] += 1.0
         loc = ret_mat.index.get_loc(dt)
         train_window = ret_mat.iloc[:loc].copy()
         train_window = train_window.dropna(how="all", axis=1)
         if train_window.shape[0] < int(cfg.min_train):
             continue
         assets_now = list(train_window.columns)
+
+        t_block = time.perf_counter()
         mu_hat, sigma_hat, regime = _forecast_mu_sigma_from_window(train_window, cfg)
+        engine_timing["mu_sigma_total"] += float(time.perf_counter() - t_block)
+
         current_feature_state = _build_current_feature_state(df, pd.Timestamp(dt), cfg, feature_cols)
+
+        t_block = time.perf_counter()
+        probabilistic_enabled = bool(getattr(cfg, "enable_probabilistic", True)) and str(cfg.probabilistic_mode) != "none"
         prob_df = _build_probabilistic_forecast_from_window(
             train_window[assets_now],
             cfg,
             historical_feature_pairs=historical_feature_pairs,
             current_feature_state=current_feature_state,
-        ) if str(cfg.probabilistic_mode) != "none" else None
+        ) if probabilistic_enabled else None
         mu_prob, prob_meta = _integrate_probabilistic_into_mu(mu_hat.reindex(assets_now), prob_df, cfg)
+        engine_timing["probabilistic_total"] += float(time.perf_counter() - t_block)
 
+        t_block = time.perf_counter()
         mu_feat, feature_meta, feature_details = _apply_feature_conditioned_mu(
             mu_prob,
+            sigma_hat=sigma_hat.reindex(assets_now),
             historical_feature_pairs=historical_feature_pairs,
             current_feature_state=current_feature_state,
             cfg=cfg,
         )
+        engine_timing["feature_mu_total"] += float(time.perf_counter() - t_block)
+
+        t_block = time.perf_counter()
         mu_signal_full, signal_meta, signal_details = _apply_signal_model_extension(mu_feat, sigma_hat.reindex(assets_now), cfg=cfg)
+        engine_timing["signal_model_total"] += float(time.perf_counter() - t_block)
+
+        t_block = time.perf_counter()
         mu_signal, sigma_hat_sub, regime_universe_meta, regime_universe_details = _apply_regime_dependent_universe_filter(
             mu_signal_full.reindex(assets_now),
             sigma_hat.reindex(assets_now),
             regime=regime,
             cfg=cfg,
         )
+        engine_timing["regime_filter_total"] += float(time.perf_counter() - t_block)
         assets_selected = list(mu_signal.index.astype(str))
 
+        t_block = time.perf_counter()
         corr_mat = _estimate_rolling_correlation_matrix(train_window[assets_selected], cfg, regime)
         sigma_fwd = _build_sigma_fwd(train_window[assets_selected], sigma_hat_sub.reindex(assets_selected), corr_mat, cfg, regime)
+        engine_timing["covariance_sigma_total"] += float(time.perf_counter() - t_block)
         if bool(cfg.store_correlation_snapshots):
             corr_snaps[pd.Timestamp(dt)] = corr_mat.copy()
         if bool(cfg.store_sigma_fwd_snapshots):
             sigma_snaps[pd.Timestamp(dt)] = sigma_fwd.copy()
 
         prev_w_sub = None if prev_weights is None else prev_weights.reindex(assets_selected).fillna(0.0)
+        t_block = time.perf_counter()
         weights_sub, raw_score, alloc_meta = _build_weights_from_mu_sigma(
             mu_signal.reindex(assets_selected),
             sigma_hat_sub.reindex(assets_selected),
@@ -6744,6 +8051,55 @@ def run_micro_investment_pipeline(asset_panel_df: pd.DataFrame, *, cfg: Optional
             corr_mat=corr_mat,
             sigma_fwd=sigma_fwd,
         )
+        engine_timing["weight_build_total"] += float(time.perf_counter() - t_block)
+
+        feature_rank_base = pd.Series(np.nan, index=pd.Index(assets_now, dtype="object"), dtype="float64")
+        feature_rank_tilted = pd.Series(np.nan, index=pd.Index(assets_now, dtype="object"), dtype="float64")
+        feature_rank_signal = pd.Series(np.nan, index=pd.Index(assets_now, dtype="object"), dtype="float64")
+        feature_rank_delta = pd.Series(np.nan, index=pd.Index(assets_now, dtype="object"), dtype="float64")
+        feature_topk_base_assets: List[str] = []
+        feature_topk_tilted_assets: List[str] = []
+        feature_topk_signal_assets: List[str] = []
+        feature_topk_overlap_vs_base = np.nan
+        feature_topk_overlap_vs_tilted = np.nan
+        feature_topk_changed_vs_base_n = np.nan
+        feature_topk_changed_vs_tilted_n = np.nan
+
+        try:
+            rank_sigma = pd.to_numeric(sigma_hat.reindex(assets_now), errors="coerce").replace(0.0, np.nan).fillna(float(cfg.sigma_floor)).clip(lower=float(cfg.sigma_floor))
+            base_score_for_rank = (
+                pd.to_numeric(mu_prob.reindex(assets_now), errors="coerce").fillna(0.0).astype(float) / rank_sigma
+            ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            tilted_score_for_rank = (
+                pd.to_numeric(mu_feat.reindex(assets_now), errors="coerce").fillna(0.0).astype(float) / rank_sigma
+            ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            signal_score_for_rank = (
+                pd.to_numeric(mu_signal_full.reindex(assets_now), errors="coerce").fillna(0.0).astype(float) / rank_sigma
+            ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+            feature_rank_base = base_score_for_rank.rank(method="min", ascending=False).astype(float)
+            feature_rank_tilted = tilted_score_for_rank.rank(method="min", ascending=False).astype(float)
+            feature_rank_signal = signal_score_for_rank.rank(method="min", ascending=False).astype(float)
+            feature_rank_delta = (feature_rank_tilted - feature_rank_base).astype(float)
+
+            effective_top_k_debug = alloc_meta.get("effective_top_k")
+            if effective_top_k_debug is not None:
+                k_debug = int(effective_top_k_debug)
+                if k_debug > 0:
+                    feature_topk_base_assets = [str(x) for x in base_score_for_rank.nlargest(min(k_debug, len(base_score_for_rank))).index]
+                    feature_topk_tilted_assets = [str(x) for x in tilted_score_for_rank.nlargest(min(k_debug, len(tilted_score_for_rank))).index]
+                    feature_topk_signal_assets = [str(x) for x in signal_score_for_rank.nlargest(min(k_debug, len(signal_score_for_rank))).index]
+                    base_set = set(feature_topk_base_assets)
+                    tilted_set = set(feature_topk_tilted_assets)
+                    signal_set = set(feature_topk_signal_assets)
+                    feature_topk_overlap_vs_base = float(len(base_set & signal_set) / k_debug)
+                    feature_topk_overlap_vs_tilted = float(len(tilted_set & signal_set) / k_debug)
+                    feature_topk_changed_vs_base_n = float(len(base_set ^ signal_set))
+                    feature_topk_changed_vs_tilted_n = float(len(tilted_set ^ signal_set))
+        except Exception:
+            pass
+
+        t_block = time.perf_counter()
         weights_sub, regime_derisk_mult = _apply_regime_derisk(weights_sub, regime=regime, cfg=cfg)
         weights_sub, vol_meta = _apply_vol_targeting(weights_sub, sigma_hat_sub.reindex(assets_selected), sigma_fwd, cfg)
 
@@ -6754,84 +8110,109 @@ def run_micro_investment_pipeline(asset_panel_df: pd.DataFrame, *, cfg: Optional
         cost_meta, cost_state = _evaluate_period_cost_tax(target_weights=w, realised_returns=realised, prev_state=cost_state, cfg=cfg)
         net_return_simple = float(cost_meta.get("net_portfolio_return_simple", active_return_simple))
         oos_returns.append(net_return_simple)
+        engine_timing["post_weights_total"] += float(time.perf_counter() - t_block)
 
-        corr_stats = _summarise_correlation_matrix(corr_mat)
-        sigma_stats = _summarise_sigma_fwd(sigma_fwd)
-        div_diag = _compute_diversification_diagnostics(train_window[assets_selected], weights_sub, corr_mat=corr_mat, sigma_fwd=sigma_fwd)
-        risk_detail, risk_summary = _compute_risk_decomposition(weights_sub, sigma_fwd, corr_mat, cfg)
-        if isinstance(risk_detail, pd.DataFrame) and not risk_detail.empty:
-            tmp = risk_detail.copy()
-            tmp.insert(0, "date", pd.Timestamp(dt))
-            risk_rows.append(tmp.reset_index(drop=False).rename(columns={"index": "asset"}))
+        diagnostics_enabled = bool(getattr(cfg, "enable_diagnostics", True))
+        t_block = time.perf_counter()
+        if diagnostics_enabled:
+            corr_stats = _summarise_correlation_matrix(corr_mat)
+            sigma_stats = _summarise_sigma_fwd(sigma_fwd)
+            div_diag = _compute_diversification_diagnostics(train_window[assets_selected], weights_sub, corr_mat=corr_mat, sigma_fwd=sigma_fwd)
+            risk_detail, risk_summary = _compute_risk_decomposition(weights_sub, sigma_fwd, corr_mat, cfg)
+            if isinstance(risk_detail, pd.DataFrame) and not risk_detail.empty:
+                tmp = risk_detail.copy()
+                tmp.insert(0, "date", pd.Timestamp(dt))
+                risk_rows.append(tmp.reset_index(drop=False).rename(columns={"index": "asset"}))
 
-        selected_asset_returns = pd.to_numeric(realised.reindex(assets_selected), errors="coerce").dropna()
-        diag_row = {
-            "date": pd.Timestamp(dt),
-            "regime": regime,
-            "n_assets": int(len(assets_now)),
-            "signal_mode": str(signal_meta.get("signal_mode_effective", getattr(cfg, "signal_mode", "mu_sigma"))),
-            "gross_portfolio_return_simple": active_return_simple,
-            "net_portfolio_return_simple": net_return_simple,
-            "portfolio_return_simple": active_return_simple,
-            "active_return_simple": active_return_simple,
-            "realised_return": active_return_simple,
-            "mean_selected_realised_return": float(selected_asset_returns.mean()) if not selected_asset_returns.empty else np.nan,
-            "turnover": float((w - (prev_weights.reindex(assets).fillna(0.0) if prev_weights is not None else 0.0)).abs().sum() / 2.0) if prev_weights is not None else np.nan,
-            "regime_derisk_mult": float(regime_derisk_mult),
-            **prob_meta,
-            **feature_meta,
-            **signal_meta,
-            **regime_universe_meta,
-            **alloc_meta,
-            **vol_meta,
-            **corr_stats,
-            **sigma_stats,
-            **div_diag,
-            **risk_summary,
-            **cost_meta,
-        }
-        diag_rows.append(diag_row)
-
-        for asset in assets_now:
-            asset_str = str(asset)
-            row = {
+            selected_asset_returns = pd.to_numeric(realised.reindex(assets_selected), errors="coerce").dropna()
+            diag_row = {
                 "date": pd.Timestamp(dt),
-                "asset": asset_str,
-                "weight": float(w.loc[asset]),
-                "mu_hat": float(pd.to_numeric(mu_hat.reindex([asset]), errors="coerce").iloc[0]) if asset in mu_hat.index else np.nan,
-                "mu_hat_used": float(pd.to_numeric(mu_signal.reindex([asset]), errors="coerce").iloc[0]) if asset in mu_signal.index else np.nan,
-                "sigma_hat": float(pd.to_numeric(sigma_hat.reindex([asset]), errors="coerce").iloc[0]) if asset in sigma_hat.index else np.nan,
-                "score": float(pd.to_numeric(raw_score.reindex([asset]), errors="coerce").iloc[0]) if asset in raw_score.index else np.nan,
-                "realised_return": float(pd.to_numeric(realised.reindex([asset]), errors="coerce").iloc[0]) if asset in realised.index else np.nan,
-                "signal_mode_requested": str(getattr(cfg, "signal_mode", "mu_sigma")),
-                "signal_mode_effective": str(signal_meta.get("signal_mode_effective", getattr(cfg, "signal_mode", "mu_sigma"))),
-                "prob_source": str(prob_df.loc[asset, "prob_source"]) if isinstance(prob_df, pd.DataFrame) and asset in prob_df.index and "prob_source" in prob_df.columns else str(getattr(cfg, "probabilistic_mode", "none")),
-                "probabilistic_mode_effective": str(prob_df.loc[asset, "probabilistic_mode_effective"]) if isinstance(prob_df, pd.DataFrame) and asset in prob_df.index and "probabilistic_mode_effective" in prob_df.columns else str(prob_meta.get("probabilistic_mode_effective", prob_meta.get("prob_source", getattr(cfg, "probabilistic_mode", "none")))),
-                "regime_universe_selected": bool(asset_str in set(pd.Index(mu_signal.index).astype(str))),
-                "effective_top_k": alloc_meta.get("effective_top_k"),
-                "topk_binding": alloc_meta.get("topk_binding"),
+                "regime": regime,
+                "n_assets": int(len(assets_now)),
+                "signal_mode": str(signal_meta.get("signal_mode_effective", getattr(cfg, "signal_mode", "mu_sigma"))),
+                "feature_mu_topk_base_assets": "|".join(feature_topk_base_assets),
+                "feature_mu_topk_tilted_assets": "|".join(feature_topk_tilted_assets),
+                "feature_mu_topk_signal_assets": "|".join(feature_topk_signal_assets),
+                "feature_mu_topk_overlap_vs_base": feature_topk_overlap_vs_base,
+                "feature_mu_topk_overlap_vs_tilted": feature_topk_overlap_vs_tilted,
+                "feature_mu_topk_changed_vs_base_n": feature_topk_changed_vs_base_n,
+                "feature_mu_topk_changed_vs_tilted_n": feature_topk_changed_vs_tilted_n,
+                "gross_portfolio_return_simple": active_return_simple,
+                "net_portfolio_return_simple": net_return_simple,
+                "portfolio_return_simple": active_return_simple,
+                "active_return_simple": active_return_simple,
+                "realised_return": active_return_simple,
+                "mean_selected_realised_return": float(selected_asset_returns.mean()) if not selected_asset_returns.empty else np.nan,
+                "turnover": float((w - (prev_weights.reindex(assets).fillna(0.0) if prev_weights is not None else 0.0)).abs().sum() / 2.0) if prev_weights is not None else np.nan,
+                "regime_derisk_mult": float(regime_derisk_mult),
+                **prob_meta,
+                **feature_meta,
+                **signal_meta,
+                **regime_universe_meta,
+                **alloc_meta,
+                **vol_meta,
+                **corr_stats,
+                **sigma_stats,
+                **div_diag,
+                **risk_summary,
+                **cost_meta,
             }
-            if isinstance(prob_df, pd.DataFrame) and asset in prob_df.index:
-                for col in prob_df.columns:
-                    row[col] = prob_df.loc[asset, col]
-            if asset in signal_details.index:
-                for col in signal_details.columns:
-                    row[col] = signal_details.loc[asset, col]
-            if not feature_details.empty and str(asset) in feature_details.index.astype(str):
-                feat_row = feature_details.loc[str(asset)] if str(asset) in feature_details.index else feature_details.loc[asset]
-                if isinstance(feat_row, pd.DataFrame):
-                    feat_row = feat_row.iloc[-1]
-                for col in feature_details.columns:
-                    row[col] = feat_row.get(col, np.nan)
-            if not regime_universe_details.empty and asset_str in regime_universe_details.index.astype(str):
-                reg_row = regime_universe_details.loc[asset_str] if asset_str in regime_universe_details.index else regime_universe_details.loc[asset]
-                if isinstance(reg_row, pd.DataFrame):
-                    reg_row = reg_row.iloc[-1]
-                for col in regime_universe_details.columns:
-                    row[col] = reg_row.get(col, np.nan)
-            weight_rows.append(row)
+            diag_rows.append(diag_row)
+
+            for asset in assets_now:
+                asset_str = str(asset)
+                row = {
+                    "date": pd.Timestamp(dt),
+                    "asset": asset_str,
+                    "weight": float(w.loc[asset]),
+                    "mu_hat_prob": float(pd.to_numeric(mu_prob.reindex([asset]), errors="coerce").iloc[0]) if asset in mu_prob.index else np.nan,
+                    "mu_hat_feature_tilted_pre_signal": float(pd.to_numeric(mu_feat.reindex([asset]), errors="coerce").iloc[0]) if asset in mu_feat.index else np.nan,
+                    "feature_mu_rank_base": float(pd.to_numeric(feature_rank_base.reindex([asset]), errors="coerce").iloc[0]) if asset in feature_rank_base.index else np.nan,
+                    "feature_mu_rank_tilted": float(pd.to_numeric(feature_rank_tilted.reindex([asset]), errors="coerce").iloc[0]) if asset in feature_rank_tilted.index else np.nan,
+                    "feature_mu_rank_signal": float(pd.to_numeric(feature_rank_signal.reindex([asset]), errors="coerce").iloc[0]) if asset in feature_rank_signal.index else np.nan,
+                    "feature_mu_rank_delta": float(pd.to_numeric(feature_rank_delta.reindex([asset]), errors="coerce").iloc[0]) if asset in feature_rank_delta.index else np.nan,
+                    "feature_mu_topk_base_flag": bool(asset_str in set(feature_topk_base_assets)),
+                    "feature_mu_topk_tilted_flag": bool(asset_str in set(feature_topk_tilted_assets)),
+                    "feature_mu_topk_signal_flag": bool(asset_str in set(feature_topk_signal_assets)),
+                    "mu_hat": float(pd.to_numeric(mu_hat.reindex([asset]), errors="coerce").iloc[0]) if asset in mu_hat.index else np.nan,
+                    "mu_hat_used": float(pd.to_numeric(mu_signal.reindex([asset]), errors="coerce").iloc[0]) if asset in mu_signal.index else np.nan,
+                    "sigma_hat": float(pd.to_numeric(sigma_hat.reindex([asset]), errors="coerce").iloc[0]) if asset in sigma_hat.index else np.nan,
+                    "score": float(pd.to_numeric(raw_score.reindex([asset]), errors="coerce").iloc[0]) if asset in raw_score.index else np.nan,
+                    "realised_return": float(pd.to_numeric(realised.reindex([asset]), errors="coerce").iloc[0]) if asset in realised.index else np.nan,
+                    "signal_mode_requested": str(getattr(cfg, "signal_mode", "mu_sigma")),
+                    "signal_mode_effective": str(signal_meta.get("signal_mode_effective", getattr(cfg, "signal_mode", "mu_sigma"))),
+                    "prob_source": str(prob_df.loc[asset, "prob_source"]) if isinstance(prob_df, pd.DataFrame) and asset in prob_df.index and "prob_source" in prob_df.columns else str(getattr(cfg, "probabilistic_mode", "none")),
+                    "probabilistic_mode_effective": str(prob_df.loc[asset, "probabilistic_mode_effective"]) if isinstance(prob_df, pd.DataFrame) and asset in prob_df.index and "probabilistic_mode_effective" in prob_df.columns else str(prob_meta.get("probabilistic_mode_effective", prob_meta.get("prob_source", getattr(cfg, "probabilistic_mode", "none")))),
+                    "regime_universe_selected": bool(asset_str in set(pd.Index(mu_signal.index).astype(str))),
+                    "effective_top_k": alloc_meta.get("effective_top_k"),
+                    "topk_binding": alloc_meta.get("topk_binding"),
+                }
+                if isinstance(prob_df, pd.DataFrame) and asset in prob_df.index:
+                    for col in prob_df.columns:
+                        row[col] = prob_df.loc[asset, col]
+                if asset in signal_details.index:
+                    for col in signal_details.columns:
+                        target_col = f"signal_{col}" if str(col) == "score" else col
+                        row[target_col] = signal_details.loc[asset, col]
+                if not feature_details.empty and str(asset) in feature_details.index.astype(str):
+                    feat_row = feature_details.loc[str(asset)] if str(asset) in feature_details.index else feature_details.loc[asset]
+                    if isinstance(feat_row, pd.DataFrame):
+                        feat_row = feat_row.iloc[-1]
+                    for col in feature_details.columns:
+                        row[col] = feat_row.get(col, np.nan)
+                if not regime_universe_details.empty and asset_str in regime_universe_details.index.astype(str):
+                    reg_row = regime_universe_details.loc[asset_str] if asset_str in regime_universe_details.index else regime_universe_details.loc[asset]
+                    if isinstance(reg_row, pd.DataFrame):
+                        reg_row = reg_row.iloc[-1]
+                    for col in regime_universe_details.columns:
+                        row[col] = reg_row.get(col, np.nan)
+                weight_rows.append(row)
+        engine_timing["diagnostics_total"] += float(time.perf_counter() - t_block)
         prev_weights = w.copy()
 
+    engine_timing["walk_forward_loop"] = float(time.perf_counter() - t_loop)
+
+    t_finalize = time.perf_counter()
     oos_index = pd.Index(oos_dates[: len(oos_returns)], name="date")
     result = {
         "config": cfg,
@@ -6854,18 +8235,11 @@ def run_micro_investment_pipeline(asset_panel_df: pd.DataFrame, *, cfg: Optional
         report = build_run_report(result, run_name="run")
     except Exception:
         report = {}
-    sections = report.get("sections", {}) if isinstance(report, dict) else {}
-    if isinstance(sections, dict):
-        result.setdefault("diversification_summary", sections.get("diversification", {}))
-        result.setdefault("universe_summary", sections.get("universe", {}))
-        result.setdefault("config_summary", sections.get("config", {}))
-        result.setdefault("factor_model_summary", sections.get("factor_model", {}))
-        result.setdefault("global_params_summary", sections.get("global_params", {}))
-    summary_df = report.get("summary_df", pd.DataFrame()) if isinstance(report, dict) else pd.DataFrame()
-    if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
-        result.setdefault("summary_df", summary_df)
+    result["report"] = report
+    engine_timing["finalize_total"] = float(time.perf_counter() - t_finalize)
+    engine_timing["total_engine"] = float(time.perf_counter() - engine_t0)
+    result["engine_timing"] = {k: float(v) for k, v in engine_timing.items()}
     return result
-
 
 def run_investment_projection(
     *,
@@ -6885,6 +8259,9 @@ def run_investment_projection(
     goal_amount: Optional[float] = None,
     micro_asset_panel_df: Optional[pd.DataFrame] = None,
     micro_cfg: Optional[MicroPipelineConfig] = None,
+    simulation_granularity: Literal["monthly", "daily_hybrid"] = "monthly",
+    daily_steps_per_month: int = 21,
+    daily_path_noise_scale: float = 0.35,
 ) -> Dict[str, Any]:
     monthly_contrib = float(monthly_contribution) if monthly_contribution is not None else float(weekly_to_monthly(float(weekly_savings or 0.0)))
     horizon_months = max(int(horizon_years) * 12, 1)
@@ -6893,40 +8270,75 @@ def run_investment_projection(
     annual_vol = float(override_annual_vol if override_annual_vol is not None else PROFILE_LIBRARY.get(risk_profile, PROFILE_LIBRARY["Balanced"])["fallback_vol_annual"])
     mu_m = annual_return / 12.0
     sigma_m = annual_vol / np.sqrt(12.0)
-    if realised_monthly_returns is not None and len(realised_monthly_returns) > 0:
-        rets = np.asarray(realised_monthly_returns, dtype="float64")
-        if bootstrap_method == "block":
-            paths = np.empty((n_sims, horizon_months + 1), dtype="float64")
-            for i in range(n_sims):
-                wealth = float(current_savings)
-                paths[i, 0] = wealth
-                t = 0
-                while t < horizon_months:
-                    start = int(rng.integers(0, max(len(rets) - max(int(block_len), 1), 1)))
-                    block = rets[start:start + max(int(block_len), 1)]
-                    for r in block:
-                        if t >= horizon_months:
-                            break
-                        wealth = (wealth + monthly_contrib) * (1.0 + float(r))
-                        t += 1
-                        paths[i, t] = wealth
-        else:
-            draws = rng.choice(rets, size=(n_sims, horizon_months), replace=True)
-            paths = np.empty((n_sims, horizon_months + 1), dtype="float64")
-            paths[:, 0] = float(current_savings)
-            for t in range(horizon_months):
-                paths[:, t + 1] = (paths[:, t] + monthly_contrib) * (1.0 + draws[:, t])
-    else:
-        draws = rng.normal(mu_m, sigma_m, size=(n_sims, horizon_months))
-        paths = np.empty((n_sims, horizon_months + 1), dtype="float64")
-        paths[:, 0] = float(current_savings)
-        for t in range(horizon_months):
-            paths[:, t + 1] = (paths[:, t] + monthly_contrib) * (1.0 + draws[:, t])
-    terminal = paths[:, -1]
+
+    use_daily_hybrid = (
+        str(simulation_granularity or "monthly").strip().lower() == "daily_hybrid"
+        and realised_monthly_returns is not None
+        and len(realised_monthly_returns) > 0
+    )
+    effective_daily_steps = max(int(daily_steps_per_month), 1)
+
+    def _sample_monthly_draws() -> np.ndarray:
+        if realised_monthly_returns is not None and len(realised_monthly_returns) > 0:
+            rets = np.asarray(realised_monthly_returns, dtype="float64")
+            if str(bootstrap_method).strip().lower() == "block":
+                out = np.empty((n_sims, horizon_months), dtype="float64")
+                for i in range(n_sims):
+                    t = 0
+                    while t < horizon_months:
+                        start = int(rng.integers(0, max(len(rets) - max(int(block_len), 1), 1)))
+                        block = rets[start:start + max(int(block_len), 1)]
+                        for r in block:
+                            if t >= horizon_months:
+                                break
+                            out[i, t] = float(r)
+                            t += 1
+                return out
+            return rng.choice(rets, size=(n_sims, horizon_months), replace=True).astype("float64")
+        return rng.normal(mu_m, sigma_m, size=(n_sims, horizon_months)).astype("float64")
+
+    monthly_draws = _sample_monthly_draws()
+    monthly_paths = np.empty((n_sims, horizon_months + 1), dtype="float64")
+    monthly_paths[:, 0] = float(current_savings)
+    for t in range(horizon_months):
+        monthly_paths[:, t + 1] = (monthly_paths[:, t] + monthly_contrib) * (1.0 + monthly_draws[:, t])
+
+    daily_paths = None
+    if use_daily_hybrid:
+        horizon_days = horizon_months * effective_daily_steps
+        daily_paths = np.empty((n_sims, horizon_days + 1), dtype="float64")
+        daily_paths[:, 0] = float(current_savings)
+        for i in range(n_sims):
+            wealth = float(current_savings)
+            day_idx = 0
+            for month_idx in range(horizon_months):
+                wealth = wealth + monthly_contrib
+                daily_returns = _expand_monthly_return_to_daily_path(
+                    float(monthly_draws[i, month_idx]),
+                    effective_daily_steps,
+                    rng,
+                    noise_scale=float(daily_path_noise_scale),
+                )
+                for d_ret in daily_returns:
+                    wealth = wealth * (1.0 + float(d_ret))
+                    day_idx += 1
+                    daily_paths[i, day_idx] = wealth
+
+    terminal = monthly_paths[:, -1]
     total_contrib = float(current_savings + monthly_contrib * horizon_months)
+
+    observed_annual_vol = annual_vol
+    if realised_monthly_returns is not None and len(realised_monthly_returns) > 1:
+        try:
+            observed_annual_vol = float(np.nanstd(np.asarray(realised_monthly_returns, dtype="float64"), ddof=1) * np.sqrt(12.0))
+        except Exception:
+            observed_annual_vol = annual_vol
+
+    summary_source = "historical_engine_oos_daily_hybrid" if use_daily_hybrid else ("historical_engine_oos" if realised_monthly_returns is not None and len(realised_monthly_returns) > 0 else ("micro_pipeline" if micro_asset_panel_df is not None else "parametric"))
+
     summary = GrowthSummary(
         profile=risk_profile,
-        source="micro_pipeline" if micro_asset_panel_df is not None else "parametric",
+        source=summary_source,
         horizon_months=horizon_months,
         n_sims=int(n_sims),
         initial_invested=float(current_savings),
@@ -6946,9 +8358,23 @@ def run_investment_projection(
         expected_max_drawdown=np.nan,
         drawdown_p10=np.nan,
         annual_return_assumption=float(annual_return),
-        annual_vol_assumption=float(annual_vol),
+        annual_vol_assumption=float(observed_annual_vol),
     )
-    out = {"wealth_paths": paths, "summary": summary.to_dict(), "source": summary.source}
+    out = {
+        "wealth_paths": monthly_paths,
+        "summary": summary.to_dict(),
+        "source": summary.source,
+        "simulation_granularity": "daily_hybrid" if use_daily_hybrid else "monthly",
+        "daily_steps_per_month": int(effective_daily_steps),
+    }
+    if daily_paths is not None:
+        out["wealth_paths_daily"] = daily_paths
+        out["daily_hybrid_metadata"] = {
+            "daily_steps_per_month": int(effective_daily_steps),
+            "daily_path_noise_scale": float(daily_path_noise_scale),
+            "monthly_paths_shape": tuple(int(x) for x in monthly_paths.shape),
+            "daily_paths_shape": tuple(int(x) for x in daily_paths.shape),
+        }
     if micro_asset_panel_df is not None:
         out["micro_pipeline_result"] = run_micro_investment_pipeline(micro_asset_panel_df, cfg=micro_cfg or MicroPipelineConfig())
     return out

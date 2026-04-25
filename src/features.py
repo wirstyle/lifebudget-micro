@@ -246,6 +246,59 @@ def _cross_sectional_rank_centered(x: pd.Series) -> pd.Series:
     return out
 
 
+def add_cross_sectional_features(
+    df: pd.DataFrame,
+    *,
+    date_col: str = "date",
+    asset_col: str = "asset",
+    feature_cols: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """
+    Add cross-sectional z-scores and centered ranks per date.
+
+    For each feature:
+        - feature_cs_z
+        - feature_cs_rank
+
+    Computed across assets for each date.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+
+    out = df.copy()
+
+    if feature_cols is None:
+        exclude = {date_col, asset_col, "return"}
+        feature_cols = [
+            c for c in out.columns
+            if c not in exclude and pd.api.types.is_numeric_dtype(out[c])
+        ]
+
+    if not feature_cols:
+        return out
+
+    numeric = out[feature_cols].apply(pd.to_numeric, errors="coerce")
+    grouped = numeric.groupby(out[date_col])
+
+    means = grouped.transform("mean")
+    stds = grouped.transform("std")
+    counts = grouped.transform("count")
+
+    z = (numeric - means).div(stds.replace(0.0, np.nan))
+    z = z.where(stds.gt(1e-12), 0.0)
+    z = z.where(numeric.notna(), np.nan)
+
+    ranks = grouped.rank(method="average", pct=True)
+    centered = 2.0 * (ranks - 0.5)
+    centered = centered.where(counts.gt(1), 0.0)
+    centered = centered.where(numeric.notna(), np.nan)
+
+    for col in feature_cols:
+        out[f"{col}_cs_z"] = z[col].astype("float64")
+        out[f"{col}_cs_rank"] = centered[col].astype("float64")
+
+    return out
+
 # ============================================================
 # Daily intramonth feature engine
 # ============================================================
@@ -390,82 +443,143 @@ def build_intramonth_monthly_features(df_daily: pd.DataFrame, cfg: DailyFeatureC
     They should not be interpreted as features known at the start of month t.
     """
     cfg = cfg or DailyFeatureConfig()
-    daily = add_daily_intramonth_state_features(df_daily, cfg)
+    daily = add_daily_intramonth_state_features(df_daily, cfg).copy()
     daily["month"] = daily[cfg.date_col].dt.to_period("M")
 
-    rows: List[Dict[str, object]] = []
-    for (asset, month), g in daily.groupby([cfg.asset_col, "month"], sort=True):
-        g = g.sort_values(cfg.date_col).copy()
-        n_obs = int(g.shape[0])
-        if n_obs < int(cfg.min_obs_per_month):
-            continue
-
-        rets = pd.to_numeric(g[cfg.return_col], errors="coerce").dropna()
-        if rets.empty:
-            continue
-
-        row: Dict[str, object] = {
-            "date": _month_end_from_dates(g[cfg.date_col]),
-            "asset": str(asset),
-            cfg.monthly_return_name: _monthly_simple_return_from_daily(rets),
-            "n_daily_obs": n_obs,
-            "intramonth_mean_daily": float(rets.mean()),
-            "intramonth_std_daily": float(rets.std(ddof=1)) if rets.shape[0] > 1 else np.nan,
-            "intramonth_realized_vol_ann": _safe_annualised_vol(rets, cfg.annualisation_days),
-            "intramonth_realized_vol_monthly": _safe_annualised_vol(rets, cfg.monthly_annualisation_days),
-            "intramonth_abs_mean_daily": float(rets.abs().mean()),
-            "intramonth_min_daily": float(rets.min()),
-            "intramonth_max_daily": float(rets.max()),
-            "intramonth_range_daily": float(rets.max() - rets.min()),
-            "intramonth_skew_daily": float(rets.skew()) if rets.shape[0] > 2 else np.nan,
-            "intramonth_kurtosis_daily": float(rets.kurt()) if rets.shape[0] > 3 else np.nan,
-            "intramonth_pos_day_rate": float((rets > 0).mean()),
-            "intramonth_neg_day_rate": float((rets < 0).mean()),
-            "intramonth_cum_abs_return": float(g["mtd_abs_return"].iloc[-1]),
-            "ewma_vol_5d_ann": float(pd.to_numeric(g["ewma_vol_5d_ann"], errors="coerce").iloc[-1]),
-            "ewma_vol_10d_ann": float(pd.to_numeric(g["ewma_vol_10d_ann"], errors="coerce").iloc[-1]),
-            "ewma_vol_21d_ann": float(pd.to_numeric(g["ewma_vol_21d_ann"], errors="coerce").iloc[-1]),
-            "roll_vol_5d_ann": float(pd.to_numeric(g["roll_vol_5d_ann"], errors="coerce").iloc[-1]),
-            "roll_vol_10d_ann": float(pd.to_numeric(g["roll_vol_10d_ann"], errors="coerce").iloc[-1]),
-            "roll_vol_21d_ann": float(pd.to_numeric(g["roll_vol_21d_ann"], errors="coerce").iloc[-1]),
-            "mom_5d_eom": float(pd.to_numeric(g["mom_5d"], errors="coerce").iloc[-1]),
-            "mom_10d_eom": float(pd.to_numeric(g["mom_10d"], errors="coerce").iloc[-1]),
-            "mom_21d_eom": float(pd.to_numeric(g["mom_21d"], errors="coerce").iloc[-1]),
-            "mom_5d_over_vol_21d_eom": float(pd.to_numeric(g["mom_5d_over_vol_21d"], errors="coerce").iloc[-1]),
-            "mom_10d_over_vol_21d_eom": float(pd.to_numeric(g["mom_10d_over_vol_21d"], errors="coerce").iloc[-1]),
-            "mom_21d_over_vol_21d_eom": float(pd.to_numeric(g["mom_21d_over_vol_21d"], errors="coerce").iloc[-1]),
-            "reversal_5d_eom": float(pd.to_numeric(g["reversal_5d"], errors="coerce").iloc[-1]),
-            "alpha_mom_spread_5_21_eom": float(pd.to_numeric(g["alpha_mom_spread_5_21"], errors="coerce").iloc[-1]),
-            "alpha_mom_spread_10_21_eom": float(pd.to_numeric(g["alpha_mom_spread_10_21"], errors="coerce").iloc[-1]),
-            "alpha_mom_accel_5_10_eom": float(pd.to_numeric(g["alpha_mom_accel_5_10"], errors="coerce").iloc[-1]),
-            "alpha_efficiency_10d_eom": float(pd.to_numeric(g["alpha_efficiency_10d"], errors="coerce").iloc[-1]),
-            "alpha_efficiency_21d_eom": float(pd.to_numeric(g["alpha_efficiency_21d"], errors="coerce").iloc[-1]),
-            "alpha_pos_rate_5d_eom": float(pd.to_numeric(g["alpha_pos_rate_5d"], errors="coerce").iloc[-1]),
-            "alpha_pos_rate_10d_eom": float(pd.to_numeric(g["alpha_pos_rate_10d"], errors="coerce").iloc[-1]),
-            "alpha_upside_vol_10d_ann_eom": float(pd.to_numeric(g["alpha_upside_vol_10d_ann"], errors="coerce").iloc[-1]),
-            "alpha_downside_vol_10d_ann_eom": float(pd.to_numeric(g["alpha_downside_vol_10d_ann"], errors="coerce").iloc[-1]),
-            "alpha_upside_vol_21d_ann_eom": float(pd.to_numeric(g["alpha_upside_vol_21d_ann"], errors="coerce").iloc[-1]),
-            "alpha_downside_vol_21d_ann_eom": float(pd.to_numeric(g["alpha_downside_vol_21d_ann"], errors="coerce").iloc[-1]),
-            "alpha_down_up_vol_ratio_21d_eom": float(pd.to_numeric(g["alpha_down_up_vol_ratio_21d"], errors="coerce").iloc[-1]),
-            "alpha_vol_compression_5v21_eom": float(pd.to_numeric(g["alpha_vol_compression_5v21"], errors="coerce").iloc[-1]),
-            "alpha_dist_from_21d_high_eom": float(pd.to_numeric(g["alpha_dist_from_21d_high"], errors="coerce").iloc[-1]),
-            "alpha_dist_from_21d_low_eom": float(pd.to_numeric(g["alpha_dist_from_21d_low"], errors="coerce").iloc[-1]),
-            "alpha_channel_pos_21d_eom": float(pd.to_numeric(g["alpha_channel_pos_21d"], errors="coerce").iloc[-1]),
-            "ret_1d_last_m": float(pd.to_numeric(g[cfg.return_col], errors="coerce").iloc[-1]),
-            "month_start_date": pd.to_datetime(g[cfg.date_col].iloc[0]),
-            "month_end_date": pd.to_datetime(g[cfg.date_col].iloc[-1]),
-        }
-        rows.append(row)
-
-    out = pd.DataFrame(rows)
-    if out.empty:
+    group_cols = [cfg.asset_col, "month"]
+    n_obs = daily.groupby(group_cols, sort=True, observed=True).size().rename("n_daily_obs")
+    valid_index = n_obs[n_obs >= int(cfg.min_obs_per_month)].index
+    if len(valid_index) == 0:
         raise ValueError("Monthly intramonth feature panel is empty after aggregation")
 
+    daily = daily.set_index(group_cols).loc[valid_index].reset_index()
+    daily["_ret_num"] = pd.to_numeric(daily[cfg.return_col], errors="coerce")
+    daily["_ret_abs"] = daily["_ret_num"].abs()
+    daily["_ret_log"] = np.log1p(daily["_ret_num"].clip(lower=cfg.clip_simple_return_low))
+    daily["_ret_pos_flag"] = (daily["_ret_num"] > 0).astype(float)
+    daily["_ret_neg_flag"] = (daily["_ret_num"] < 0).astype(float)
+
+    grouped = daily.groupby(group_cols, sort=True, observed=True)
+
+    stats = grouped["_ret_num"].agg(["mean", "std", "min", "max", "skew"])
+    stats = stats.rename(
+        columns={
+            "mean": "intramonth_mean_daily",
+            "std": "intramonth_std_daily",
+            "min": "intramonth_min_daily",
+            "max": "intramonth_max_daily",
+            "skew": "intramonth_skew_daily",
+        }
+    )
+    stats["intramonth_kurtosis_daily"] = grouped["_ret_num"].agg(pd.Series.kurt)
+    stats["intramonth_abs_mean_daily"] = grouped["_ret_abs"].mean()
+    stats["intramonth_pos_day_rate"] = grouped["_ret_pos_flag"].mean()
+    stats["intramonth_neg_day_rate"] = grouped["_ret_neg_flag"].mean()
+    stats["intramonth_range_daily"] = stats["intramonth_max_daily"] - stats["intramonth_min_daily"]
+
+    log_sum = grouped["_ret_log"].sum()
+    stats[cfg.monthly_return_name] = np.expm1(log_sum)
+
+    counts = grouped.size().astype("float64")
+    std_daily = pd.to_numeric(stats["intramonth_std_daily"], errors="coerce")
+    stats["intramonth_realized_vol_ann"] = np.where(
+        counts > 1,
+        std_daily * np.sqrt(float(cfg.annualisation_days)),
+        np.nan,
+    )
+    stats["intramonth_realized_vol_monthly"] = np.where(
+        counts > 1,
+        std_daily * np.sqrt(float(cfg.monthly_annualisation_days)),
+        np.nan,
+    )
+
+    first_dates = grouped[cfg.date_col].first().rename("month_start_date")
+    last_dates = grouped[cfg.date_col].last().rename("month_end_date")
+
+    snapshot_cols = [
+        "mtd_abs_return",
+        "ewma_vol_5d_ann",
+        "ewma_vol_10d_ann",
+        "ewma_vol_21d_ann",
+        "roll_vol_5d_ann",
+        "roll_vol_10d_ann",
+        "roll_vol_21d_ann",
+        "mom_5d",
+        "mom_10d",
+        "mom_21d",
+        "mom_5d_over_vol_21d",
+        "mom_10d_over_vol_21d",
+        "mom_21d_over_vol_21d",
+        "reversal_5d",
+        "alpha_mom_spread_5_21",
+        "alpha_mom_spread_10_21",
+        "alpha_mom_accel_5_10",
+        "alpha_efficiency_10d",
+        "alpha_efficiency_21d",
+        "alpha_pos_rate_5d",
+        "alpha_pos_rate_10d",
+        "alpha_upside_vol_10d_ann",
+        "alpha_downside_vol_10d_ann",
+        "alpha_upside_vol_21d_ann",
+        "alpha_downside_vol_21d_ann",
+        "alpha_down_up_vol_ratio_21d",
+        "alpha_vol_compression_5v21",
+        "alpha_dist_from_21d_high",
+        "alpha_dist_from_21d_low",
+        "alpha_channel_pos_21d",
+        cfg.return_col,
+    ]
+    last_snapshot = grouped[snapshot_cols].last().rename(
+        columns={
+            "mtd_abs_return": "intramonth_cum_abs_return",
+            "mom_5d": "mom_5d_eom",
+            "mom_10d": "mom_10d_eom",
+            "mom_21d": "mom_21d_eom",
+            "mom_5d_over_vol_21d": "mom_5d_over_vol_21d_eom",
+            "mom_10d_over_vol_21d": "mom_10d_over_vol_21d_eom",
+            "mom_21d_over_vol_21d": "mom_21d_over_vol_21d_eom",
+            "reversal_5d": "reversal_5d_eom",
+            "alpha_mom_spread_5_21": "alpha_mom_spread_5_21_eom",
+            "alpha_mom_spread_10_21": "alpha_mom_spread_10_21_eom",
+            "alpha_mom_accel_5_10": "alpha_mom_accel_5_10_eom",
+            "alpha_efficiency_10d": "alpha_efficiency_10d_eom",
+            "alpha_efficiency_21d": "alpha_efficiency_21d_eom",
+            "alpha_pos_rate_5d": "alpha_pos_rate_5d_eom",
+            "alpha_pos_rate_10d": "alpha_pos_rate_10d_eom",
+            "alpha_upside_vol_10d_ann": "alpha_upside_vol_10d_ann_eom",
+            "alpha_downside_vol_10d_ann": "alpha_downside_vol_10d_ann_eom",
+            "alpha_upside_vol_21d_ann": "alpha_upside_vol_21d_ann_eom",
+            "alpha_downside_vol_21d_ann": "alpha_downside_vol_21d_ann_eom",
+            "alpha_down_up_vol_ratio_21d": "alpha_down_up_vol_ratio_21d_eom",
+            "alpha_vol_compression_5v21": "alpha_vol_compression_5v21_eom",
+            "alpha_dist_from_21d_high": "alpha_dist_from_21d_high_eom",
+            "alpha_dist_from_21d_low": "alpha_dist_from_21d_low_eom",
+            "alpha_channel_pos_21d": "alpha_channel_pos_21d_eom",
+            cfg.return_col: "ret_1d_last_m",
+        }
+    )
+
+    out = pd.concat(
+        [
+            counts.rename("n_daily_obs"),
+            stats,
+            last_snapshot,
+            first_dates,
+            last_dates,
+        ],
+        axis=1,
+    ).reset_index()
+
+    out["date"] = out["month"].dt.to_timestamp("M")
+    out = out.drop(columns=["month"])
+    out = out.rename(columns={cfg.asset_col: "asset"})
     out["date"] = pd.to_datetime(out["date"], errors="coerce")
     out["asset"] = out["asset"].astype(str).str.upper().str.strip()
     out = out.sort_values(["date", "asset"]).reset_index(drop=True)
-    return out
 
+    if out.empty:
+        raise ValueError("Monthly intramonth feature panel is empty after aggregation")
+    return out
 
 # ============================================================
 # Cross-sectional daily aggregates -> monthly features

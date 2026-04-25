@@ -117,26 +117,77 @@ def download_yahoo_price_panel(
     if not tickers_list:
         raise ValueError("No tickers were provided for Yahoo download.")
 
-    raw = yf.download(
-        tickers=tickers_list,
-        start=str(start_date),
-        end=str(end_date),
-        interval=str(interval),
-        auto_adjust=bool(auto_adjust),
-        progress=False,
-        group_by="column",
-        threads=True,
-    )
+    last_error: Exception | None = None
 
-    prices = _pick_price_frame(raw, preferred_field=preferred_field)
-    if prices.columns.tolist() == ["SINGLE_ASSET"] and len(tickers_list) == 1:
-        prices.columns = tickers_list
-    prices.index = pd.to_datetime(prices.index, errors="coerce")
-    prices = prices.sort_index()
-    prices = prices.dropna(how="all")
-    if prices.empty:
-        raise ValueError("Yahoo download returned no usable prices after cleaning.")
-    return prices
+    def _finalize_prices(prices: pd.DataFrame) -> pd.DataFrame:
+        if prices.columns.tolist() == ["SINGLE_ASSET"] and len(tickers_list) == 1:
+            prices.columns = tickers_list
+        prices.index = pd.to_datetime(prices.index, errors="coerce")
+        prices = prices.sort_index().dropna(how="all")
+        if prices.empty:
+            raise ValueError("Yahoo download returned no usable prices after cleaning.")
+        return prices
+
+    try:
+        raw = yf.download(
+            tickers=tickers_list,
+            start=str(start_date),
+            end=str(end_date),
+            interval=str(interval),
+            auto_adjust=bool(auto_adjust),
+            progress=False,
+            group_by="column",
+            threads=True,
+        )
+        prices = _pick_price_frame(raw, preferred_field=preferred_field)
+        return _finalize_prices(prices)
+    except Exception as exc:
+        last_error = exc
+
+    try:
+        prices = _download_yahoo_price_panel_chunked(
+            tickers_list,
+            start_date=start_date,
+            end_date=end_date,
+            interval=interval,
+            auto_adjust=auto_adjust,
+            preferred_field=preferred_field,
+            chunk_size=int(chunk_size or 50),
+        )
+        return _finalize_prices(prices)
+    except Exception as exc:
+        last_error = exc
+
+    successful_parts: list[pd.DataFrame] = []
+    for ticker in tickers_list:
+        try:
+            raw = yf.download(
+                tickers=[ticker],
+                start=str(start_date),
+                end=str(end_date),
+                interval=str(interval),
+                auto_adjust=bool(auto_adjust),
+                progress=False,
+                group_by="column",
+                threads=False,
+            )
+            prices = _pick_price_frame(raw, preferred_field=preferred_field)
+            prices = _finalize_prices(prices)
+            if prices.columns.tolist() == ["SINGLE_ASSET"]:
+                prices.columns = [ticker]
+            if not prices.empty:
+                successful_parts.append(prices)
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    if successful_parts:
+        merged = pd.concat(successful_parts, axis=1)
+        merged = merged.loc[:, ~merged.columns.duplicated()].sort_index().dropna(how="all")
+        if not merged.empty:
+            return merged
+
+    raise ValueError(f"Yahoo download failed for the requested universe. Last error: {last_error}")
 
 
 def build_return_panel_from_prices(

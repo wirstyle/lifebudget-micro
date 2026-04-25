@@ -171,6 +171,292 @@ def build_single_plan_explanation(
     return "\n\n".join(lines)
 
 
+
+
+def build_step3_next_actions_markdown(
+    *,
+    intent: str,
+    margin_w: float,
+    target_a: float,
+    disc: float,
+    structural_deficit: bool,
+    short_term_goal_amount: float = 0.0,
+    short_term_goal_weeks: int = 0,
+    short_term_goal_required_weekly: float = 0.0,
+    structural_deficit_tips: str = "",
+) -> Dict[str, str]:
+    """
+    Narrative block for Step 3: 'What to do next'.
+
+    Returns:
+      {
+        "level": "success" | "info" | "warning" | "error",
+        "title": str,
+        "body": markdown_text,
+      }
+    """
+    intent_name = str(intent or "not_sure_yet")
+    margin_w = float(margin_w or 0.0)
+    target_a = float(target_a or 0.0)
+    disc = float(disc or 0.0)
+    short_term_goal_amount = float(short_term_goal_amount or 0.0)
+    short_term_goal_weeks = int(short_term_goal_weeks or 0)
+    short_term_goal_required_weekly = float(short_term_goal_required_weekly or 0.0)
+
+    if structural_deficit:
+        body_lines: List[str] = [
+            "You’re in structural deficit territory. The immediate goal is not optimisation — it is getting back to a sustainable weekly position first."
+        ]
+        if structural_deficit_tips:
+            body_lines.append(structural_deficit_tips)
+        return {
+            "level": "warning",
+            "title": "What to do next (short)",
+            "body": "\n\n".join(body_lines),
+        }
+
+    need = max(target_a - max(margin_w, 0.0), 0.0)
+
+    if intent_name == "avoid_overspending":
+        if need <= 0.0:
+            return {
+                "level": "success",
+                "title": "What to do next (short)",
+                "body": "Your cash flow already looks stable enough to stay at or above break-even under the current assumptions. This mode is about protecting that stability.",
+            }
+        if need <= disc:
+            return {
+                "level": "info",
+                "title": "What to do next (short)",
+                "body": f"To make break-even more resilient, reduce flexible spending by about **{_fmt_gbp0(need)}/week** and test the plan again with one-off events.",
+            }
+        return {
+            "level": "error",
+            "title": "What to do next (short)",
+            "body": "Even this stabilisation-first mode still needs a structural change because discretionary cuts alone are not enough.",
+        }
+
+    if intent_name == "save_more_each_week":
+        if need <= 0.0:
+            return {
+                "level": "success",
+                "title": "What to do next (short)",
+                "body": "Your chosen savings pace is already covered by your current margin. You can push it a little higher if you want a stronger weekly savings habit.",
+            }
+        if need <= disc:
+            return {
+                "level": "info",
+                "title": "What to do next (short)",
+                "body": f"To save more each week, aim to free up about **{_fmt_gbp0(need)}/week** from discretionary spending and check whether the uncertainty band still feels acceptable.",
+            }
+        return {
+            "level": "error",
+            "title": "What to do next (short)",
+            "body": "Your current stretch target is too aggressive for discretionary cuts alone. You’ll need either lower essentials or more income to sustain it.",
+        }
+
+    if intent_name == "reach_target_balance":
+        if short_term_goal_amount > 0.0:
+            implied_cash_only = float(target_a) * float(max(short_term_goal_weeks, 1))
+            if target_a >= short_term_goal_required_weekly and short_term_goal_required_weekly > 0.0:
+                return {
+                    "level": "success",
+                    "title": "What to do next (short)",
+                    "body": (
+                        f"At **{_fmt_gbp0(target_a)}/week**, you are pacing fast enough to build a short-term cash buffer of about "
+                        f"**{_fmt_gbp0(short_term_goal_amount)}** within roughly **{short_term_goal_weeks} weeks** in cash-only terms."
+                    ),
+                }
+            return {
+                "level": "info",
+                "title": "What to do next (short)",
+                "body": (
+                    f"Your cash-buffer goal implies about **{_fmt_gbp0(short_term_goal_required_weekly)}/week**. "
+                    f"Your current Plan A target would build roughly **{_fmt_gbp0(implied_cash_only)}** over **{short_term_goal_weeks} weeks** before any investing logic from later steps."
+                ),
+            }
+        if need <= 0.0:
+            return {
+                "level": "success",
+                "title": "What to do next (short)",
+                "body": "Your current weekly target already supports the short-term goal framing you selected.",
+            }
+        return {
+            "level": "info",
+            "title": "What to do next (short)",
+            "body": f"Your current target still needs about **{_fmt_gbp0(need)}/week** more than the baseline to support the short-term goal framing.",
+        }
+
+    # default = not_sure_yet
+    if need <= 0.0:
+        return {
+            "level": "success",
+            "title": "What to do next (short)",
+            "body": "Plan A is already covered by your current margin. Consider setting a slightly higher target.",
+        }
+    if need <= disc:
+        return {
+            "level": "info",
+            "title": "What to do next (short)",
+            "body": f"To reach Plan A (**{_fmt_gbp0(target_a)}/week**), aim to reduce discretionary by about **{_fmt_gbp0(need)}/week**. Start with a small, consistent cut rather than a perfect plan.",
+        }
+    return {
+        "level": "error",
+        "title": "What to do next (short)",
+        "body": "Plan A is not achievable through discretionary cuts alone. You’ll need a structural change (income ↑ or essentials ↓).",
+    }
+
+def build_step3_technical_details_markdown(
+    *,
+    baseline_df,
+    plan_df,
+    weeks: int,
+    iterations: int,
+    variability_frac: float,
+    uncertainty_preset: str,
+    seed: int,
+    target_a: float,
+    short_term_goal_amount: float = 0.0,
+    short_term_goal_weeks: int | None = None,
+    short_term_goal_required_weekly: float = 0.0,
+) -> str:
+    """
+    Full Step 3 technical markdown for the current single-plan flow.
+    Keeps Step 3 as UI while narrative + interpretation live in explain.py.
+    """
+    import pandas as pd
+
+    baseline_final = 0.0
+    conservative_final = 0.0
+    expected_final = 0.0
+    optimistic_final = 0.0
+
+    if isinstance(baseline_df, pd.DataFrame) and not baseline_df.empty and "Balance" in baseline_df.columns:
+        xs = pd.to_numeric(baseline_df["Balance"], errors="coerce").dropna()
+        if not xs.empty:
+            baseline_final = float(xs.iloc[-1])
+
+    if isinstance(plan_df, pd.DataFrame) and not plan_df.empty:
+        if "Lower" in plan_df.columns:
+            xs = pd.to_numeric(plan_df["Lower"], errors="coerce").dropna()
+            if not xs.empty:
+                conservative_final = float(xs.iloc[-1])
+        if "Mean" in plan_df.columns:
+            xs = pd.to_numeric(plan_df["Mean"], errors="coerce").dropna()
+            if not xs.empty:
+                expected_final = float(xs.iloc[-1])
+        if "Upper" in plan_df.columns:
+            xs = pd.to_numeric(plan_df["Upper"], errors="coerce").dropna()
+            if not xs.empty:
+                optimistic_final = float(xs.iloc[-1])
+
+    inputs = SinglePlanExplanationInputs(
+        weeks=int(weeks),
+        variability_pct=float(variability_frac) * 100.0,
+        seed=int(seed),
+        iters=int(iterations),
+    )
+
+    core_text = build_single_plan_explanation(
+        baseline_final=float(baseline_final),
+        conservative_final=float(conservative_final),
+        expected_final=float(expected_final),
+        optimistic_final=float(optimistic_final),
+        inputs=inputs,
+    )
+
+    implied_target_balance = float(target_a) * float(max(int(weeks), 1))
+    expected_vs_target = float(expected_final - implied_target_balance)
+    conservative_vs_target = float(conservative_final - implied_target_balance)
+    range_width = float(optimistic_final - conservative_final)
+
+    def _risk_label(range_width_value: float, horizon_weeks: int) -> str:
+        if int(horizon_weeks) <= 0:
+            return "Unknown"
+        weekly_spread = float(range_width_value) / float(horizon_weeks)
+        if weekly_spread < 10.0:
+            return "Low"
+        if weekly_spread < 25.0:
+            return "Moderate"
+        return "High"
+
+    def _confidence_label(range_width_value: float, baseline_final_value: float) -> str:
+        base = max(abs(float(baseline_final_value)), 1.0)
+        ratio = float(range_width_value) / base
+        if ratio <= 0.10:
+            return "High"
+        if ratio <= 0.20:
+            return "Medium"
+        return "Low"
+
+    risk_level = _risk_label(range_width, int(weeks))
+    confidence = _confidence_label(range_width, baseline_final)
+
+    lines: List[str] = []
+    lines.append("## Technical explanation (Baseline vs your plan)")
+    if core_text:
+        lines.append(core_text)
+
+    lines.append("### What this means for you")
+    lines.append(f"- In a typical scenario, you end up with about **£{expected_final - baseline_final:+,.0f}** versus baseline.")
+    lines.append(f"- But in a bad scenario, you could end up about **£{abs(conservative_final - baseline_final):,.0f}** worse than baseline.")
+    lines.append("- This means your plan has upside, but also meaningful downside risk.")
+
+    lines.append("### This is the trade-off")
+    lines.append(f"- **Potential upside:** about **£{expected_final - baseline_final:+,.0f}** in the expected case.")
+    lines.append(f"- **Downside risk:** about **£{conservative_final - baseline_final:+,.0f}** in the conservative case.")
+
+    lines.append("### Interpretation")
+    lines.append(f"- About **1 in 10** outcomes end below **£{conservative_final:,.0f}**.")
+    lines.append(f"- About **1 in 2** outcomes are around **£{expected_final:,.0f}**.")
+    lines.append(f"- About **1 in 10** outcomes exceed **£{optimistic_final:,.0f}**.")
+
+    lines.append("### Comparison with your Step 2 target")
+    lines.append(f"Your weekly target implies about **£{implied_target_balance:,.0f}** by week {int(weeks)}.")
+    if expected_vs_target >= 0:
+        lines.append(f"- **Expected outcome:** **£{expected_final:,.0f}** → about **£{expected_vs_target:,.0f} above** your target path.")
+    else:
+        lines.append(f"- **Expected outcome:** **£{expected_final:,.0f}** → about **£{abs(expected_vs_target):,.0f} below** your target path.")
+    if conservative_vs_target >= 0:
+        lines.append(f"- **Conservative outcome:** **£{conservative_final:,.0f}** → about **£{conservative_vs_target:,.0f} above** your target path.")
+    else:
+        lines.append(f"- **Conservative outcome:** **£{conservative_final:,.0f}** → about **£{abs(conservative_vs_target):,.0f} below** your target path.")
+
+    lines.append("### Range interpretation")
+    if range_width <= max(200.0, implied_target_balance * 0.10):
+        lines.append(
+            f"This range (~**£{range_width:,.0f}**) is relatively contained for a {int(weeks)}-week horizon, "
+            "which suggests the plan is not extremely sensitive to spending variability."
+        )
+    else:
+        lines.append(
+            f"This range (~**£{range_width:,.0f}**) is relatively wide for a {int(weeks)}-week horizon, "
+            "which indicates sensitivity to spending variability."
+        )
+
+    lines.append("### Risk label")
+    lines.append(f"**Risk level:** {risk_level}")
+    lines.append(f"**Confidence:** {confidence}")
+
+    if float(short_term_goal_amount or 0.0) > 0.0:
+        resolved_goal_weeks = int(short_term_goal_weeks or weeks)
+        lines.append(
+            f"Short-term cash-buffer overlay: this scenario is also being compared against a cash-only goal of "
+            f"**£{float(short_term_goal_amount):,.0f}** over **{resolved_goal_weeks} weeks**, "
+            f"which implies about **£{float(short_term_goal_required_weekly or 0.0):,.0f}/week**."
+        )
+
+    lines.append(
+        f"Your plan is evaluated with the real short-horizon Monte Carlo layer using **{int(iterations)}** iterations "
+        f"and variability of about **±{int(round(float(variability_frac) * 100.0))}%** "
+        f"on the combined variable + discretionary spending bucket ({str(uncertainty_preset)})."
+    )
+    lines.append(
+        f"Reproducibility note: results are generated with seed **{int(seed)}** over **{int(iterations)}** Monte Carlo iterations."
+    )
+
+    return "\n\n".join(lines)
+
 def build_explanation(
     base_final: float,
     a_final_mean: float,
@@ -1220,3 +1506,934 @@ def build_investment_strategy_explanation(inputs: InvestmentExplanationInputs) -
     lines.append(_build_educational_comparison(profile, cagr, vol, max_dd))
     lines.append("### Bottom line\n\nThis step is not telling you whether the strategy is 'good' in the abstract. It is helping you judge whether the likely growth, the depth of temporary losses, the contribution discipline required, and the emotional difficulty of staying invested actually fit the kind of investor experience you want to simulate.")
     return "\n\n".join(lines)
+
+
+# ============================================================
+# Engine structural explanation (5G)
+# ============================================================
+
+def _coerce_mapping(value: Any) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            mapped = to_dict()
+            if isinstance(mapped, dict):
+                return dict(mapped)
+        except Exception:
+            pass
+    try:
+        return dict(value)
+    except Exception:
+        return {}
+
+
+def _safe_num(value: Any) -> Optional[float]:
+    try:
+        v = float(value)
+    except Exception:
+        return None
+    if v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
+
+
+def _fmt_signed_pct(value: Optional[float]) -> str:
+    if value is None:
+        return ""
+    return f"{value:+.1f}%"
+
+
+def _label_from_concentration(cfg_map: Dict[str, Any]) -> str:
+    top_k = _safe_num(cfg_map.get("top_k"))
+    weight_shrink = _safe_num(cfg_map.get("weight_shrink"))
+    temperature = _safe_num(cfg_map.get("temperature"))
+    if top_k is not None and top_k <= 8:
+        return "fairly concentrated"
+    if top_k is not None and top_k >= 18:
+        return "broadly diversified"
+    if weight_shrink is not None and weight_shrink >= 0.20:
+        return "more diversified"
+    if temperature is not None and temperature <= 0.75:
+        return "more concentrated"
+    return "moderately diversified"
+
+
+def _build_metric_tradeoff_lines(perf: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    supports: List[str] = []
+    tradeoffs: List[str] = []
+    sharpe = _safe_num(perf.get("sharpe"))
+    cagr = _safe_num(perf.get("cagr"))
+    max_dd = _safe_num(perf.get("max_drawdown", perf.get("max_dd")))
+    turnover = _safe_num(perf.get("mean_turnover"))
+    diversification = _safe_num(perf.get("diversification", perf.get("mean_diversification_ratio")))
+    ann_vol = _safe_num(perf.get("annual_volatility", perf.get("annualized_volatility")))
+
+    if sharpe is not None:
+        if sharpe >= 1.0:
+            supports.append("risk-adjusted return is strong, so the strategy is not relying only on raw upside")
+        elif sharpe >= 0.5:
+            supports.append("risk-adjusted return is positive, which suggests the edge is not purely nominal CAGR")
+        else:
+            tradeoffs.append("risk-adjusted return is still modest, so headline gains should be interpreted carefully")
+
+    if max_dd is not None:
+        dd_abs = abs(max_dd)
+        if dd_abs <= 0.10:
+            supports.append("drawdown stayed contained, which points to effective risk control")
+        elif dd_abs >= 0.20:
+            tradeoffs.append("drawdown is materially elevated, so the path may be harder to tolerate in practice")
+
+    if turnover is not None:
+        if turnover <= 0.20:
+            supports.append("turnover stayed relatively controlled, which helps defend robustness after costs")
+        elif turnover >= 0.60:
+            tradeoffs.append("turnover is quite high, which increases the risk that part of the edge is fragile or cost-sensitive")
+
+    if diversification is not None:
+        if diversification >= 0.60:
+            supports.append("diversification remained meaningful, so performance is less likely to come from one narrow bet")
+        elif diversification <= 0.30:
+            tradeoffs.append("diversification is limited, so results may rely on a narrower set of exposures")
+
+    if cagr is not None and ann_vol is not None:
+        if cagr >= 0.08 and ann_vol <= 0.18:
+            supports.append("return and volatility stayed in a relatively balanced range")
+        elif cagr >= 0.10 and ann_vol >= 0.22:
+            tradeoffs.append("upside appears to come with a clear volatility cost")
+
+    return supports, tradeoffs
+
+
+def explain_why_config_works(
+    cfg: Any,
+    results: Any,
+    coherence: Any,
+    philosophy: Any,
+) -> Dict[str, Any]:
+    """Build a defendable natural-language explanation for engine results.
+
+    Returns a structured payload with short headline, key drivers, trade-offs,
+    coherence framing and a pre-rendered markdown block for the UI.
+    """
+    cfg_map = _coerce_mapping(cfg)
+    results_map = _coerce_mapping(results)
+    coherence_map = _coerce_mapping(coherence)
+    philosophy_name = str(philosophy or coherence_map.get("philosophy") or "Balanced")
+
+    perf = _coerce_mapping(results_map.get("performance_summary", results_map))
+    sharpe = _safe_num(perf.get("sharpe"))
+    cagr = _safe_num(perf.get("cagr"))
+    max_dd = _safe_num(perf.get("max_drawdown", perf.get("max_dd")))
+    turnover = _safe_num(perf.get("mean_turnover"))
+    ann_vol = _safe_num(perf.get("annual_volatility", perf.get("annualized_volatility")))
+
+    signal_mode = str(cfg_map.get("signal_mode") or "unknown")
+    overlay_mode = str(cfg_map.get("probabilistic_mode") or cfg_map.get("probabilistic_mode_effective") or "none")
+    top_k = _safe_num(cfg_map.get("top_k"))
+    covariance_hint = "on" if bool(cfg_map.get("ewma_sigma", False)) or (_safe_num(cfg_map.get("correlation_penalty_strength")) or 0.0) > 1e-9 or _safe_num(cfg_map.get("target_portfolio_vol_monthly")) is not None else "off"
+    concentration_label = _label_from_concentration(cfg_map)
+
+    drivers: List[str] = []
+    tradeoffs: List[str] = []
+
+    # Structural driver lines
+    if signal_mode != "unknown":
+        drivers.append(f"the engine is leaning on **{signal_mode}** as its primary signal contract")
+    if top_k is not None and top_k > 0:
+        drivers.append(f"portfolio construction uses **top_k ≈ {int(round(top_k))}**, which makes the posture **{concentration_label}**")
+    if overlay_mode != "none":
+        drivers.append(f"a **{overlay_mode}** overlay is active, so the final weights are not driven by point estimates alone")
+    else:
+        drivers.append("the result is coming mostly from the core ranking/allocation engine rather than from an extra overlay layer")
+    if covariance_hint == "on":
+        drivers.append("risk control is being supported by covariance / volatility-aware guardrails")
+    else:
+        tradeoffs.append("covariance-style risk control looks limited, so path risk may rely more on the base signal than on explicit portfolio defence")
+
+    metric_supports, metric_tradeoffs = _build_metric_tradeoff_lines(perf)
+    drivers.extend(metric_supports)
+    tradeoffs.extend(metric_tradeoffs)
+
+    coherence_label = str(coherence_map.get("label") or "unavailable")
+    coherence_score = _safe_num(coherence_map.get("score_continuous"))
+    coherence_reasons = [str(x) for x in list(coherence_map.get("reasons") or []) if str(x).strip()]
+    coherence_warnings = [str(x) for x in list(coherence_map.get("warnings") or []) if str(x).strip()]
+
+    coherence_sentence = f"This configuration is **{coherence_label}** relative to the **{philosophy_name}** philosophy"
+    if coherence_score is not None:
+        coherence_sentence += f" (coherence score {coherence_score:.2f})"
+    coherence_sentence += "."
+
+    if coherence_reasons:
+        drivers.append(f"structurally, it fits because **{coherence_reasons[0]}**")
+    if coherence_warnings:
+        tradeoffs.append(f"the main structural warning is: **{coherence_warnings[0]}**")
+
+    # Headline / summary
+    headline_bits: List[str] = []
+    if sharpe is not None:
+        headline_bits.append(f"Sharpe {sharpe:.2f}")
+    if cagr is not None:
+        headline_bits.append(f"CAGR {_fmt_signed_pct(cagr * 100.0) if abs(cagr) <= 1.0 else f'{cagr:.2f}'}")
+    headline = " · ".join(headline_bits) if headline_bits else "Engine explanation"
+
+    summary_lines: List[str] = []
+    if sharpe is not None and sharpe >= 1.0:
+        summary_lines.append("Sharpe improved because the signal and portfolio construction appear to be working together, not just because the strategy took more raw risk.")
+    elif sharpe is not None and cagr is not None and cagr > 0:
+        summary_lines.append("The strategy is generating positive returns, but the case is strongest when read as a balance between return and risk rather than CAGR alone.")
+    else:
+        summary_lines.append("The current result is more exploratory than fully convincing, so the explanation should be read as a structural interpretation rather than a claim of strong edge.")
+
+    if max_dd is not None:
+        if abs(max_dd) <= 0.10:
+            summary_lines.append("Drawdown stayed controlled because the configuration keeps the risk posture reasonably contained.")
+        elif abs(max_dd) >= 0.20:
+            summary_lines.append("Drawdown stayed difficult to contain, which suggests the upside is being bought with a materially rougher path.")
+
+    summary_lines.append(coherence_sentence)
+
+    if cagr is not None and max_dd is not None:
+        if cagr > 0 and abs(max_dd) <= 0.12:
+            tradeoffs.insert(0, "main trade-off: some upside may have been sacrificed in exchange for cleaner risk control")
+        elif cagr > 0 and abs(max_dd) > 0.18:
+            tradeoffs.insert(0, "main trade-off: higher upside is coming with a clearly heavier drawdown burden")
+
+    # Deduplicate while preserving order
+    def _dedupe(items: List[str]) -> List[str]:
+        out: List[str] = []
+        seen = set()
+        for item in items:
+            key = item.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+        return out
+
+    drivers = _dedupe(drivers)[:5]
+    tradeoffs = _dedupe(tradeoffs)[:4]
+    summary_lines = _dedupe(summary_lines)
+
+    markdown_parts: List[str] = [
+        "### Why this configuration works",
+        "\n".join(summary_lines),
+    ]
+    if drivers:
+        markdown_parts.append("**Main supporting reasons**")
+        markdown_parts.extend([f"- {x}" for x in drivers])
+    if tradeoffs:
+        markdown_parts.append("**Main trade-offs / caveats**")
+        markdown_parts.extend([f"- {x}" for x in tradeoffs])
+    if ann_vol is not None or turnover is not None:
+        stats_bits = []
+        if ann_vol is not None:
+            stats_bits.append(f"annual vol ≈ {ann_vol:.2f}")
+        if turnover is not None:
+            stats_bits.append(f"mean turnover ≈ {turnover:.2f}")
+        if stats_bits:
+            markdown_parts.append("**Context**")
+            markdown_parts.append("- " + " · ".join(stats_bits))
+
+    markdown_text = "\n\n".join(markdown_parts)
+    return {
+        "headline": headline,
+        "summary": summary_lines,
+        "drivers": drivers,
+        "tradeoffs": tradeoffs,
+        "coherence_sentence": coherence_sentence,
+        "signal_mode": signal_mode,
+        "overlay_mode": overlay_mode,
+        "philosophy": philosophy_name,
+        "markdown": markdown_text,
+    }
+
+
+def summarize_governed_parameter_tradeoffs(parameter_rows: List[Dict[str, Any]], *, max_lines: int = 3) -> str:
+    rows = [dict(x or {}) for x in list(parameter_rows or [])]
+    interesting = [r for r in rows if bool(r.get("changed")) and str(r.get("status", "coherent")) in {"stretched", "discouraged"}]
+    if not interesting:
+        interesting = [r for r in rows if bool(r.get("changed"))]
+    if not interesting:
+        return "Manual parameters remain close to the coherent base, so the current advanced state does not materially change the structural posture."
+
+    lines: List[str] = []
+    for row in interesting[:max(1, int(max_lines))]:
+        title = str(row.get("title", row.get("param_key", "parameter")) or "parameter")
+        current_value = str(row.get("current_value_display", row.get("current_value", "—")) or "—")
+        status = str(row.get("status", "coherent") or "coherent")
+        reading = str(row.get("reading", "") or "").strip()
+        structural_shift = str(row.get("structural_shift", "") or "").strip()
+        parts = [f"**{title} = {current_value}**"]
+        if structural_shift and structural_shift != "aligned":
+            parts.append(structural_shift)
+        if reading:
+            parts.append(reading)
+        sentence = " — ".join(parts)
+        if status == "discouraged":
+            sentence = f"{sentence}. This now sits in a discouraged region for the current philosophy."
+        elif status == "stretched":
+            sentence = f"{sentence}. This stretches the current philosophy and should be intentional."
+        lines.append(f"- {sentence}")
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# Governed traceability explanation (6H)
+# ============================================================
+
+def _pretty_key_name(key: Any) -> str:
+    raw = str(key or '').strip()
+    if not raw:
+        return 'field'
+    return raw.replace('_', ' ')
+
+
+def _coerce_trace_rows(trace: Any) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for item in list(trace or []):
+        mapped = _coerce_mapping(item)
+        if mapped:
+            rows.append(mapped)
+    return rows
+
+
+def _summarize_patch_keys(patch: Dict[str, Any], *, max_items: int = 6) -> str:
+    keys = [_pretty_key_name(k) for k in list(_coerce_mapping(patch).keys())]
+    keys = _dedupe_str_list(keys, max_items=max_items)
+    if not keys:
+        return 'none'
+    return ', '.join(keys)
+
+
+def _infer_traceability_tradeoff(
+    *,
+    results_map: Dict[str, Any],
+    coherence_map: Dict[str, Any],
+    philosophy_name: str,
+    final_cfg_map: Dict[str, Any],
+) -> str:
+    perf = _coerce_mapping(results_map.get('performance_summary', results_map))
+    max_dd = _safe_num(perf.get('max_drawdown', perf.get('max_dd')))
+    cagr = _safe_num(perf.get('cagr'))
+    turnover = _safe_num(perf.get('mean_turnover'))
+    top_k = _safe_num(final_cfg_map.get('top_k'))
+    corr_penalty = _safe_num(final_cfg_map.get('correlation_penalty_strength'))
+
+    if philosophy_name == 'Defensive':
+        return 'The main trade-off is accepting less raw upside and a more conservative posture in exchange for stronger drawdown control and structural robustness.'
+    if philosophy_name == 'Growth':
+        return 'The main trade-off is accepting a bumpier path and looser risk containment in exchange for stronger upside expression.'
+    if max_dd is not None and abs(max_dd) > 0.18:
+        return 'The main trade-off is that the final configuration still accepts a meaningfully rougher path in order to preserve upside.'
+    if turnover is not None and turnover > 0.50:
+        return 'The main trade-off is that the configuration remains relatively active, so robustness after costs matters more.'
+    if top_k is not None and top_k <= 8:
+        return 'The main trade-off is accepting a more concentrated book in exchange for stronger expression of the highest-ranked ideas.'
+    if corr_penalty is not None and corr_penalty >= 0.75:
+        return 'The main trade-off is accepting tighter risk-aware constraints, which can soften raw signal expression in favourable markets.'
+    if cagr is not None and cagr > 0:
+        return 'The main trade-off is a balanced one: some upside is intentionally sacrificed so the final posture stays cleaner and more governable.'
+    return 'The main trade-off is that the system favours structural coherence and explainability over forcing the most aggressive possible setup.'
+
+
+def build_governed_traceability_explanation(
+    cfg: Any,
+    base_cfg: Any,
+    coherence: Any,
+    philosophy: Any,
+    governance_payload: Any = None,
+    results: Any = None,
+) -> Dict[str, Any]:
+    """Build a defendable explanation of how the final governed config came to exist."""
+    final_cfg_map = _coerce_mapping(cfg)
+    base_cfg_map = _coerce_mapping(base_cfg)
+    governance_map = _coerce_mapping(governance_payload)
+    coherence_context = _coerce_governance_payload(coherence)
+    coherence_map = _coerce_mapping(coherence_context.get('coherence', coherence_context))
+    repairs_map = _coerce_mapping(coherence_context.get('repairs', coherence_map.get('repair_plan')))
+    results_map = _coerce_mapping(results)
+
+    philosophy_name = _coerce_philosophy_label(
+        philosophy
+        or governance_map.get('philosophy_effective')
+        or governance_map.get('philosophy')
+        or coherence_map.get('philosophy')
+    )
+
+    base_intention = _coerce_mapping(governance_map.get('base_intention'))
+    overrides_applied = _coerce_mapping(governance_map.get('overrides_applied'))
+    final_effective_cfg = _coerce_mapping(governance_map.get('final_effective_cfg')) or final_cfg_map
+    coherent_base_cfg = _coerce_mapping(governance_map.get('coherent_base_cfg')) or base_cfg_map
+    suggested_repairs = _coerce_mapping(governance_map.get('suggested_repairs')) or _coerce_mapping(repairs_map.get('suggested_patch'))
+    trace_rows = _coerce_trace_rows(governance_map.get('trace'))
+
+    if not base_intention and trace_rows:
+        first_resolution = next((row for row in trace_rows if str(row.get('stage', '')).strip().lower() == 'base_resolution'), None)
+        if first_resolution is not None:
+            base_intention = _coerce_mapping(first_resolution.get('summary'))
+
+    diff_vs_base = _build_structural_diff(final_effective_cfg, coherent_base_cfg)
+    manual_override_count = int(len(overrides_applied))
+    effective_change_count = int(len(diff_vs_base))
+    coherence_label = str(coherence_map.get('label') or governance_map.get('coherence_status') or 'unavailable')
+    coherence_score = _safe_num(coherence_map.get('score_continuous'))
+    if coherence_score is None:
+        coherence_score = _safe_num(governance_map.get('coherence_score'))
+
+    requested_source = str(base_intention.get('source') or 'unknown')
+    requested_strategy = str(base_intention.get('strategy_template') or base_intention.get('strategy') or '—')
+    requested_style = str(base_intention.get('style_preset') or '—')
+    requested_universe = base_intention.get('universe', '—')
+    simple_spec = _coerce_mapping(base_intention.get('simple_spec'))
+
+    recommendation_lines: List[str] = []
+    if manual_override_count > 0:
+        recommendation_lines.append(f"Manual overrides applied: **{manual_override_count}** field(s) ({_summarize_patch_keys(overrides_applied)}).")
+    else:
+        recommendation_lines.append('Manual overrides applied: **none**.')
+
+    if suggested_repairs:
+        recommendation_lines.append(f"Repairs / governed recommendation path available on: **{_summarize_patch_keys(suggested_repairs)}**.")
+    else:
+        recommendation_lines.append('Repairs / governed recommendation path: **none currently suggested**.')
+
+    why_still_coherent_parts: List[str] = []
+    reasons = [str(x) for x in list(coherence_map.get('reasons') or []) if str(x).strip()]
+    warnings = [str(x) for x in list(coherence_map.get('warnings') or []) if str(x).strip()]
+    if reasons:
+        why_still_coherent_parts.append(reasons[0])
+    if not why_still_coherent_parts and coherence_label not in {'unavailable', ''}:
+        why_still_coherent_parts.append(f'the final configuration remains {coherence_label} relative to the {philosophy_name} philosophy')
+    if warnings:
+        why_still_coherent_parts.append(f'with the main structural caution being: {warnings[0]}')
+
+    principal_tradeoff = _infer_traceability_tradeoff(
+        results_map=results_map,
+        coherence_map=coherence_map,
+        philosophy_name=philosophy_name,
+        final_cfg_map=final_effective_cfg,
+    )
+
+    markdown_parts: List[str] = ['### How this final configuration came to exist']
+    markdown_parts.append(
+        f"**Chosen philosophy**: **{philosophy_name}**. "
+        f"This is the governing lens used to judge whether the final posture still makes structural sense."
+    )
+
+    intention_bits = [f"source = **{requested_source}**"]
+    if requested_strategy and requested_strategy != '—':
+        intention_bits.append(f"strategy template = **{requested_strategy}**")
+    if requested_style and requested_style != '—':
+        intention_bits.append(f"style preset = **{requested_style}**")
+    if requested_universe != '—':
+        intention_bits.append(f"universe = **{requested_universe}**")
+    markdown_parts.append('**Original user / system intention**: ' + '; '.join(intention_bits) + '.')
+
+    if simple_spec:
+        simple_fields = []
+        for key in ['risk_appetite', 'diversification', 'stability', 'turnover_pref', 'drawdown_protection', 'overlay_intensity', 'signal_confidence', 'simplicity']:
+            value = _safe_num(simple_spec.get(key))
+            if value is not None:
+                simple_fields.append(f"{_pretty_key_name(key)}={value:.2f}")
+        if simple_fields:
+            markdown_parts.append('**Resolved simple-mode intent**: ' + ' · '.join(simple_fields[:8]) + '.')
+
+    markdown_parts.append(
+        f"**System-proposed coherent base config**: this is the governed baseline produced before manual drift, recommendation patches or repair patches. "
+        f"The final config differs from that base on **{effective_change_count}** field(s)."
+    )
+
+    markdown_parts.append('**Manual / applied changes**')
+    markdown_parts.extend([f"- {line}" for line in recommendation_lines])
+
+    if trace_rows:
+        trace_bullets = []
+        for row in trace_rows[:8]:
+            stage = str(row.get('stage') or row.get('kind') or 'stage')
+            detail_parts = []
+            for key in ['status', 'label', 'philosophy', 'repair_patch_available']:
+                if key in row and row.get(key) not in (None, '', []):
+                    detail_parts.append(f"{_pretty_key_name(key)}={row.get(key)}")
+            trace_bullets.append(f"- **{stage}**" + (f": {' · '.join(detail_parts)}" if detail_parts else ''))
+        markdown_parts.append('**Trace path**')
+        markdown_parts.extend(trace_bullets)
+
+    markdown_parts.append(
+        f"**Final effective config**: this is the configuration actually left standing after governance resolution. "
+        f"Coherence is currently **{coherence_label}**" + (f" with score **{coherence_score:.2f}**." if coherence_score is not None else '.')
+    )
+
+    if why_still_coherent_parts:
+        markdown_parts.append('**Why it is still coherent**')
+        markdown_parts.extend([f"- {part}" for part in why_still_coherent_parts])
+
+    markdown_parts.append(f"**Principal trade-off assumed**: {principal_tradeoff}")
+
+    return {
+        'philosophy': philosophy_name,
+        'base_intention': base_intention,
+        'coherent_base_cfg': coherent_base_cfg,
+        'final_effective_cfg': final_effective_cfg,
+        'overrides_applied': overrides_applied,
+        'suggested_repairs': suggested_repairs,
+        'trace': trace_rows,
+        'coherence_label': coherence_label,
+        'coherence_score': coherence_score,
+        'why_still_coherent': why_still_coherent_parts,
+        'principal_tradeoff': principal_tradeoff,
+        'effective_change_count': effective_change_count,
+        'markdown': '\n\n'.join(markdown_parts),
+    }
+
+# ============================================================
+# Governed actionable recommendations (6F)
+# ============================================================
+
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        v = int(value)
+    except Exception:
+        return None
+    return v
+
+
+def _coerce_philosophy_label(value: Any) -> str:
+    raw = str(value or "Balanced").strip().capitalize()
+    if raw in {"Growth", "Balanced", "Defensive"}:
+        return raw
+    return "Balanced"
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw in {"true", "1", "yes", "on"}:
+            return True
+        if raw in {"false", "0", "no", "off"}:
+            return False
+    try:
+        return bool(value)
+    except Exception:
+        return default
+
+
+def _dedupe_str_list(items: List[str], *, max_items: Optional[int] = None) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for item in list(items or []):
+        key = str(item or "").strip()
+        if not key:
+            continue
+        lowered = key.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        out.append(key)
+        if max_items is not None and len(out) >= int(max_items):
+            break
+    return out
+
+
+def _coerce_governance_payload(coherence: Any) -> Dict[str, Any]:
+    payload = _coerce_mapping(coherence)
+    if not payload:
+        return {}
+    if "coherence" in payload or "repairs" in payload or "constraints" in payload or "blocks" in payload:
+        return payload
+    return {"coherence": payload}
+
+
+def _extract_governed_context(
+    cfg_map: Dict[str, Any],
+    coherence: Any,
+    philosophy: Any,
+) -> Dict[str, Any]:
+    governance = _coerce_governance_payload(coherence)
+    coherence_map = _coerce_mapping(governance.get("coherence", governance))
+    repairs_map = _coerce_mapping(governance.get("repairs", coherence_map.get("repair_plan")))
+    constraints = _coerce_mapping(governance.get("constraints"))
+    blocks = _coerce_mapping(governance.get("blocks", coherence_map.get("blocks")))
+    philosophy_name = _coerce_philosophy_label(
+        philosophy
+        or governance.get("philosophy")
+        or coherence_map.get("philosophy")
+        or repairs_map.get("philosophy")
+    )
+
+    if not (constraints and blocks and repairs_map):
+        try:
+            from src.coherence import build_coherence_governance_payload
+            rebuilt = _coerce_mapping(build_coherence_governance_payload(cfg_map, philosophy_name))
+        except Exception:
+            rebuilt = {}
+        if rebuilt:
+            governance = {**rebuilt, **governance}
+            coherence_map = _coerce_mapping(governance.get("coherence", coherence_map))
+            repairs_map = _coerce_mapping(governance.get("repairs", repairs_map))
+            constraints = _coerce_mapping(governance.get("constraints", constraints))
+            blocks = _coerce_mapping(governance.get("blocks", blocks))
+
+    if not blocks:
+        try:
+            from src.coherence import extract_config_blocks
+            blocks = _coerce_mapping(extract_config_blocks(cfg_map))
+        except Exception:
+            blocks = {}
+
+    if not constraints:
+        try:
+            from src.coherence import resolve_philosophy_to_constraints
+            constraints = _coerce_mapping(resolve_philosophy_to_constraints(philosophy_name, universe="medium"))
+        except Exception:
+            constraints = {}
+
+    return {
+        "governance": governance,
+        "coherence": coherence_map,
+        "repairs": repairs_map,
+        "constraints": constraints,
+        "blocks": blocks,
+        "philosophy": philosophy_name,
+    }
+
+
+def _build_structural_diff(cfg_map: Dict[str, Any], base_map: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    diff: Dict[str, Dict[str, Any]] = {}
+    keys = sorted(set(cfg_map.keys()) | set(base_map.keys()))
+    for key in keys:
+        current = cfg_map.get(key)
+        base = base_map.get(key)
+        try:
+            equal = current == base
+        except Exception:
+            equal = False
+        if equal:
+            continue
+        diff[key] = {"current": current, "base": base}
+    return diff
+
+
+def _has_structural_change(diff: Dict[str, Dict[str, Any]], *keys: str) -> bool:
+    return any(k in diff for k in keys)
+
+
+def _merge_patch(*patches: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+        for key, value in patch.items():
+            merged[key] = value
+    return merged
+
+
+def _clean_patch(cfg_map: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key, value in dict(patch or {}).items():
+        if value is None:
+            continue
+        try:
+            same = cfg_map.get(key) == value
+        except Exception:
+            same = False
+        if same:
+            continue
+        out[key] = value
+    return out
+
+
+def _append_rec(
+    out: List[Dict[str, Any]],
+    *,
+    title: str,
+    why: str,
+    expected_benefit: str,
+    tradeoff: str,
+    patch: Dict[str, Any],
+    kind: Optional[str] = None,
+) -> None:
+    clean = {
+        "title": str(title or "").strip(),
+        "why": str(why or "").strip(),
+        "expected_benefit": str(expected_benefit or "").strip(),
+        "tradeoff": str(tradeoff or "").strip(),
+        "patch": dict(patch or {}),
+    }
+    if kind:
+        clean["kind"] = str(kind)
+    if not clean["title"] or not clean["patch"]:
+        return
+    out.append(clean)
+
+
+def build_governed_recommendations(
+    cfg: Any,
+    base_cfg: Any,
+    coherence: Any,
+    philosophy: Any,
+) -> List[Dict[str, Any]]:
+    """
+    Build actionable governed recommendations for the current configuration.
+
+    Contract:
+    - never executes the engine
+    - relies on coherence / structural posture / diffs vs coherent base
+    - returns a UI-ready list of dicts with:
+        title, why, expected_benefit, tradeoff, patch
+    """
+    cfg_map = _coerce_mapping(cfg)
+    base_map = _coerce_mapping(base_cfg)
+    context = _extract_governed_context(cfg_map, coherence, philosophy)
+
+    coherence_map = _coerce_mapping(context.get("coherence"))
+    repairs_map = _coerce_mapping(context.get("repairs"))
+    constraints = _coerce_mapping(context.get("constraints"))
+    blocks = _coerce_mapping(context.get("blocks"))
+    philosophy_name = _coerce_philosophy_label(context.get("philosophy"))
+
+    diff = _build_structural_diff(cfg_map, base_map)
+    top_k_range = constraints.get("top_k_range", (0, 999))
+    if isinstance(top_k_range, (list, tuple)) and len(top_k_range) >= 2:
+        low_k_raw, high_k_raw = top_k_range[0], top_k_range[1]
+    else:
+        low_k_raw, high_k_raw = 0, 999
+    try:
+        low_k = int(low_k_raw)
+    except Exception:
+        low_k = 0
+    try:
+        high_k = int(high_k_raw)
+    except Exception:
+        high_k = 999
+
+    top_k = _safe_int(cfg_map.get("top_k"))
+    score = _safe_num(coherence_map.get("score_continuous"))
+    label = str(coherence_map.get("label") or "unavailable").strip().lower()
+    status = str(repairs_map.get("status") or coherence_map.get("status") or "").strip().lower()
+    n_high = _safe_int(repairs_map.get("n_high_severity"))
+    actionable_warnings = _dedupe_str_list([str(x) for x in list(repairs_map.get("actionable_warnings", []) or [])], max_items=3)
+    suggested_patch = _clean_patch(cfg_map, _coerce_mapping(repairs_map.get("suggested_patch")))
+    preferred_signals = [str(x) for x in list(constraints.get("preferred_signal_modes", []) or []) if str(x).strip()]
+    preferred_overlays = [str(x) for x in list(constraints.get("preferred_overlay_modes", constraints.get("allowed_overlay_modes", [])) or []) if str(x).strip()]
+    caps_strength = str(blocks.get("caps_strength") or "")
+    covariance_model = str(blocks.get("covariance_model") or "")
+    overlay_mode = str(blocks.get("overlay_mode") or "")
+    signal_mode = str(blocks.get("signal_mode") or "")
+    concentration_allowed = _safe_bool(constraints.get("concentration_allowed"), default=False)
+
+    recommendations: List[Dict[str, Any]] = []
+
+    if suggested_patch:
+        why = actionable_warnings[0] if actionable_warnings else f"The current config is structurally stretched relative to {philosophy_name}."
+        _append_rec(
+            recommendations,
+            kind="coherence_repair_only",
+            title="Apply coherence repair only",
+            why=why,
+            expected_benefit="Recover cleaner structural alignment without changing the whole intent of the configuration.",
+            tradeoff="Some manually stretched settings may be pulled back toward the governed baseline.",
+            patch=suggested_patch,
+        )
+
+    safer_patch: Dict[str, Any] = {}
+    if covariance_model == "none":
+        safer_patch["ewma_sigma"] = True
+    if philosophy_name in {"Balanced", "Defensive"}:
+        corr_strength = _safe_num(cfg_map.get("correlation_penalty_strength"))
+        base_corr_strength = _safe_num(base_map.get("correlation_penalty_strength"))
+        safer_patch["correlation_penalty_strength"] = max(x for x in [corr_strength, base_corr_strength, 0.75] if x is not None)
+        if _safe_num(cfg_map.get("asset_weight_cap")) is None or (_safe_num(cfg_map.get("asset_weight_cap")) or 1.0) > (0.10 if philosophy_name == "Defensive" else 0.20):
+            safer_patch["asset_weight_cap"] = 0.10 if philosophy_name == "Defensive" else 0.20
+    if philosophy_name == "Defensive":
+        turnover_limit = _safe_num(cfg_map.get("turnover_constraint_max_turnover"))
+        safer_patch["turnover_penalty_strength"] = max((_safe_num(cfg_map.get("turnover_penalty_strength")) or 0.0), 1.0)
+        safer_patch["turnover_constraint_max_turnover"] = min(turnover_limit, 0.25) if turnover_limit is not None else 0.25
+        if preferred_overlays and overlay_mode not in preferred_overlays:
+            safer_patch["probabilistic_mode"] = preferred_overlays[0]
+    if top_k is not None and low_k > 0 and top_k < low_k:
+        safer_patch["top_k"] = low_k
+    safer_patch = _clean_patch(cfg_map, _merge_patch(suggested_patch, safer_patch))
+    if safer_patch and (
+        bool(suggested_patch)
+        or label in {"mixed", "incoherent", "unavailable"}
+        or status in {"repairable", "incompatible"}
+        or (score is not None and score < 0.70)
+        or (n_high is not None and n_high > 0)
+    ):
+        _append_rec(
+            recommendations,
+            kind="safer_current",
+            title="Apply safer version of current config",
+            why=(
+                actionable_warnings[0]
+                if actionable_warnings
+                else f"The current posture can be made safer while preserving the broad {philosophy_name} intent."
+            ),
+            expected_benefit="Stronger guardrails and lower structural fragility, with minimal change to the current setup.",
+            tradeoff="Risk control becomes more dominant, which can reduce upside expression or flexibility.",
+            patch=safer_patch,
+        )
+
+    if philosophy_name == "Balanced":
+        concentration_patch: Dict[str, Any] = {}
+        too_concentrated = (
+            (top_k is not None and low_k > 0 and top_k < low_k)
+            or ((not concentration_allowed) and top_k is not None and top_k <= 8)
+            or caps_strength in {"none", "soft"}
+        )
+        if too_concentrated:
+            if low_k > 0:
+                concentration_patch["top_k"] = max(low_k, top_k + 2 if top_k is not None else low_k)
+            if _safe_num(cfg_map.get("asset_weight_cap")) is None or (_safe_num(cfg_map.get("asset_weight_cap")) or 1.0) > 0.20:
+                concentration_patch["asset_weight_cap"] = 0.20
+            current_shrink = _safe_num(cfg_map.get("weight_shrink"))
+            base_shrink = _safe_num(base_map.get("weight_shrink"))
+            target_shrink_candidates = [x for x in [current_shrink, base_shrink, 0.12] if x is not None]
+            concentration_patch["weight_shrink"] = max(target_shrink_candidates) if target_shrink_candidates else 0.12
+            concentration_patch = _clean_patch(cfg_map, concentration_patch)
+        if concentration_patch:
+            why_bits = []
+            if top_k is not None and low_k > 0 and top_k < low_k:
+                why_bits.append(f"top_k={top_k} sits below the Balanced compatibility band [{low_k}, {high_k}]")
+            if caps_strength in {"none", "soft"}:
+                why_bits.append(f"caps_strength='{caps_strength}' leaves concentration relatively loose for Balanced")
+            why = "; ".join(why_bits) if why_bits else "The current Balanced posture leans too concentrated relative to its own structural target."
+            _append_rec(
+                recommendations,
+                kind="reduce_concentration_balanced",
+                title="Reduce concentration for Balanced",
+                why=why,
+                expected_benefit="Cleaner diversification posture and lower dependence on a narrow subset of bets.",
+                tradeoff="A broader book can dilute some upside concentration when the strongest signals are right.",
+                patch=concentration_patch,
+            )
+
+    covariance_patch: Dict[str, Any] = {}
+    covariance_required = _safe_bool(constraints.get("covariance_required"), default=philosophy_name in {"Balanced", "Defensive"})
+    if covariance_required and covariance_model == "none":
+        covariance_patch["ewma_sigma"] = True
+    if philosophy_name in {"Balanced", "Defensive"}:
+        curr_corr = _safe_num(cfg_map.get("correlation_penalty_strength"))
+        base_corr = _safe_num(base_map.get("correlation_penalty_strength"))
+        floor = 0.75 if philosophy_name == "Balanced" else 1.0
+        target_corr = max(x for x in [curr_corr, base_corr, floor] if x is not None)
+        if curr_corr is None or curr_corr < target_corr:
+            covariance_patch["correlation_penalty_strength"] = target_corr
+    if philosophy_name != "Growth":
+        current_target_vol = _safe_num(cfg_map.get("target_portfolio_vol_monthly"))
+        base_target_vol = _safe_num(base_map.get("target_portfolio_vol_monthly"))
+        if current_target_vol is None and base_target_vol is not None:
+            covariance_patch["target_portfolio_vol_monthly"] = base_target_vol
+    covariance_patch = _clean_patch(cfg_map, covariance_patch)
+    if covariance_patch and (
+        covariance_model == "none"
+        or _has_structural_change(diff, "ewma_sigma", "correlation_penalty_strength", "target_portfolio_vol_monthly")
+    ):
+        _append_rec(
+            recommendations,
+            kind="strengthen_covariance_guardrails",
+            title="Strengthen covariance guardrails",
+            why=(
+                f"{philosophy_name} expects an active covariance / risk-control layer."
+                if covariance_required
+                else "The current guardrail block looks lighter than the governed base."
+            ),
+            expected_benefit="Better path control and cleaner structural defence under the same philosophy.",
+            tradeoff="Tighter risk-aware allocation can soften raw signal expression when markets are favourable.",
+            patch=covariance_patch,
+        )
+
+    if philosophy_name == "Defensive":
+        defensive_patch: Dict[str, Any] = {}
+        if preferred_signals and signal_mode not in preferred_signals:
+            defensive_patch["signal_mode"] = preferred_signals[0]
+        if preferred_overlays and overlay_mode not in preferred_overlays:
+            defensive_patch["probabilistic_mode"] = preferred_overlays[0]
+        if top_k is not None and low_k > 0 and top_k < low_k:
+            defensive_patch["top_k"] = low_k
+        if _safe_num(cfg_map.get("asset_weight_cap")) is None or (_safe_num(cfg_map.get("asset_weight_cap")) or 1.0) > 0.10:
+            defensive_patch["asset_weight_cap"] = 0.10
+        defensive_patch["ewma_sigma"] = True
+        defensive_patch["correlation_penalty_strength"] = max((_safe_num(cfg_map.get("correlation_penalty_strength")) or 0.0), 1.0)
+        defensive_patch["turnover_penalty_strength"] = max((_safe_num(cfg_map.get("turnover_penalty_strength")) or 0.0), 1.0)
+        defensive_patch = _clean_patch(cfg_map, defensive_patch)
+        if defensive_patch:
+            why_parts: List[str] = []
+            if signal_mode and preferred_signals and signal_mode not in preferred_signals:
+                why_parts.append(f"signal_mode='{signal_mode}' is outside the preferred Defensive set")
+            if overlay_mode and preferred_overlays and overlay_mode not in preferred_overlays:
+                why_parts.append(f"overlay_mode='{overlay_mode}' is outside the preferred Defensive set")
+            if top_k is not None and low_k > 0 and top_k < low_k:
+                why_parts.append(f"top_k={top_k} is tighter than the Defensive diversification band [{low_k}, {high_k}]")
+            why = "; ".join(why_parts) if why_parts else "The current Defensive setup can be made more coherent without abandoning its risk-first posture."
+            _append_rec(
+                recommendations,
+                kind="improve_sharpe_defensive",
+                title="Improve Sharpe without breaking Defensive",
+                why=why,
+                expected_benefit="A cleaner Defensive structure can improve risk-adjusted quality without turning the profile aggressive.",
+                tradeoff="The portfolio may feel more conservative and less upside-seeking in benign regimes.",
+                patch=defensive_patch,
+            )
+
+    rollback_patch: Dict[str, Any] = {}
+    rollback_keys = [
+        "signal_mode",
+        "probabilistic_mode",
+        "top_k",
+        "asset_weight_cap",
+        "weight_shrink",
+        "turnover_penalty_strength",
+        "turnover_constraint_max_turnover",
+        "correlation_penalty_strength",
+        "ewma_sigma",
+    ]
+    for key in rollback_keys:
+        if key in diff and key in base_map:
+            rollback_patch[key] = base_map.get(key)
+    rollback_patch = _clean_patch(cfg_map, rollback_patch)
+    if rollback_patch and not suggested_patch and (
+        _has_structural_change(diff, *rollback_keys)
+        and ((score is not None and score < 0.75) or label in {"mixed", "unavailable"})
+    ):
+        _append_rec(
+            recommendations,
+            kind="return_toward_governed_base",
+            title="Move back toward governed base",
+            why="The current structure has drifted away from the coherent base even though the repair plan is not a single obvious fix.",
+            expected_benefit="Restores the intended governed posture with a small, understandable patch set.",
+            tradeoff="This gives up some manual experimentation in exchange for a cleaner default posture.",
+            patch=rollback_patch,
+        )
+
+    preferred_order = {
+        "coherence_repair_only": 0,
+        "safer_current": 1,
+        "reduce_concentration_balanced": 2,
+        "strengthen_covariance_guardrails": 3,
+        "improve_sharpe_defensive": 4,
+        "return_toward_governed_base": 5,
+    }
+    deduped: List[Dict[str, Any]] = []
+    seen_titles = set()
+    for rec in sorted(recommendations, key=lambda x: (preferred_order.get(str(x.get("kind")), 99), str(x.get("title", "")).lower())):
+        title_key = str(rec.get("title", "")).strip().lower()
+        if not title_key or title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+        rec["patch"] = _clean_patch(cfg_map, _coerce_mapping(rec.get("patch")))
+        if not rec["patch"]:
+            continue
+        deduped.append(rec)
+
+    return deduped[:5]
