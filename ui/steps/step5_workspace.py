@@ -73,6 +73,53 @@ def _safe_int(value: Any, default: int) -> int:
         return int(default)
 
 
+def _stable_panel_fingerprint(panel_df: pd.DataFrame) -> str:
+    if panel_df is None or not isinstance(panel_df, pd.DataFrame) or panel_df.empty:
+        return "empty"
+    payload = {
+        "rows": int(len(panel_df)),
+        "cols": list(map(str, panel_df.columns)),
+        "assets": sorted(panel_df["asset"].dropna().astype(str).unique().tolist()) if "asset" in panel_df.columns else [],
+        "min_date": str(panel_df["date"].min()) if "date" in panel_df.columns else "",
+        "max_date": str(panel_df["date"].max()) if "date" in panel_df.columns else "",
+    }
+    encoded = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.md5(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _resolve_run_signature_for_ready_card(cfg_final: dict, asset_panel_df: Any) -> str:
+    payload = {
+        "cfg_final": dict(cfg_final or {}),
+        "universe_size": st.session_state.get("universe_size"),
+        "universe_strategy": st.session_state.get("universe_strategy"),
+        "selected_assets": list(st.session_state.get("selected_assets", []) or []),
+        "panel_fp": _stable_panel_fingerprint(asset_panel_df) if isinstance(asset_panel_df, pd.DataFrame) else "empty",
+    }
+    encoded = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.md5(encoded.encode("utf-8")).hexdigest()[:12]
+
+
+def _resolve_config_fingerprint_for_ready_card(cfg_final: dict) -> str:
+    encoded = json.dumps(dict(cfg_final or {}), sort_keys=True, default=str)
+    return hashlib.md5(encoded.encode("utf-8")).hexdigest()[:12]
+
+
+def _current_result_is_fresh_for_ready_card(cfg_final: dict, asset_panel_df: Any) -> tuple[bool, str]:
+    current_signature = _resolve_run_signature_for_ready_card(cfg_final, asset_panel_df)
+    current_config_fp = _resolve_config_fingerprint_for_ready_card(cfg_final)
+    last_signature = str(st.session_state.get("step5_last_run_signature", "") or "")
+    last_config_fp = str(st.session_state.get("step5_last_config_fingerprint", "") or "")
+    stored_result = st.session_state.get("step5_last_run_result")
+    fresh = bool(
+        stored_result is not None
+        and current_signature
+        and current_config_fp
+        and last_signature == current_signature
+        and last_config_fp == current_config_fp
+    )
+    return fresh, current_signature
+
+
 def _render_basic_engine_controls(cfg_final: dict) -> dict:
     st.markdown("### Basic engine controls")
     st.caption("Advanced controls. Defaults are already resolved from the Step 4 philosophy and strategy setup; change these only for diagnostics or experimentation.")
@@ -406,6 +453,7 @@ def _render_ready_to_run_section(
     panel_ready = bool(st.session_state.get("asset_panel_ready", False)) and panel_rows > 0
     gov_state = str((governance_status or {}).get("state", "coherent") or "coherent")
     engine_status = "Blocked" if gov_state == "blocked" or not panel_ready else "Ready"
+    current_result_is_fresh, current_run_signature = _current_result_is_fresh_for_ready_card(cfg_final, asset_panel_df)
 
     with st.container(border=True):
         st.markdown("### 2. Ready to run")
@@ -435,7 +483,10 @@ def _render_ready_to_run_section(
         elif gov_state == "blocked":
             st.error("This setup is blocked by governance. Open the setup controls above or return to Step 4 to repair it.")
         else:
-            st.success("Ready to run: this setup can now be executed by the real engine.")
+            if current_result_is_fresh:
+                st.success("Result up to date: this setup has already been executed by the real engine.")
+            else:
+                st.success("Ready to run: this setup can now be executed by the real engine.")
 
         with st.expander("Technical execution details", expanded=False):
             st.caption(
@@ -447,6 +498,11 @@ def _render_ready_to_run_section(
                 f"weight_shrink={cfg_final.get('weight_shrink', '—')} · "
                 f"overlay={cfg_final.get('probabilistic_mode', cfg_final.get('overlay_label', '—'))}"
             )
+            applied_tuning_signature = str(st.session_state.get("step5_auto_opt_applied_run_signature_v1", "") or "")
+            applied_tuning_label = str(st.session_state.get("step5_auto_opt_applied_label_v1", "") or "")
+            if current_result_is_fresh and current_run_signature and applied_tuning_signature == current_run_signature:
+                label_text = f": {applied_tuning_label}" if applied_tuning_label else ""
+                st.caption(f"These technical values include the applied engine tuning suggestion{label_text}.")
 
         st.caption("This button runs the real micro pipeline and stores the result for metrics, Step 6 projection, and Step 7 insights.")
         return render_run_panel(

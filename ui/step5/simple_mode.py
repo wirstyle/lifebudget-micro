@@ -119,10 +119,22 @@ def render_simple_mode():
     )
 
     combo_status = strategy_combo_status(philosophy, current_template, current_style)
+    current_combo_label = f"{current_template} + {current_style}"
+    default_combo_label = f"{rec_template} + {rec_style}"
+    applied_preset_label = str(st.session_state.get("step5_preset_applied_label_v2", "") or "")
+
     if combo_status == "recommended":
-        st.caption(f"Current combo is the recommended bundle for {philosophy}: {current_template} + {current_style}.")
+        st.caption(f"Current combo is the recommended default for the {philosophy} philosophy: {current_combo_label}.")
+    elif applied_preset_label == current_combo_label:
+        st.caption(
+            f"Current setup: {current_combo_label}. This setup was selected by the improvement flow after testing nearby preset alternatives. "
+            f"The original {philosophy} philosophy default is {default_combo_label}."
+        )
     else:
-        st.caption(f"Current combo is allowed for {philosophy}, but the recommended bundle is {rec_template} + {rec_style}.")
+        st.caption(
+            f"Current combo is allowed for the {philosophy} philosophy. The original philosophy default is {default_combo_label}; "
+            "the current setup may differ because it was manually selected or carried forward from a previous run."
+        )
 
     c_action1, c_action2 = st.columns([1.2, 2.8])
     with c_action1:

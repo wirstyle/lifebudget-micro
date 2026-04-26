@@ -44,8 +44,22 @@ PRESET_SUGGESTION_STATE_KEY = "step5_preset_suggestion_v2"
 PRESET_SUGGESTION_SCOPE_KEY = "step5_preset_suggestion_scope_v2"
 PRESET_APPLIED_SIGNATURE_KEY = "step5_preset_applied_run_signature_v2"
 PRESET_APPLIED_LABEL_KEY = "step5_preset_applied_label_v2"
+PRESET_SKIPPED_SCOPE_KEY = "step5_preset_skipped_scope_v1"
+PRESET_SKIPPED_LABEL_KEY = "step5_preset_skipped_label_v1"
 PRESET_SUGGESTION_TIMING_KEY = "step5_preset_suggestion_timing_v1"
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
+
+# Keep these as string constants instead of importing auto_opt_recommendations here.
+# Importing the second-phase module from the first-phase module is unnecessary and
+# would make the suggestion phases more tightly coupled. These keys match the
+# public state keys defined by ui.step5.auto_opt_recommendations.
+AUTO_OPT_STATE_KEYS_TO_CLEAR = (
+    "step5_auto_opt_suggestion_v1",
+    "step5_auto_opt_suggestion_scope_v1",
+    "step5_auto_opt_suggestion_timing_v1",
+    "step5_auto_opt_applied_run_signature_v1",
+    "step5_auto_opt_applied_label_v1",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +305,7 @@ def _candidate_combos(philosophy: str, current_template: str, current_style: str
     for template, style in allowed:
         if (template, style) == current:
             continue
-        if template == current[0] and (template, style, "nearby_style") not in ordered:
+        if template == current[0] and all((template, style) != (x[0], x[1]) for x in ordered):
             ordered.append((template, style, "nearby_style"))
 
     # Finally allow one broader but still philosophy-approved alternative.
@@ -458,12 +472,15 @@ def _run_preset_search(run_result: dict, *, max_candidates: int = 2) -> dict:
     total_elapsed_sec = float(time.perf_counter() - started)
     accepted_count = int(sum(1 for item in evaluations if bool(_coerce_mapping(item).get("accepted", False))))
     timing_rows = []
+    accepted_seen = 0
     for item in evaluations:
         item_map = _coerce_mapping(item)
+        accepted = bool(item_map.get("accepted", False))
+        accepted_seen += 1 if accepted else 0
         timing_rows.append(
             {
                 "candidate": str(item_map.get("label", "Candidate") or "Candidate"),
-                "status": "accepted" if bool(item_map.get("accepted", False)) else "not selected",
+                "status": "recommended" if accepted and accepted_seen == 1 else ("passed gate" if accepted else "not selected"),
                 "seconds": round(_safe_float(item_map.get("elapsed_sec", 0.0), 0.0), 2),
             }
         )
@@ -493,6 +510,36 @@ def _run_preset_search(run_result: dict, *, max_candidates: int = 2) -> dict:
 # ---------------------------------------------------------------------------
 # Apply and render
 # ---------------------------------------------------------------------------
+
+
+def _clear_auto_opt_state_patch() -> dict:
+    """Clear second-phase cached results when the preset phase changes state.
+
+    Preset changes alter the strategic setup. Any technical-tuning candidates
+    computed before that decision are no longer the right comparison target.
+    """
+    patch: dict[str, Any] = {}
+    for key in AUTO_OPT_STATE_KEYS_TO_CLEAR:
+        if key.endswith("suggestion_v1") or key.endswith("timing_v1"):
+            patch[key] = {}
+        else:
+            patch[key] = ""
+    return patch
+
+
+def _skip_current_preset_candidate(scope: str, label: str = "current preset") -> None:
+    patch = {
+        PRESET_SKIPPED_SCOPE_KEY: str(scope or ""),
+        PRESET_SKIPPED_LABEL_KEY: str(label or "current preset"),
+    }
+    patch.update(_clear_auto_opt_state_patch())
+
+    if callable(queue_and_rerun):
+        queue_and_rerun(patch)
+        return
+    for key, value in patch.items():
+        st.session_state[key] = value
+    st.rerun()
 
 
 def _build_widget_patch_from_cfg_payload(cfg_payload: Any) -> dict:
@@ -644,6 +691,9 @@ def _apply_candidate(candidate: dict) -> None:
                 "step5_auto_run_pending_patch_keys": [],
                 PRESET_SUGGESTION_STATE_KEY: {},
                 PRESET_SUGGESTION_SCOPE_KEY: "",
+                PRESET_SKIPPED_SCOPE_KEY: "",
+                PRESET_SKIPPED_LABEL_KEY: "",
+                **_clear_auto_opt_state_patch(),
                 PRESET_APPLIED_SIGNATURE_KEY: run_signature,
                 PRESET_APPLIED_LABEL_KEY: str(candidate_map.get("label", "Preset candidate") or "Preset candidate"),
                 "step5_preset_apply_message_v2": (
@@ -663,6 +713,9 @@ def _apply_candidate(candidate: dict) -> None:
                 "step5_run_result": None,
                 PRESET_APPLIED_SIGNATURE_KEY: "",
                 PRESET_APPLIED_LABEL_KEY: "",
+                PRESET_SKIPPED_SCOPE_KEY: "",
+                PRESET_SKIPPED_LABEL_KEY: "",
+                **_clear_auto_opt_state_patch(),
                 "step5_preset_apply_message_v2": (
                     f"Preset suggestion applied: {candidate_map.get('label', 'Preset candidate')}. "
                     "Run the engine again to confirm the updated result."
@@ -687,7 +740,7 @@ def _candidate_table(evaluations: list[dict], current_perf: dict) -> pd.DataFram
         perf = _normalise_perf(item.get("performance_summary", {}))
         accepted = bool(item.get("accepted", False))
         accepted_seen += 1 if accepted else 0
-        status = "Recommended" if accepted and accepted_seen == 1 else ("Accepted" if accepted else "Not selected")
+        status = "Recommended" if accepted and accepted_seen == 1 else ("Passed gate" if accepted else "Not selected")
         vol_delta = perf.get("annual_volatility", 0.0) - base.get("annual_volatility", 0.0)
         # Positive means the drawdown became less severe; negative means it worsened.
         maxdd_improvement = base.get("max_drawdown", 0.0) - perf.get("max_drawdown", 0.0)
@@ -760,21 +813,48 @@ def _render_recommended_candidate(candidate: dict, current_perf: dict) -> None:
         )
 
 
-def render_preset_improvement(run_result: dict) -> None:
+def render_preset_improvement(run_result: dict) -> dict:
     """Render the first restored Step 5 preset-improvement assistant.
 
-    Preset candidates are now tested automatically after each fresh real engine
-    result. The user should see accepted/rejected candidates directly and only
-    decide whether to apply the accepted preset.
+    Returns a small flow-state payload so post_run.py can decide whether the
+    second phase (technical engine tuning) should run now or wait.
     """
+    flow_state = {
+        "blocks_auto_opt": False,
+        "status": "not_available",
+        "scope": "",
+        "has_recommendation": False,
+    }
+
     run_map = _coerce_mapping(run_result)
     perf = _normalise_perf(run_map.get("performance_summary", {}))
     if not perf:
-        return
+        return flow_state
 
     st.markdown("## 4. Improve this setup (optional)")
     st.caption(
-        "Automatically tests nearby strategy presets after the real engine run. "
+        "This section tests optional improvements step by step. Suggestions are only shown after they have been "
+        "rerun-tested against the current Step 4 data panel."
+    )
+
+    with st.expander("How the improvement flow works", expanded=False):
+        st.markdown(
+            """
+            **Available now**
+            1. **Strategy preset suggestion** — tests whether a nearby strategy style gives a better trade-off.
+            2. **Engine tuning suggestion** — keeps the same Step 4 universe and strategy preset, but adjusts small technical engine knobs.
+
+            **Planned next**
+            3. **Universe composition suggestion** — tests whether changing the asset mix improves the result.
+            4. **Universe size suggestion** — tests whether a smaller or larger universe works better.
+            """
+        )
+        st.caption(
+            "Suggestions appear sequentially. Later checks only become available after the previous decision has been applied or skipped."
+        )
+
+    st.caption(
+        "Phase 1 tests nearby strategy presets after the real engine run. "
         "This does not change the Step 4 universe, assets, size, or market-data panel."
     )
 
@@ -793,14 +873,16 @@ def render_preset_improvement(run_result: dict) -> None:
         )
         st.caption(
             "Preset testing is hidden for this run to avoid suggesting the same loop again. "
-            "Change the strategy setup or run a new baseline if you want to test nearby presets again."
+            "Engine tuning can now test small technical variations on top of this accepted strategy setup."
         )
-        return
+        flow_state.update({"status": "applied", "has_recommendation": False})
+        return flow_state
 
     if msg:
         st.success(str(msg))
 
     scope = _build_scope(run_map)
+    flow_state["scope"] = str(scope)
     saved_scope = str(st.session_state.get(PRESET_SUGGESTION_SCOPE_KEY, "") or "")
     payload = _coerce_mapping(st.session_state.get(PRESET_SUGGESTION_STATE_KEY, {}))
     evaluations = list(payload.get("evaluations", []) or []) if saved_scope == scope else []
@@ -819,19 +901,32 @@ def render_preset_improvement(run_result: dict) -> None:
 
     if not evaluations:
         st.info("No nearby preset alternatives were available to test for this run.")
-        return
+        flow_state.update({"status": "no_candidates"})
+        return flow_state
 
     accepted_items = [dict(x) for x in evaluations if bool(_coerce_mapping(x).get("accepted", False))]
     table = _candidate_table(evaluations, perf)
+    skipped_scope = str(st.session_state.get(PRESET_SKIPPED_SCOPE_KEY, "") or "")
+    skipped_label = str(st.session_state.get(PRESET_SKIPPED_LABEL_KEY, "") or "")
+    preset_was_skipped = bool(skipped_scope and skipped_scope == scope)
 
     if not accepted_items:
         st.success("Current preset loop has converged: no tested preset materially improved this run.")
         st.caption(
             "The tested alternatives are kept below for transparency, but none is offered as an action because "
-            "the acceptance gate did not find a better trade-off."
+            "the acceptance gate did not find a better trade-off. Engine tuning can continue on the current preset."
         )
+        flow_state.update({"status": "converged", "has_recommendation": False})
+    elif preset_was_skipped:
+        st.info(
+            "Current preset kept for this run. Engine tuning can now test small technical variations on the existing strategy setup."
+        )
+        if skipped_label:
+            st.caption(f"Skipped preset recommendation: {skipped_label}.")
+        flow_state.update({"status": "skipped", "has_recommendation": True, "blocks_auto_opt": False})
     else:
         best_candidate = accepted_items[0]
+        flow_state.update({"status": "pending_action", "has_recommendation": True, "blocks_auto_opt": True})
         st.success("Recommended preset improvement found. The best accepted candidate is shown below.")
         _render_recommended_candidate(best_candidate, perf)
         st.caption(
@@ -847,9 +942,17 @@ def render_preset_improvement(run_result: dict) -> None:
         if not table.empty:
             st.dataframe(table, use_container_width=True, hide_index=True)
 
-    if accepted_items:
-        if st.button("Apply recommended preset", key="step5_apply_best_preset_candidate_v3", use_container_width=True):
-            _apply_candidate(accepted_items[0])
+    if accepted_items and not preset_was_skipped:
+        best_candidate = accepted_items[0]
+        left, right = st.columns(2)
+        with left:
+            if st.button("Apply recommended preset", key="step5_apply_best_preset_candidate_v3", use_container_width=True):
+                _apply_candidate(best_candidate)
+        with right:
+            if st.button("Keep current preset and continue", key="step5_skip_best_preset_candidate_v1", use_container_width=True):
+                _skip_current_preset_candidate(scope, str(best_candidate.get("label", "recommended preset") or "recommended preset"))
+
+    return flow_state
 
 
 # Compatibility names used by older Step 5 imports. Keep these harmless until the
