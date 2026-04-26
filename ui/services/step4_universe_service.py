@@ -780,10 +780,38 @@ def build_strategy_candidate_pool(universe_size: Any, strategy_name: Any) -> Lis
 
 def resolve_universe_selection(universe_size: Any, strategy_name: Any, custom_enabled: bool, custom_text: Any) -> Tuple[List[str], str]:
     generated = build_generated_universe(universe_size, strategy_name)
+    size_value, strategy_value = validate_universe_inputs(universe_size, strategy_name)
+
+    # Manual custom baskets keep priority where the Step 4 UI allows them.
     if bool(custom_enabled):
         custom_assets = parse_custom_assets(custom_text)
         if custom_assets:
             return custom_assets, "custom"
+
+    # Step 5 universe-composition suggestions can promote a tested same-size
+    # composition without turning it into a manual custom list. This keeps Step 4
+    # stable for the user while allowing Phase 3 to preserve the exact tested
+    # assets after Apply.
+    try:
+        source = str(st.session_state.get(UNIVERSE_CUSTOM_ENABLED_SOURCE, "") or "")
+        rec_ctx = st.session_state.get("step5_recommended_universe_context_v1", {})
+        rec_ctx = dict(rec_ctx) if isinstance(rec_ctx, dict) else {}
+        rec_assets = _unique_preserve_order(
+            [normalize_asset_ticker(x) for x in list(st.session_state.get(RECOMMENDED_UNIVERSE_ASSETS, []) or [])]
+        )
+        ctx_size = int(rec_ctx.get("universe_size", size_value) or size_value)
+        ctx_strategy = str(rec_ctx.get("universe_strategy", strategy_value) or strategy_value)
+        if (
+            source == "recommendation"
+            and rec_assets
+            and len(rec_assets) == int(size_value)
+            and ctx_size == int(size_value)
+            and ctx_strategy == str(strategy_value)
+        ):
+            return rec_assets, "recommendation"
+    except Exception:
+        pass
+
     return generated, "generated"
 
 

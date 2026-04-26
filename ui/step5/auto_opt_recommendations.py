@@ -31,6 +31,9 @@ AUTO_OPT_SUGGESTION_STATE_KEY = "step5_auto_opt_suggestion_v1"
 AUTO_OPT_SUGGESTION_SCOPE_KEY = "step5_auto_opt_suggestion_scope_v1"
 AUTO_OPT_APPLIED_SIGNATURE_KEY = "step5_auto_opt_applied_run_signature_v1"
 AUTO_OPT_APPLIED_LABEL_KEY = "step5_auto_opt_applied_label_v1"
+AUTO_OPT_SKIPPED_SCOPE_KEY = "step5_auto_opt_skipped_scope_v1"
+AUTO_OPT_SKIPPED_LABEL_KEY = "step5_auto_opt_skipped_label_v1"
+AUTO_OPT_SKIPPED_RUN_SIGNATURE_KEY = "step5_auto_opt_skipped_run_signature_v1"
 AUTO_OPT_SUGGESTION_TIMING_KEY = "step5_auto_opt_suggestion_timing_v1"
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
 
@@ -688,6 +691,28 @@ def _apply_candidate(candidate: dict) -> None:
     st.rerun()
 
 
+def _skip_current_auto_opt_candidate(scope: str, label: str, run_signature: str) -> None:
+    """Mark the current engine-tuning recommendation as skipped for this run.
+
+    This preserves the tested diagnostics/timing but allows the sequential flow to
+    continue to Universe composition without applying technical changes.
+    """
+    patch = {
+        AUTO_OPT_SKIPPED_SCOPE_KEY: str(scope or ""),
+        AUTO_OPT_SKIPPED_LABEL_KEY: str(label or "recommended tuning"),
+        AUTO_OPT_SKIPPED_RUN_SIGNATURE_KEY: str(run_signature or ""),
+        "step5_auto_opt_apply_message_v1": (
+            f"Engine tuning kept unchanged for this run. Skipped recommendation: {label}."
+        ),
+    }
+    if callable(queue_and_rerun):
+        queue_and_rerun(patch)
+        return
+    for key, value in patch.items():
+        st.session_state[key] = value
+    st.rerun()
+
+
 def _candidate_table(evaluations: list[dict], current_perf: dict) -> pd.DataFrame:
     rows: list[dict] = []
     base = _normalise_perf(current_perf)
@@ -824,6 +849,14 @@ def render_auto_opt_improvement(run_result: dict) -> None:
 
     accepted_items = [dict(x) for x in evaluations if bool(_coerce_mapping(x).get("accepted", False))]
     table = _candidate_table(evaluations, perf)
+    skipped_scope = str(st.session_state.get(AUTO_OPT_SKIPPED_SCOPE_KEY, "") or "")
+    skipped_label = str(st.session_state.get(AUTO_OPT_SKIPPED_LABEL_KEY, "") or "")
+    skipped_run_signature = str(st.session_state.get(AUTO_OPT_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
+    tuning_was_skipped = bool(
+        skipped_scope
+        and skipped_scope == scope
+        and (not skipped_run_signature or skipped_run_signature == current_run_signature)
+    )
 
     if not accepted_items:
         st.success("Current engine tuning has converged: no tested technical variation materially improved this run.")
@@ -831,6 +864,10 @@ def render_auto_opt_improvement(run_result: dict) -> None:
             "The tested technical candidates are kept below for transparency, but none is offered as an action because "
             "the acceptance gate did not find a better trade-off."
         )
+    elif tuning_was_skipped:
+        st.info("Current engine tuning kept for this run. Universe composition can now be tested on the existing technical setup.")
+        if skipped_label:
+            st.caption(f"Skipped engine tuning recommendation: {skipped_label}.")
     else:
         best_candidate = accepted_items[0]
         st.success("Recommended engine tuning found. The best accepted candidate is shown below.")
@@ -849,9 +886,19 @@ def render_auto_opt_improvement(run_result: dict) -> None:
         if not table.empty:
             st.dataframe(table, use_container_width=True, hide_index=True)
 
-    if accepted_items:
-        if st.button("Apply recommended tuning", key="step5_apply_best_auto_opt_candidate_v1", use_container_width=True):
-            _apply_candidate(accepted_items[0])
+    if accepted_items and not tuning_was_skipped:
+        best_candidate = accepted_items[0]
+        left, right = st.columns(2)
+        with left:
+            if st.button("Apply recommended tuning", key="step5_apply_best_auto_opt_candidate_v1", use_container_width=True):
+                _apply_candidate(best_candidate)
+        with right:
+            if st.button("Keep current tuning and continue", key="step5_skip_best_auto_opt_candidate_v1", use_container_width=True):
+                _skip_current_auto_opt_candidate(
+                    scope,
+                    str(best_candidate.get("label", "recommended tuning") or "recommended tuning"),
+                    current_run_signature,
+                )
 
 
 # Compatibility wrapper for older imports.
