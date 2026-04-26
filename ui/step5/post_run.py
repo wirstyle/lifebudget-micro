@@ -4,10 +4,46 @@ import json
 from typing import Any
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 
 from ui.step5.run_panel import clear_retired_step5_state
+from ui.step5.preset_recommendations import render_preset_improvement
 
+
+
+STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
+PRESET_SUGGESTION_TIMING_KEY = "step5_preset_suggestion_timing_v1"
+STEP5_REAL_RUN_RESULT_ANCHOR_ID = "step5-real-run-result-anchor"
+
+
+def _maybe_scroll_to_real_run_result() -> None:
+    """Scroll back to the real result after applying a rerun-tested preset.
+
+    Streamlit has no native scroll-to-anchor API, so this tiny hidden component is
+    intentionally limited to one job: move the viewport back to section 3 after
+    an Apply action promotes a candidate result.
+    """
+    if not bool(st.session_state.pop(STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY, False)):
+        return
+
+    components.html(
+        f"""
+        <script>
+        const anchorId = {STEP5_REAL_RUN_RESULT_ANCHOR_ID!r};
+        function scrollToRealRunResult() {{
+            const doc = window.parent.document;
+            const el = doc.getElementById(anchorId);
+            if (el) {{
+                el.scrollIntoView({{ behavior: "smooth", block: "start" }});
+            }}
+        }}
+        setTimeout(scrollToRealRunResult, 250);
+        setTimeout(scrollToRealRunResult, 800);
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _coerce_mapping(value: Any) -> dict:
@@ -217,6 +253,51 @@ def _render_engine_timing_block(run_map: dict) -> None:
 
 
 
+
+
+def _render_preset_suggestion_timing_block() -> None:
+    """Render timing for the automatic preset-suggestion test, if available."""
+    timing = _coerce_mapping(st.session_state.get(PRESET_SUGGESTION_TIMING_KEY, {}))
+    if not timing:
+        return
+
+    total_seconds = _safe_float(timing.get("total_seconds", 0.0), 0.0)
+    candidate_count = _safe_int(timing.get("candidate_count", 0), 0)
+    accepted_count = _safe_int(timing.get("accepted_count", 0), 0)
+    if total_seconds <= 0 and candidate_count <= 0:
+        return
+
+    st.markdown("### Preset suggestion timing")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Preset test", f"{total_seconds:.2f}s")
+    with c2:
+        st.metric("Candidates tested", int(candidate_count))
+    with c3:
+        st.metric("Accepted", int(accepted_count))
+
+    st.caption(
+        "This is the extra time used by the automatic Step 5 preset suggestion test. "
+        "It is separate from the main portfolio engine run shown above."
+    )
+
+    rows = timing.get("candidate_seconds", [])
+    if isinstance(rows, list) and rows:
+        clean_rows = []
+        for row in rows:
+            row_map = _coerce_mapping(row)
+            clean_rows.append(
+                {
+                    "candidate": str(row_map.get("candidate", "Candidate") or "Candidate"),
+                    "status": str(row_map.get("status", "") or ""),
+                    "seconds": _safe_float(row_map.get("seconds", 0.0), 0.0),
+                }
+            )
+        if clean_rows:
+            with st.expander("Preset suggestion timing breakdown", expanded=False):
+                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+
+
 def _result_interpretation(perf: dict) -> tuple[str, str]:
     cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
     sharpe = _safe_float(perf.get("sharpe", 0.0), 0.0)
@@ -305,9 +386,9 @@ def _render_metric_explainer(perf: dict) -> None:
     with st.expander("How to read these metrics", expanded=False):
         st.markdown(
             f"- **CAGR ({_pct(cagr)})** — historical average annual growth in this backtest. Higher is better, but it is not guaranteed.\n"
-            f"- **Sharpe ({sharpe:.2f})** — return per unit of risk. Higher usually means the return compensated better for volatility.\n"
             f"- **Volatility ({_pct(vol)})** — how bumpy the portfolio was historically. Lower usually feels more stable.\n"
-            f"- **MaxDD (-{100.0 * maxdd:.2f}%)** — worst historical peak-to-trough fall. This is the main pain-test metric."
+            f"- **MaxDD (-{100.0 * maxdd:.2f}%)** — worst historical peak-to-trough fall. This is the main pain-test metric.\n"
+            f"- **Sharpe ({sharpe:.2f})** — return per unit of risk. Higher usually means the return compensated better for volatility."
         )
 
 
@@ -347,6 +428,7 @@ def _render_what_to_watch(perf: dict, philosophy: Any) -> None:
 def _render_reliability_note() -> None:
     st.info(
         "**Reliability note:** these figures come from a historical walk-forward backtest using the selected Step 4 asset panel. "
+        "The panel start date provides historical input for the engine; the displayed performance is based on the evaluated OOS returns produced after the engine has enough prior history. "
         "They are useful for comparing configurations inside the app, but they are not forecasts or guarantees. "
         "Results depend on the date range, asset universe, data quality, and engine assumptions. Step 6 should be used to explore future uncertainty rather than treating this run as a prediction."
     )
@@ -426,7 +508,7 @@ def _strategy_context_zone(perf: dict, philosophy: Any) -> str:
     return f"{profile} context zone"
 
 
-def _benchmark_context_rows(perf: dict, run_map: dict) -> tuple[pd.DataFrame, list[str]]:
+def _prepare_benchmark_panel() -> tuple[pd.DataFrame, list[str]]:
     panel = st.session_state.get("asset_panel_df")
     if not isinstance(panel, pd.DataFrame) or panel.empty:
         return pd.DataFrame(), ["Step 4 asset panel is not available in session_state."]
@@ -440,93 +522,234 @@ def _benchmark_context_rows(perf: dict, run_map: dict) -> tuple[pd.DataFrame, li
     work["asset"] = work["asset"].astype(str).str.upper().str.strip()
     work["return"] = pd.to_numeric(work["return"], errors="coerce")
     work = work.dropna(subset=["date", "asset", "return"]).sort_values(["asset", "date"])
+    if work.empty:
+        return pd.DataFrame(), ["Step 4 asset panel is empty after cleaning date, asset and return values."]
+    return work, []
+
+
+def _format_window(start_date: Any, end_date: Any, fallback: str = "—") -> str:
+    try:
+        start = pd.to_datetime(start_date, errors="coerce")
+        end = pd.to_datetime(end_date, errors="coerce")
+        if pd.notna(start) and pd.notna(end):
+            return f"{start:%Y-%m} → {end:%Y-%m}"
+    except Exception:
+        pass
+    return fallback
+
+
+def _resolve_engine_evaluation_window(work: pd.DataFrame, target_periods: int) -> dict:
+    """Infer the visible benchmark window from the OOS return length.
+
+    The engine uses the full Step 4 panel as historical input, but the performance
+    summary is based on walk-forward/OOS returns. The raw result currently exposes
+    the OOS return series length but not always the exact OOS date vector, so this
+    helper aligns benchmark context to the trailing monthly panel dates.
+    """
+    dates = pd.Series(pd.to_datetime(work.get("date"), errors="coerce")).dropna().drop_duplicates().sort_values()
+    panel_start = dates.iloc[0] if len(dates) else None
+    panel_end = dates.iloc[-1] if len(dates) else None
+    total_periods = int(len(dates))
+    target_periods = int(target_periods or 0)
+
+    if target_periods > 0 and total_periods >= target_periods:
+        eval_dates = dates.tail(target_periods)
+        eval_start = eval_dates.iloc[0]
+        eval_end = eval_dates.iloc[-1]
+        warmup_periods = max(0, total_periods - target_periods)
+        basis = "Same engine evaluated window"
+    elif target_periods > 0 and total_periods > 0:
+        eval_start = panel_start
+        eval_end = panel_end
+        warmup_periods = 0
+        basis = f"Available panel is shorter than OOS length ({total_periods}/{target_periods})"
+    else:
+        eval_start = panel_start
+        eval_end = panel_end
+        warmup_periods = None
+        basis = "Available Step 4 panel history"
+
+    return {
+        "panel_start": panel_start,
+        "panel_end": panel_end,
+        "panel_window": _format_window(panel_start, panel_end),
+        "evaluation_start": eval_start,
+        "evaluation_end": eval_end,
+        "evaluation_window": _format_window(eval_start, eval_end),
+        "target_periods": target_periods,
+        "total_periods": total_periods,
+        "warmup_periods": warmup_periods,
+        "basis": basis,
+    }
+
+
+def _benchmark_context_rows(perf: dict, run_map: dict) -> tuple[pd.DataFrame, list[str], dict]:
+    work, notes = _prepare_benchmark_panel()
+    if work.empty:
+        return pd.DataFrame(), notes, {}
 
     oos_returns = _extract_oos_returns(run_map)
     target_periods = int(len(oos_returns)) if oos_returns else 0
+    window_meta = _resolve_engine_evaluation_window(work, target_periods)
     philosophy = str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
+
+    strategy_window = window_meta.get("evaluation_window", "Engine evaluated period")
+    strategy_period_label = f"{strategy_window} ({target_periods} months)" if target_periods else strategy_window
 
     rows = [{
         "Reference": "Your strategy",
         "Type": "Engine portfolio",
-        "Window": f"Engine OOS ({target_periods} months)" if target_periods else "Engine backtest",
+        "Window": strategy_period_label,
         "CAGR": _format_pct_signed(_safe_float(perf.get("cagr", 0.0))),
-        "Sharpe": f"{_safe_float(perf.get('sharpe', 0.0)):.2f}",
         "Vol": _format_pct_signed(_safe_float(perf.get("annual_volatility", perf.get("volatility", 0.0)))),
         "MaxDD": f"-{100.0 * abs(_safe_float(perf.get('max_drawdown', 0.0))):.2f}%",
+        "Sharpe": f"{_safe_float(perf.get('sharpe', 0.0)):.2f}",
         "Reading": _strategy_context_zone(perf, philosophy),
-        "Comparability": "Primary result",
+        "Comparability": "Primary engine result",
     }]
 
-    notes: list[str] = []
+    eval_start = window_meta.get("evaluation_start")
+    eval_end = window_meta.get("evaluation_end")
 
     for item in BENCHMARK_CONTEXT_ASSETS:
         ticker = str(item["ticker"]).upper()
-        subset = work.loc[work["asset"] == ticker, ["date", "return"]].dropna().sort_values("date")
-        if subset.empty:
+        subset_full = work.loc[work["asset"] == ticker, ["date", "return"]].dropna().sort_values("date")
+        if subset_full.empty:
             notes.append(f"{ticker} was not available in the current Step 4 asset panel, so it was skipped.")
             continue
 
-        full_len = int(len(subset))
-        comparable = "Same trailing OOS length"
-        if target_periods > 0 and full_len >= target_periods:
-            subset = subset.tail(target_periods).copy()
-        elif target_periods > 0 and full_len < target_periods:
-            comparable = f"Shorter available history ({full_len}/{target_periods} months)"
+        subset = subset_full.copy()
+        comparable = "Same engine evaluated window"
+        if target_periods > 0 and pd.notna(eval_start) and pd.notna(eval_end):
+            subset = subset.loc[(subset["date"] >= eval_start) & (subset["date"] <= eval_end)].copy()
+            if subset.empty and int(len(subset_full)) >= target_periods:
+                subset = subset_full.tail(target_periods).copy()
+                comparable = "Same trailing OOS length"
+            elif int(len(subset)) < max(2, int(0.90 * target_periods)):
+                comparable = f"Partial data in evaluated window ({len(subset)}/{target_periods} months)"
+        elif target_periods > 0 and int(len(subset_full)) >= target_periods:
+            subset = subset_full.tail(target_periods).copy()
+            comparable = "Same trailing OOS length"
         else:
             comparable = "Available Step 4 history"
 
         metrics = _compute_return_metrics(subset["return"], periods_per_year=12)
         if not metrics:
-            notes.append(f"{ticker} did not have enough clean returns to compute benchmark metrics.")
+            notes.append(f"{ticker} did not have enough clean returns to compute benchmark metrics for the evaluated window.")
             continue
-
-        start_date = subset["date"].min()
-        end_date = subset["date"].max()
-        window = f"{start_date:%Y-%m} → {end_date:%Y-%m}" if pd.notna(start_date) and pd.notna(end_date) else comparable
 
         rows.append({
             "Reference": item["reference"],
             "Type": item["type"],
-            "Window": window,
+            "Window": _format_window(subset["date"].min(), subset["date"].max(), comparable),
             "CAGR": _format_pct_signed(metrics["cagr"]),
-            "Sharpe": f"{metrics['sharpe']:.2f}",
             "Vol": _format_pct_signed(metrics["annual_volatility"]),
             "MaxDD": f"{100.0 * metrics['max_drawdown']:.2f}%",
+            "Sharpe": f"{metrics['sharpe']:.2f}",
             "Reading": item["reading"],
             "Comparability": comparable,
         })
 
-    return pd.DataFrame(rows), notes
+    return pd.DataFrame(rows), notes, window_meta
+
+
+def _benchmark_full_history_rows() -> tuple[pd.DataFrame, list[str], dict]:
+    work, notes = _prepare_benchmark_panel()
+    if work.empty:
+        return pd.DataFrame(), notes, {}
+
+    window_meta = _resolve_engine_evaluation_window(work, 0)
+    rows: list[dict] = []
+    for item in BENCHMARK_CONTEXT_ASSETS:
+        ticker = str(item["ticker"]).upper()
+        subset = work.loc[work["asset"] == ticker, ["date", "return"]].dropna().sort_values("date")
+        if subset.empty:
+            notes.append(f"{ticker} was not available in the current Step 4 asset panel, so it was skipped from full-history context.")
+            continue
+
+        metrics = _compute_return_metrics(subset["return"], periods_per_year=12)
+        if not metrics:
+            notes.append(f"{ticker} did not have enough clean returns to compute full-history metrics.")
+            continue
+
+        rows.append({
+            "Reference": item["reference"],
+            "Type": item["type"],
+            "Window": _format_window(subset["date"].min(), subset["date"].max()),
+            "Months": int(metrics.get("periods", len(subset))),
+            "CAGR": _format_pct_signed(metrics["cagr"]),
+            "Vol": _format_pct_signed(metrics["annual_volatility"]),
+            "MaxDD": f"{100.0 * metrics['max_drawdown']:.2f}%",
+            "Sharpe": f"{metrics['sharpe']:.2f}",
+            "Reading": item["reading"],
+        })
+
+    return pd.DataFrame(rows), notes, window_meta
 
 
 def _render_benchmark_context(perf: dict, run_map: dict) -> None:
-    st.markdown("### Where this result sits")
+    st.markdown("### Benchmark context — same evaluated period")
+
+    bench_df, notes, window_meta = _benchmark_context_rows(perf, run_map)
+    panel_window = str(window_meta.get("panel_window", "—") or "—")
+    eval_window = str(window_meta.get("evaluation_window", "—") or "—")
+    target_periods = _safe_int(window_meta.get("target_periods", 0), 0)
+    warmup_periods = window_meta.get("warmup_periods", None)
+
     st.caption(
-        "These references are calculated from the Step 4 market-data panel using monthly returns. "
-        "When possible, they use the same trailing OOS length as the engine result, so the comparison is contextual rather than a generic historical claim."
+        "The Step 4 start date defines the historical market-data panel used by the engine. "
+        "The metrics above are the engine's walk-forward evaluated returns, so the main benchmark table below uses that same evaluated period."
     )
 
-    bench_df, notes = _benchmark_context_rows(perf, run_map)
+    if target_periods > 0:
+        warmup_text = (
+            f" · Approx. warm-up/training before evaluation: {int(warmup_periods)} monthly observations"
+            if isinstance(warmup_periods, int) and warmup_periods > 0
+            else ""
+        )
+        st.info(
+            f"Step 4 panel: {panel_window} · Engine evaluated period: {eval_window} "
+            f"({target_periods} monthly OOS returns){warmup_text}."
+        )
+    elif panel_window != "—":
+        st.info(f"Step 4 panel: {panel_window}. Exact OOS return length was not found in the run payload.")
+
     if isinstance(bench_df, pd.DataFrame) and not bench_df.empty:
         st.dataframe(bench_df, use_container_width=True, hide_index=True)
     else:
         st.info("Benchmark context is unavailable for this run because the Step 4 panel could not be read.")
 
+    with st.expander("Full-history benchmark context from Step 4 panel", expanded=False):
+        st.caption(
+            "This table uses the full available Step 4 history for each reference asset, usually starting around 2005 for the selected benchmark set. "
+            "It is long-run context only, not a direct comparison with the engine result unless the strategy is also evaluated over the same full window."
+        )
+        full_df, full_notes, _ = _benchmark_full_history_rows()
+        if isinstance(full_df, pd.DataFrame) and not full_df.empty:
+            st.dataframe(full_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Full-history benchmark context is unavailable for this run.")
+        if full_notes:
+            st.caption("Full-history panel notes")
+            for note in full_notes:
+                st.write(f"- {note}")
+
     with st.expander("Benchmark methodology and exclusions", expanded=False):
         st.markdown(
-            "- Benchmarks are **not hardcoded historical ranges**; they are recomputed from the current Step 4 panel.\n"
-            "- The comparison uses the same monthly-return convention and, when available, the same trailing OOS length as the engine result.\n"
-            "- This is educational context, not an investment recommendation and not a forecast.\n"
-            "- Direct benchmark claims should always use the same date range, source, frequency and metric definitions."
+            "- The **main benchmark table** compares like with like: your engine result and reference assets over the same walk-forward evaluated period.\n"
+            "- The **full-history table** is contextual only. It shows what well-known assets did across the full Step 4 panel, but it is not the direct scorecard for your strategy.\n"
+            "- Benchmarks are **not hardcoded historical ranges**; they are recomputed from the current Step 4 panel using the same monthly-return convention.\n"
+            "- This is educational context, not an investment recommendation and not a forecast."
         )
         if notes:
-            st.caption("Panel notes")
+            st.caption("Main benchmark panel notes")
             for note in notes:
                 st.write(f"- {note}")
 
         st.caption("Shorter-history references deliberately left out of the main same-window table:")
         for item in SHORTER_HISTORY_CONTEXT:
             st.write(f"- {item}")
+
 
 def render_post_run(run_result: dict) -> None:
     """Render the Gold Stable post-run surface.
@@ -547,16 +770,18 @@ def render_post_run(run_result: dict) -> None:
         st.warning("Run result payload is missing a performance summary.")
         return
 
+    st.markdown(f'<div id="{STEP5_REAL_RUN_RESULT_ANCHOR_ID}"></div>', unsafe_allow_html=True)
+    _maybe_scroll_to_real_run_result()
     st.markdown("## 3. Real run result")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("CAGR", _pct(_safe_float(perf.get("cagr", 0.0))))
     with c2:
-        st.metric("Sharpe", f"{_safe_float(perf.get('sharpe', 0.0)):.2f}")
-    with c3:
         st.metric("Vol", _pct(_safe_float(perf.get("annual_volatility", perf.get("volatility", 0.0)))))
-    with c4:
+    with c3:
         st.metric("MaxDD", f"-{100.0 * abs(_safe_float(perf.get('max_drawdown', 0.0))):.2f}%")
+    with c4:
+        st.metric("Sharpe", f"{_safe_float(perf.get('sharpe', 0.0)):.2f}")
 
     headline, body = _result_interpretation(perf)
     st.info(f"**{headline}:** {body}")
@@ -585,7 +810,9 @@ def render_post_run(run_result: dict) -> None:
     panel_assets = int(_safe_float(run_map.get("asset_panel_n_assets", 0), 0))
     panel_shape = run_map.get("panel_shape", None)
 
-    st.markdown("## 4. Ready for projection")
+    render_preset_improvement(run_map)
+
+    st.markdown("## 5. Ready for projection")
     n_oos = _store_projection_bridge_context(run_map)
     if n_oos > 0:
         st.success(f"Projection bridge ready: {n_oos} monthly OOS returns stored for Step 6.")
@@ -609,6 +836,7 @@ def render_post_run(run_result: dict) -> None:
         if run_timestamp:
             st.caption(f"run_timestamp={run_timestamp}")
         _render_engine_timing_block(run_map)
+        _render_preset_suggestion_timing_block()
         _render_feature_mu_block(run_map)
 
     clear_retired_step5_state()

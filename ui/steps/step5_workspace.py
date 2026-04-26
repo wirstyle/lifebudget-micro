@@ -273,6 +273,42 @@ def _render_compact_value(label: str, value: Any) -> None:
     st.markdown(f"**{str(value or '—')}**")
 
 
+def _render_engine_transparency_intro() -> None:
+    """Explain why Step 5 needs an engine before portfolio metrics exist."""
+    with st.container(border=True):
+        st.markdown("### Why this portfolio has to run through the engine")
+        st.write(
+            "The Step 4 market panel contains returns for individual assets such as SPY, QQQ or GLD. "
+            "Your strategy does not exist as a single ticker in Yahoo Finance. The engine creates it by "
+            "selecting and weighting assets over time. Once that monthly portfolio return series exists, "
+            "CAGR, volatility, Sharpe and max drawdown can be calculated from it using the same metric logic "
+            "used for the benchmark assets."
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**What the engine can improve**")
+            st.markdown(
+                "- diversification across the selected universe\n"
+                "- risk and drawdown control\n"
+                "- dynamic asset selection and weighting\n"
+                "- alignment with the chosen investment philosophy"
+            )
+        with c2:
+            st.markdown("**What the engine can worsen**")
+            st.markdown(
+                "- it may lag simple assets in strong bull markets\n"
+                "- risk controls can reduce upside\n"
+                "- signals can overfit if assumptions are weak\n"
+                "- extra complexity can add turnover and parameter sensitivity"
+            )
+
+        st.info(
+            "You do not pass the portfolio through the engine to calculate CAGR. "
+            "You pass it through the engine to create the portfolio. The metrics come afterwards."
+        )
+
+
 def _render_workspace_summary(cfg_final: dict, asset_panel_df: Any, current_philosophy: str, simple_cfg: dict) -> None:
     panel_rows = int(len(asset_panel_df)) if isinstance(asset_panel_df, pd.DataFrame) else 0
     panel_assets = int(asset_panel_df["asset"].nunique()) if isinstance(asset_panel_df, pd.DataFrame) and "asset" in asset_panel_df.columns else 0
@@ -431,6 +467,8 @@ def render_step_5() -> None:
         "Start with the strategy preset, optionally review technical controls, then run the engine and interpret the result before moving to projection."
     )
 
+    _render_engine_transparency_intro()
+
     current_philosophy = str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
 
     # 1) Main user-facing setup layer. This is intentionally visible because it is the
@@ -468,6 +506,18 @@ def render_step_5() -> None:
         pre_run_advanced_cfg=pre_run_advanced_cfg,
         governance_status=gov,
     )
+
+    # IMPORTANT: render_run_panel() owns the canonical Step 5 run signature.
+    # The local workspace signature is only a pre-run helper. If we compare the
+    # stored run against the helper hash, any harmless rerun button below
+    # post-run (for example "Test preset improvement") can make the page think
+    # the run is stale and hide the result. After the Ready-to-run block has
+    # rendered, use the canonical signature published by run_panel instead.
+    current_signature = str(
+        st.session_state.get("step5_current_run_signature", current_signature)
+        or current_signature
+    )
+    st.session_state["step5_current_input_signature"] = current_signature
 
     last_run_signature = str(st.session_state.get("step5_last_run_signature", "") or "")
     stored_run_result = st.session_state.get("step5_last_run_result")

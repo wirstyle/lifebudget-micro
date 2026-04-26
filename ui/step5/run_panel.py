@@ -15,6 +15,7 @@ from src.investment import MicroPipelineConfig, config_to_dict, run_micro_invest
 
 STEP5_TIMING_CACHE_KEY = "step5_timing_cache"
 STEP5_LAST_TIMINGS_KEY = "step5_last_timings"
+STEP5_JUST_COMPLETED_RUN_BANNER_KEY = "step5_just_completed_run_banner"
 
 # Legacy Step 5 state keys from the removed exploration layer.
 # Keeping one list avoids duplicated cleanup loops across workspace/post-run.
@@ -207,6 +208,13 @@ def _run_pipeline_cached(asset_panel_df: pd.DataFrame, cfg_payload: dict) -> tup
     return _coerce_mapping(raw_result), float(elapsed), False
 
 
+def _safe_rerun() -> None:
+    """Trigger a Streamlit rerun when available, without breaking older versions."""
+    rerun = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
+    if callable(rerun):
+        rerun()
+
+
 def _render_timing_summary(timing_summary: dict) -> None:
     if not timing_summary:
         return
@@ -267,6 +275,21 @@ def render_run_panel(
     last_signature = str(st.session_state.get("step5_last_run_signature", "") or "")
     last_config_fingerprint = str(st.session_state.get("step5_last_config_fingerprint", "") or "")
     last_timestamp = str(st.session_state.get("step5_last_run_timestamp", "") or "")
+    stored_run_result = st.session_state.get("step5_last_run_result")
+
+    current_result_is_fresh = bool(
+        stored_run_result is not None
+        and last_signature
+        and last_config_fingerprint
+        and last_signature == current_signature
+        and last_config_fingerprint == current_config_fingerprint
+    )
+    inputs_changed_after_run = bool(
+        stored_run_result is not None
+        and last_signature
+        and last_config_fingerprint
+        and not current_result_is_fresh
+    )
 
     if not compact:
         c1, c2, c3 = st.columns(3)
@@ -277,10 +300,8 @@ def render_run_panel(
         with c3:
             st.metric("Engine status", "Ready" if not disabled and not asset_panel_df.empty else "Blocked")
 
-    if last_signature and last_config_fingerprint and (
-        last_signature != current_signature or last_config_fingerprint != current_config_fingerprint
-    ):
-        st.info("The current Step 5 inputs differ from the last executed run. Press 'Run portfolio & view results' to refresh the metrics.")
+    if inputs_changed_after_run:
+        st.info("The current Step 5 inputs differ from the last executed run. Run the updated setup to refresh the metrics.")
 
     if disabled:
         st.error("Execution is blocked until the governance issues are resolved.")
@@ -293,12 +314,29 @@ def render_run_panel(
             if last_timestamp:
                 st.caption(f"Last completed run → {last_timestamp}")
 
+    button_label = "Run portfolio & view results"
+    if current_result_is_fresh:
+        button_label = "Current setup already run"
+    elif inputs_changed_after_run:
+        button_label = "Run updated setup & refresh results"
+
+    run_button_disabled = bool(disabled or current_result_is_fresh)
     manual_run_clicked = st.button(
-        "Run portfolio & view results",
+        button_label,
         key="step5_run_portfolio_view_results",
         use_container_width=True,
-        disabled=disabled,
+        disabled=run_button_disabled,
     )
+
+    just_completed_run_banner = bool(st.session_state.get(STEP5_JUST_COMPLETED_RUN_BANNER_KEY, False))
+    if current_result_is_fresh and not disabled:
+        if just_completed_run_banner:
+            st.success("Run completed and stored as the current real result.")
+            st.session_state[STEP5_JUST_COMPLETED_RUN_BANNER_KEY] = False
+        else:
+            st.caption(
+                "The current result is up to date. Change the strategy preset, sliders, or technical controls to enable a new run."
+            )
 
     if not manual_run_clicked:
         return None
@@ -334,7 +372,7 @@ def render_run_panel(
         run_result["config_fingerprint"] = current_config_fingerprint
         run_result["run_timestamp"] = run_timestamp
         run_result["panel_shape"] = (int(len(asset_panel_df)), int(len(asset_panel_df.columns)))
-        run_result["evaluation_period_label"] = "Full period"
+        run_result["evaluation_period_label"] = "Walk-forward evaluated period"
         run_result["search_eval_split"] = {"enabled": False, "reason": "gold_stable_minimal_runner"}
 
         elapsed_total = float(time.perf_counter() - step5_t0)
@@ -359,6 +397,13 @@ def render_run_panel(
         st.session_state["step5_auto_run_pending_patch_keys"] = []
         clear_retired_step5_improvement_state()
 
+        # Force one clean repaint after the run is stored.
+        # Without this, the button can remain visually active in the same Streamlit pass
+        # even though the current setup is already fresh.
+        st.session_state[STEP5_JUST_COMPLETED_RUN_BANNER_KEY] = True
+        _safe_rerun()
+
+        # Fallback for very old Streamlit versions where rerun is unavailable.
         st.success("Run completed and stored as the current real result.")
         if not compact:
             _render_timing_summary(timing_summary)
