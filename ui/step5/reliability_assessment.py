@@ -339,8 +339,8 @@ def _data_basis_status(run_map: dict) -> tuple[str, str]:
     assets = _safe_int(run_map.get("asset_panel_n_assets", panel_df["asset"].nunique() if isinstance(panel_df, pd.DataFrame) and "asset" in panel_df.columns else 0), 0)
     if rows > 0 and assets > 0:
         if "yahoo" in label.lower():
-            return "Strong", f"Uses real historical market returns from the Step 4 {label} panel ({rows:,} rows, {assets} assets)."
-        return "Available", f"Uses the Step 4 market-data panel ({rows:,} rows, {assets} assets)."
+            return "Strong", f"Uses real historical market-data snapshot returns from the Step 4 {label} panel ({rows:,} rows, {assets} assets). In deployed mode this is a fixed Yahoo-generated cached panel, not a live market-data pull."
+        return "Available", f"Uses the Step 4 market-data snapshot panel ({rows:,} rows, {assets} assets)."
     return "Unavailable", "The Step 4 market-data panel could not be read for this reliability check."
 
 
@@ -686,18 +686,38 @@ def _summarise_start_date_robustness(rows: list[dict]) -> dict:
     sharpe_range = max(sharpes) - min(sharpes)
     maxdd_range = max(maxdds) - min(maxdds)
     vol_range = max(vols) - min(vols)
+    all_cagr_positive = all(float(x) > 0.0 for x in cagrs)
+    downside_stable = maxdd_range <= 0.05
+    moderate_return_sensitivity = cagr_range <= 0.060 and sharpe_range <= 0.45
+
     if cagr_range <= 0.030 and sharpe_range <= 0.25 and maxdd_range <= 0.10:
         status = "Strong"
         message = "The result is reasonably stable across the tested start dates."
+        downside_status = "Strong"
+        return_sensitivity_status = "Strong"
+    elif all_cagr_positive and downside_stable and moderate_return_sensitivity:
+        status = "Moderate-to-Strong"
+        message = (
+            "The result is structurally stable across start dates: drawdown remains controlled and CAGR stays positive. "
+            "The main sensitivity is return strength, not downside risk, so the result is not labelled fully Strong."
+        )
+        downside_status = "Strong"
+        return_sensitivity_status = "Moderate"
     elif cagr_range <= 0.060 and sharpe_range <= 0.45 and maxdd_range <= 0.18:
         status = "Moderate"
         message = "The result changes across start dates, but not enough to invalidate the current interpretation."
+        downside_status = "Moderate"
+        return_sensitivity_status = "Moderate"
     else:
         status = "Sensitive"
         message = "The result is materially sensitive to the selected historical start date and should be treated cautiously."
+        downside_status = "Sensitive"
+        return_sensitivity_status = "Sensitive"
     return {
         "status": status,
         "message": message,
+        "downside_status": downside_status,
+        "return_sensitivity_status": return_sensitivity_status,
         "completed_windows": len(valid),
         "cagr_min": min(cagrs),
         "cagr_max": max(cagrs),
@@ -772,12 +792,22 @@ def _render_start_date_robustness_check(run_map: dict) -> None:
         elapsed = _safe_float(payload.get("elapsed_sec", 0.0), 0.0)
         if status == "Strong":
             st.success(f"Start-date robustness: **{status}** — {message}")
+        elif status == "Moderate-to-Strong":
+            st.info(f"Start-date robustness: **{status}** — {message}")
         elif status == "Moderate":
             st.info(f"Start-date robustness: **{status}** — {message}")
         elif status == "Sensitive":
             st.warning(f"Start-date robustness: **{status}** — {message}")
         else:
             st.info(f"Start-date robustness: **{status}** — {message}")
+
+        downside_status = str(summary.get("downside_status", "") or "")
+        return_sensitivity_status = str(summary.get("return_sensitivity_status", "") or "")
+        if downside_status or return_sensitivity_status:
+            st.caption(
+                f"Robustness split: downside robustness={downside_status or '—'} · "
+                f"return sensitivity={return_sensitivity_status or '—'}."
+            )
 
         if summary.get("completed_windows"):
             st.caption(
@@ -808,8 +838,15 @@ def _render_start_date_robustness_check(run_map: dict) -> None:
                 )
             st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
             st.caption(
-                "Interpretation: stable ranges increase confidence that the result is not purely a by-product of one historical start date. "
-                "Sensitive ranges mean the strategy result depends more heavily on the chosen market window."
+                "The selected configuration was not only evaluated on one fixed historical start date. "
+                "A start-date robustness diagnostic was run across alternative historical windows. "
+                "The result remained positive across valid windows; if the shorter 2012 window shows lower Sharpe and CAGR, "
+                "the app treats that as return sensitivity rather than automatically invalidating the result."
+            )
+            st.caption(
+                "The main sensitivity is return strength, not drawdown: CAGR and Sharpe can fall in the shorter 2012 window, "
+                "while drawdown may remain similar or better. The 2012 row is useful as a short-window stress check, "
+                "but it has fewer OOS months than the 2005/2008/2010 rows, so it should not dominate the interpretation."
             )
 
 def _current_start_date_robustness_payload(run_map: dict | None = None) -> dict:
@@ -909,7 +946,7 @@ def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: di
     future_meaning = "Historical walk-forward backtest only; this is not a live fund track record and not a forecast."
 
     components = [
-        {"Reliability component": "Real market data", "Status": data_status, "Meaning": data_meaning},
+        {"Reliability component": "Real market-data snapshot", "Status": data_status, "Meaning": data_meaning},
         {"Reliability component": "Walk-forward evaluation", "Status": walk_status, "Meaning": walk_meaning},
         {"Reliability component": "Same-period benchmark comparison", "Status": same_status, "Meaning": same_meaning},
         {"Reliability component": "Benchmark calculation validation", "Status": calc_status, "Meaning": calc_meaning},
@@ -922,7 +959,8 @@ def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: di
     st.markdown("### Result reliability assessment")
     st.info(
         f"**Overall confidence: {overall}.** "
-        "This result is based on real historical market data, but the strategy itself is a simulated walk-forward portfolio. "
+        "This result is based on a real historical market-data snapshot, but the strategy itself is a simulated walk-forward portfolio. "
+        "In deployment, the snapshot is a fixed Yahoo-generated cached panel for reproducibility rather than a live market-data pull. "
         "It is not the live track record of a real fund and it is not a forecast."
     )
 

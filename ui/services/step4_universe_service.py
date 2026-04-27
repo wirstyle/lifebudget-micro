@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import hashlib
 import json
+import os
 import time
 
 import pandas as pd
@@ -54,6 +56,29 @@ STEP4_PANEL_SIGNATURE_KEY = "step4_panel_input_signature"
 STEP4_PANEL_TIMINGS_KEY = "step4_panel_timings"
 STEP4_PANEL_BUILD_NONCE_KEY = "step4_panel_build_nonce"
 STEP4_PANEL_LAST_BUILD_TRIGGER_KEY = "step4_panel_last_build_trigger"
+
+# Cached deployment panels.
+# Local/dev can still force live Yahoo by setting LIFEBUDGET_USE_DEPLOYMENT_PANEL_FIRST=0.
+# Streamlit Cloud should keep the default so Step 4 does not depend on live Yahoo requests.
+DEPLOYMENT_ASSET_PANEL_PATH = Path(
+    os.getenv("LIFEBUDGET_DEPLOYMENT_ASSET_PANEL", "data/deployment_asset_panel.csv.gz")
+)
+DEPLOYMENT_DAILY_RETURNS_PATH = Path(
+    os.getenv("LIFEBUDGET_DEPLOYMENT_DAILY_RETURNS", "data/deployment_daily_returns.csv.gz")
+)
+DEPLOYMENT_WEEKLY_RETURNS_PATH = Path(
+    os.getenv("LIFEBUDGET_DEPLOYMENT_WEEKLY_RETURNS", "data/deployment_weekly_returns.csv.gz")
+)
+USE_DEPLOYMENT_PANEL_FIRST = str(
+    os.getenv("LIFEBUDGET_USE_DEPLOYMENT_PANEL_FIRST", "1")
+).strip().lower() not in {"0", "false", "no"}
+
+# Raw return panels are diagnostics/export artifacts only; Step 5 continues to
+# consume the prepared panel stored in ASSET_PANEL_DF.
+STEP4_RAW_DAILY_PANEL_KEY = "_step4_raw_daily_return_panel_df"
+STEP4_RAW_WEEKLY_PANEL_KEY = "_step4_raw_weekly_return_panel_df"
+STEP4_RAW_PANEL_SOURCE_KEY = "_step4_raw_return_panel_source"
+
 
 
 def _serialize_feature_cfg(cfg: DailyFeatureConfig) -> str:
@@ -122,23 +147,51 @@ def format_step4_timing_summary(timings: Dict[str, Any] | None) -> str:
     if not t:
         return ""
     parts: List[str] = []
-    for key in [
+    seconds_keys = [
+        "deployment_panel_read_seconds",
+        "deployment_raw_daily_read_seconds",
+        "deployment_raw_weekly_read_seconds",
+        "deployment_panel_total_seconds",
         "download_yahoo_seconds",
         "return_panel_seconds",
         "validate_seconds",
+        "validate_asset_panel_seconds",
         "intramonth_features_seconds",
         "monthly_aggregation_seconds",
         "cross_sectional_seconds",
         "total_feature_pipeline_seconds",
         "resolve_total_seconds",
-    ]:
+    ]
+    for key in seconds_keys:
         if key in t:
             parts.append(f"{key}={_coerce_timing_value(t.get(key, 0.0)):.2f}s")
+
+    count_keys = [
+        "deployment_panel_rows",
+        "deployment_panel_assets",
+        "deployment_raw_daily_rows",
+        "deployment_raw_daily_assets",
+        "deployment_raw_weekly_rows",
+        "deployment_raw_weekly_assets",
+        "raw_daily_rows",
+        "raw_daily_assets",
+        "raw_weekly_rows",
+        "raw_weekly_assets",
+    ]
+    for key in count_keys:
+        if key in t:
+            try:
+                parts.append(f"{key}={int(float(t.get(key, 0) or 0))}")
+            except Exception:
+                parts.append(f"{key}={t.get(key)}")
+
     cache_parts = []
     if "feature_pipeline_cache_reused" in t:
         cache_parts.append(f"feature_cache_reused={bool(t.get('feature_pipeline_cache_reused', False))}")
     if "reuse_existing_panel" in t:
         cache_parts.append(f"reuse_existing_panel={bool(t.get('reuse_existing_panel', False))}")
+    if "deployment_cache_mode" in t:
+        cache_parts.append(f"deployment_cache_mode={t.get('deployment_cache_mode')}")
     if cache_parts:
         parts.extend(cache_parts)
     return " · ".join(parts)
@@ -1005,6 +1058,410 @@ def validate_asset_panel(panel_df: pd.DataFrame) -> pd.DataFrame:
 
 
 
+def build_weekly_return_panel_from_daily_returns(daily_panel_df: pd.DataFrame) -> pd.DataFrame:
+    """Compound a raw daily return panel into weekly asset returns.
+
+    The investment engine still receives the prepared monthly panel. Weekly
+    returns are stored for diagnostics and reproducible deployment-cache exports.
+    """
+    daily = validate_asset_panel(daily_panel_df)
+    work = daily[["date", "asset", "return"]].copy()
+    work["_gross"] = 1.0 + pd.to_numeric(work["return"], errors="coerce")
+    work = work.dropna(subset=["date", "asset", "_gross"])
+    if work.empty:
+        raise ValueError("Daily panel is empty after cleaning for weekly aggregation.")
+
+    weekly = (
+        work.groupby(["asset", pd.Grouper(key="date", freq="W-FRI")], dropna=False)["_gross"]
+        .prod()
+        .reset_index()
+    )
+    weekly["return"] = weekly["_gross"] - 1.0
+    weekly = weekly[["date", "asset", "return"]]
+    return validate_asset_panel(weekly)
+
+
+def _clear_raw_return_panel_state() -> None:
+    for key in (STEP4_RAW_DAILY_PANEL_KEY, STEP4_RAW_WEEKLY_PANEL_KEY, STEP4_RAW_PANEL_SOURCE_KEY):
+        if key in st.session_state:
+            del st.session_state[key]
+
+
+def _store_raw_return_panels(raw_daily_panel: pd.DataFrame, *, source_label: str = "Yahoo live/local daily returns") -> Dict[str, Any]:
+    """Store raw daily and weekly panels from the latest live/local or cached run."""
+    daily = validate_asset_panel(raw_daily_panel)
+    weekly = build_weekly_return_panel_from_daily_returns(daily)
+    st.session_state[STEP4_RAW_DAILY_PANEL_KEY] = daily.copy()
+    st.session_state[STEP4_RAW_WEEKLY_PANEL_KEY] = weekly.copy()
+    st.session_state[STEP4_RAW_PANEL_SOURCE_KEY] = str(source_label or "Yahoo live/local daily returns")
+    return {
+        "raw_daily_rows": int(len(daily)),
+        "raw_daily_assets": int(daily["asset"].nunique()),
+        "raw_weekly_rows": int(len(weekly)),
+        "raw_weekly_assets": int(weekly["asset"].nunique()),
+    }
+
+
+def _deployment_panel_file() -> Path:
+    """Return the configured cached prepared monthly deployment panel path."""
+    return Path(DEPLOYMENT_ASSET_PANEL_PATH)
+
+
+def _deployment_daily_returns_file() -> Path:
+    """Return the configured cached raw daily return panel path."""
+    return Path(DEPLOYMENT_DAILY_RETURNS_PATH)
+
+
+def _deployment_weekly_returns_file() -> Path:
+    """Return the configured cached raw weekly return panel path."""
+    return Path(DEPLOYMENT_WEEKLY_RETURNS_PATH)
+
+
+def _deployment_raw_file_for_frequency(frequency: str) -> Path | None:
+    freq = str(frequency or "").lower()
+    if freq == "daily":
+        return _deployment_daily_returns_file()
+    if freq == "weekly":
+        return _deployment_weekly_returns_file()
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def _cached_read_deployment_asset_panel(path_str: str, mtime_ns: int, file_size: int) -> pd.DataFrame:
+    """Read the cached prepared monthly deployment panel."""
+    path = Path(path_str)
+    if not path.exists():
+        raise FileNotFoundError(f"Cached deployment panel not found: {path}")
+    suffixes = "".join(path.suffixes).lower()
+    if suffixes.endswith(".parquet"):
+        df = pd.read_parquet(path)
+    else:
+        df = pd.read_csv(path, compression="infer")
+    return validate_asset_panel(df)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_read_deployment_raw_return_panel(path_str: str, mtime_ns: int, file_size: int) -> pd.DataFrame:
+    """Read a cached raw daily or weekly return panel."""
+    path = Path(path_str)
+    if not path.exists():
+        raise FileNotFoundError(f"Cached raw return panel not found: {path}")
+    suffixes = "".join(path.suffixes).lower()
+    if suffixes.endswith(".parquet"):
+        df = pd.read_parquet(path)
+    else:
+        df = pd.read_csv(path, compression="infer")
+    return validate_asset_panel(df)
+
+
+def _requested_asset_list(selected_assets: List[str], candidate_assets: List[str]) -> List[str]:
+    requested_assets = sorted(
+        set(normalize_asset_ticker(x) for x in list(selected_assets or []) + list(candidate_assets or []))
+    )
+    return [x for x in requested_assets if x]
+
+
+def _filter_panel_to_request(
+    panel_df: pd.DataFrame,
+    *,
+    selected_assets: List[str],
+    candidate_assets: List[str],
+    start_date: Any,
+    end_date: Any,
+) -> tuple[pd.DataFrame, List[str], List[str]]:
+    panel_df = validate_asset_panel(panel_df)
+    requested_assets = _requested_asset_list(selected_assets, candidate_assets)
+
+    if requested_assets:
+        panel_df = panel_df[panel_df["asset"].astype(str).str.upper().isin(set(requested_assets))].copy()
+
+    start_ts = pd.to_datetime(start_date, errors="coerce")
+    end_ts = pd.to_datetime(end_date, errors="coerce")
+    if pd.notna(start_ts):
+        panel_df = panel_df[panel_df["date"] >= start_ts].copy()
+    if pd.notna(end_ts):
+        panel_df = panel_df[panel_df["date"] <= end_ts].copy()
+
+    panel_df = validate_asset_panel(panel_df)
+    loaded_assets = sorted(set(panel_df["asset"].astype(str).str.upper()))
+    missing_assets = [ticker for ticker in requested_assets if ticker not in set(loaded_assets)]
+    return panel_df, requested_assets, missing_assets
+
+
+def _cache_caption(
+    *,
+    label: str,
+    path: Path,
+    panel_df: pd.DataFrame,
+    requested_assets: List[str],
+    missing_assets: List[str],
+) -> str:
+    loaded_assets = sorted(set(panel_df["asset"].astype(str).str.upper()))
+    min_date = pd.to_datetime(panel_df["date"], errors="coerce").min()
+    max_date = pd.to_datetime(panel_df["date"], errors="coerce").max()
+    min_date_str = min_date.strftime("%Y-%m-%d") if pd.notna(min_date) else "unknown"
+    max_date_str = max_date.strftime("%Y-%m-%d") if pd.notna(max_date) else "unknown"
+
+    caption = (
+        f"{label} · file={path.as_posix()} · "
+        f"rows={len(panel_df):,} · assets={len(loaded_assets)} · "
+        f"date_range={min_date_str} to {max_date_str}"
+    )
+    if requested_assets:
+        caption += f" · requested_assets={len(requested_assets)}"
+    if missing_assets:
+        preview_missing = ", ".join(asset_display_label(x) for x in missing_assets[:12])
+        if len(missing_assets) > 12:
+            preview_missing += f", +{len(missing_assets) - 12} more"
+        caption += f" · missing_from_cache={preview_missing}"
+    return caption
+
+
+def _load_deployment_asset_panel(
+    *,
+    selected_assets: List[str],
+    candidate_assets: List[str],
+    start_date: Any,
+    end_date: Any,
+) -> tuple[pd.DataFrame, str, str, Dict[str, Any]]:
+    """Load and filter the cached prepared monthly deployment panel."""
+    timings: Dict[str, Any] = {}
+    path = _deployment_panel_file()
+    if not path.exists():
+        raise FileNotFoundError(f"Cached deployment panel not found: {path}")
+
+    stat = path.stat()
+    t_read = time.perf_counter()
+    panel_df = _cached_read_deployment_asset_panel(str(path), int(stat.st_mtime_ns), int(stat.st_size))
+    timings["deployment_panel_read_seconds"] = float(time.perf_counter() - t_read)
+
+    panel_df, requested_assets, missing_assets = _filter_panel_to_request(
+        panel_df,
+        selected_assets=selected_assets,
+        candidate_assets=candidate_assets,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    loaded_assets = sorted(set(panel_df["asset"].astype(str).str.upper()))
+    caption = _cache_caption(
+        label="Cached Yahoo prepared monthly deployment panel",
+        path=path,
+        panel_df=panel_df,
+        requested_assets=requested_assets,
+        missing_assets=missing_assets,
+    )
+    timings["deployment_panel_rows"] = int(len(panel_df))
+    timings["deployment_panel_assets"] = int(len(loaded_assets))
+    timings["deployment_cache_mode"] = "monthly_prepared"
+
+    return panel_df, "Cached Yahoo deployment panel (monthly prepared)", caption, timings
+
+
+def _load_deployment_raw_return_panel(
+    *,
+    frequency: str,
+    selected_assets: List[str],
+    candidate_assets: List[str],
+    start_date: Any,
+    end_date: Any,
+) -> tuple[pd.DataFrame, str, str, Dict[str, Any]]:
+    """Load and filter a cached raw daily or weekly return panel."""
+    freq = str(frequency or "").lower()
+    path = _deployment_raw_file_for_frequency(freq)
+    if path is None:
+        raise ValueError(f"No raw cached panel is configured for frequency={frequency!r}.")
+    if not path.exists():
+        raise FileNotFoundError(f"Cached raw {freq} return panel not found: {path}")
+
+    timings: Dict[str, Any] = {}
+    stat = path.stat()
+    t_read = time.perf_counter()
+    panel_df = _cached_read_deployment_raw_return_panel(str(path), int(stat.st_mtime_ns), int(stat.st_size))
+    timings[f"deployment_raw_{freq}_read_seconds"] = float(time.perf_counter() - t_read)
+
+    panel_df, requested_assets, missing_assets = _filter_panel_to_request(
+        panel_df,
+        selected_assets=selected_assets,
+        candidate_assets=candidate_assets,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    loaded_assets = sorted(set(panel_df["asset"].astype(str).str.upper()))
+    caption = _cache_caption(
+        label=f"Cached Yahoo raw {freq} return panel",
+        path=path,
+        panel_df=panel_df,
+        requested_assets=requested_assets,
+        missing_assets=missing_assets,
+    )
+    timings[f"deployment_raw_{freq}_rows"] = int(len(panel_df))
+    timings[f"deployment_raw_{freq}_assets"] = int(len(loaded_assets))
+    timings["deployment_cache_mode"] = f"raw_{freq}"
+    return panel_df, f"Cached Yahoo raw {freq} return panel", caption, timings
+
+
+def _hydrate_raw_return_panel_exports_from_cache(
+    *,
+    selected_assets: List[str],
+    candidate_assets: List[str],
+    start_date: Any,
+    end_date: Any,
+) -> Dict[str, Any]:
+    """Populate raw daily/weekly export panels from cached files when available."""
+    timings: Dict[str, Any] = {}
+    daily_panel: pd.DataFrame | None = None
+    weekly_panel: pd.DataFrame | None = None
+    source_parts: List[str] = []
+
+    try:
+        if _deployment_daily_returns_file().exists():
+            daily_panel, _label, _caption, daily_timings = _load_deployment_raw_return_panel(
+                frequency="daily",
+                selected_assets=selected_assets,
+                candidate_assets=candidate_assets,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            timings.update(dict(daily_timings or {}))
+            source_parts.append("cached daily")
+    except Exception as exc:
+        timings["deployment_raw_daily_error"] = str(exc)
+
+    try:
+        if _deployment_weekly_returns_file().exists():
+            weekly_panel, _label, _caption, weekly_timings = _load_deployment_raw_return_panel(
+                frequency="weekly",
+                selected_assets=selected_assets,
+                candidate_assets=candidate_assets,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            timings.update(dict(weekly_timings or {}))
+            source_parts.append("cached weekly")
+    except Exception as exc:
+        timings["deployment_raw_weekly_error"] = str(exc)
+
+    if weekly_panel is None and isinstance(daily_panel, pd.DataFrame) and not daily_panel.empty:
+        try:
+            weekly_panel = build_weekly_return_panel_from_daily_returns(daily_panel)
+            timings["deployment_raw_weekly_rows"] = int(len(weekly_panel))
+            timings["deployment_raw_weekly_assets"] = int(weekly_panel["asset"].nunique())
+            source_parts.append("weekly derived from cached daily")
+        except Exception as exc:
+            timings["deployment_raw_weekly_derived_error"] = str(exc)
+
+    if isinstance(daily_panel, pd.DataFrame) and not daily_panel.empty:
+        st.session_state[STEP4_RAW_DAILY_PANEL_KEY] = daily_panel.copy()
+    elif STEP4_RAW_DAILY_PANEL_KEY in st.session_state:
+        del st.session_state[STEP4_RAW_DAILY_PANEL_KEY]
+
+    if isinstance(weekly_panel, pd.DataFrame) and not weekly_panel.empty:
+        st.session_state[STEP4_RAW_WEEKLY_PANEL_KEY] = weekly_panel.copy()
+    elif STEP4_RAW_WEEKLY_PANEL_KEY in st.session_state:
+        del st.session_state[STEP4_RAW_WEEKLY_PANEL_KEY]
+
+    if source_parts:
+        st.session_state[STEP4_RAW_PANEL_SOURCE_KEY] = "Cached Yahoo deployment return panels (" + ", ".join(source_parts) + ")"
+    elif STEP4_RAW_PANEL_SOURCE_KEY in st.session_state:
+        del st.session_state[STEP4_RAW_PANEL_SOURCE_KEY]
+
+    return timings
+
+
+def _load_deployment_panel_for_frequency(
+    *,
+    frequency: str,
+    selected_assets: List[str],
+    candidate_assets: List[str],
+    start_date: Any,
+    end_date: Any,
+) -> tuple[pd.DataFrame, str, str, Dict[str, Any]]:
+    """Resolve the best cached deployment path for the selected frequency.
+
+    - monthly: use the prepared monthly panel directly.
+    - daily: rebuild the prepared monthly panel from cached raw daily returns.
+    - weekly: keep Step 5 stable by using the prepared monthly panel, while
+      loading the cached weekly panel into diagnostics/export state.
+    """
+    freq = str(frequency or "monthly").lower()
+    timings: Dict[str, Any] = {}
+    t_cache = time.perf_counter()
+
+    if freq == "daily" and _deployment_daily_returns_file().exists():
+        raw_daily, _raw_label, raw_caption, raw_timings = _load_deployment_raw_return_panel(
+            frequency="daily",
+            selected_assets=selected_assets,
+            candidate_assets=candidate_assets,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        timings.update(dict(raw_timings or {}))
+        timings.update(
+            _store_raw_return_panels(
+                raw_daily,
+                source_label="Cached Yahoo deployment daily returns · auto-adjust already resolved at export time",
+            )
+        )
+
+        cfg = DailyFeatureConfig()
+        feature_cfg_json = _serialize_feature_cfg(cfg)
+        t_feat = time.perf_counter()
+        panel_df, feature_timings = _cached_feature_engineered_asset_panel(
+            raw_daily,
+            feature_cfg_json,
+            True,
+        )
+        timings.update(dict(feature_timings or {}))
+        timings["feature_pipeline_resolve_seconds"] = float(time.perf_counter() - t_feat)
+        timings["feature_pipeline_cache_reused"] = bool(
+            timings["feature_pipeline_resolve_seconds"] + 1e-6 < timings.get("total_feature_pipeline_seconds", 0.0)
+        )
+        timings["deployment_panel_total_seconds"] = float(time.perf_counter() - t_cache)
+        timings["deployment_cache_mode"] = "daily_raw_to_monthly_prepared"
+        caption = f"{raw_caption} · rebuilt monthly prepared engine panel from cached daily returns"
+        return panel_df, "Cached Yahoo daily returns → monthly prepared panel", caption, timings
+
+    panel_df, source_label, caption, panel_timings = _load_deployment_asset_panel(
+        selected_assets=selected_assets,
+        candidate_assets=candidate_assets,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    timings.update(dict(panel_timings or {}))
+    timings.update(
+        _hydrate_raw_return_panel_exports_from_cache(
+            selected_assets=selected_assets,
+            candidate_assets=candidate_assets,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    )
+    timings["deployment_panel_total_seconds"] = float(time.perf_counter() - t_cache)
+    if freq == "weekly" and _deployment_weekly_returns_file().exists():
+        source_label = "Cached Yahoo weekly diagnostics + monthly prepared engine panel"
+        caption = (
+            f"{caption} · cached weekly raw returns loaded for diagnostics/export; "
+            "Step 5 still uses the prepared monthly engine panel"
+        )
+        timings["deployment_cache_mode"] = "weekly_raw_plus_monthly_prepared"
+    return panel_df, source_label, caption, timings
+
+
+def _should_use_deployment_panel_first(frequency: str) -> bool:
+    if not USE_DEPLOYMENT_PANEL_FIRST:
+        return False
+    freq = str(frequency or "monthly").lower()
+    if freq == "daily":
+        return _deployment_daily_returns_file().exists() or _deployment_panel_file().exists()
+    if freq == "weekly":
+        return _deployment_weekly_returns_file().exists() or _deployment_panel_file().exists()
+    return _deployment_panel_file().exists()
+
+
+
+
 def resolve_step4_asset_panel(
     *,
     selected_assets: List[str],
@@ -1022,6 +1479,7 @@ def resolve_step4_asset_panel(
     timings: Dict[str, Any] = {}
 
     if source_mode == "upload":
+        _clear_raw_return_panel_state()
         if uploaded_file is None:
             return None, "", ""
         raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else None
@@ -1070,20 +1528,90 @@ def resolve_step4_asset_panel(
     if not universe_union:
         raise ValueError("No valid tickers have been selected yet for Yahoo download.")
 
+    deployment_error: Exception | None = None
+
+    # Robust deployment path: use cached Yahoo-generated panels first when present.
+    # This prevents Streamlit Cloud from touching live Yahoo/yfinance when the user
+    # switches between monthly / weekly / daily diagnostics.
+    if _should_use_deployment_panel_first(frequency):
+        try:
+            panel_df, source_label, union_caption, cache_timings = _load_deployment_panel_for_frequency(
+                frequency=frequency,
+                selected_assets=list(selected_assets or []),
+                candidate_assets=list(candidate_assets or []),
+                start_date=start_date,
+                end_date=end_date,
+            )
+            timings.update(dict(cache_timings or {}))
+            timings["download_yahoo_seconds"] = 0.0
+            timings["return_panel_seconds"] = 0.0
+            timings["resolve_total_seconds"] = float(time.perf_counter() - overall_t0)
+            st.session_state[STEP4_PANEL_TIMINGS_KEY] = dict(timings)
+            timing_caption = format_step4_timing_summary(timings)
+            if timing_caption:
+                union_caption = f"{union_caption} · {timing_caption}"
+            return panel_df, source_label, union_caption
+        except Exception as exc:
+            deployment_error = exc
+            timings["deployment_panel_error"] = str(exc)
+
     t_dl = time.perf_counter()
-    panel_df = _cached_download_yahoo_asset_panel(
-        tuple(universe_union),
-        str(start_date),
-        str(end_date),
-        "daily",
-        bool(auto_adjust),
-    )
+    try:
+        raw_daily_panel = _cached_download_yahoo_asset_panel(
+            tuple(universe_union),
+            str(start_date),
+            str(end_date),
+            "daily",
+            bool(auto_adjust),
+        )
+    except Exception as yahoo_exc:
+        # Safety fallback: even when live Yahoo is explicitly requested, keep the
+        # public demo usable if the cached prepared panel exists.
+        if _deployment_panel_file().exists():
+            try:
+                panel_df, source_label, union_caption, cache_timings = _load_deployment_panel_for_frequency(
+                    frequency=frequency,
+                    selected_assets=list(selected_assets or []),
+                    candidate_assets=list(candidate_assets or []),
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                timings.update(dict(cache_timings or {}))
+                timings["download_yahoo_seconds"] = float(time.perf_counter() - t_dl)
+                timings["return_panel_seconds"] = 0.0
+                timings["yahoo_live_error"] = str(yahoo_exc)
+                timings["resolve_total_seconds"] = float(time.perf_counter() - overall_t0)
+                st.session_state[STEP4_PANEL_TIMINGS_KEY] = dict(timings)
+                timing_caption = format_step4_timing_summary(timings)
+                if timing_caption:
+                    union_caption = f"{union_caption} · live_yahoo_failed=True · {timing_caption}"
+                return panel_df, source_label, union_caption
+            except Exception as cache_exc:
+                deployment_error = cache_exc
+
+        if deployment_error is not None:
+            raise ValueError(
+                f"Yahoo download failed and cached deployment panel could not be used. "
+                f"Yahoo error: {yahoo_exc}. Cached panel error: {deployment_error}"
+            )
+        raise
+
     timings["download_yahoo_seconds"] = float(time.perf_counter() - t_dl)
     timings["return_panel_seconds"] = 0.0
 
     t_basic = time.perf_counter()
-    panel_df = validate_asset_panel(panel_df)
+    raw_daily_panel = validate_asset_panel(raw_daily_panel)
     timings["validate_asset_panel_seconds"] = float(time.perf_counter() - t_basic)
+
+    try:
+        timings.update(
+            _store_raw_return_panels(
+                raw_daily_panel,
+                source_label=f"Yahoo live/local daily returns · auto_adjust={bool(auto_adjust)}",
+            )
+        )
+    except Exception as raw_exc:
+        timings["raw_panel_export_error"] = str(raw_exc)
 
     try:
         cfg = DailyFeatureConfig()
@@ -1091,7 +1619,7 @@ def resolve_step4_asset_panel(
 
         t_feat = time.perf_counter()
         panel_df, feature_timings = _cached_feature_engineered_asset_panel(
-            panel_df,
+            raw_daily_panel,
             feature_cfg_json,
             True,
         )
@@ -1116,7 +1644,7 @@ def resolve_step4_asset_panel(
     timing_caption = format_step4_timing_summary(timings)
     if timing_caption:
         union_caption = f"{union_caption} · {timing_caption}"
-    return panel_df, f"Yahoo Finance ({frequency})", union_caption
+    return panel_df, "Yahoo Finance live daily → monthly prepared panel", union_caption
 
 
 def update_asset_panel_state(

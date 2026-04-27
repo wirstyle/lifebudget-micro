@@ -37,8 +37,6 @@ from ui.step5.size_recommendations import (
     SIZE_SKIPPED_LABEL_KEY,
     SIZE_SKIPPED_RUN_SIGNATURE_KEY,
     SIZE_SKIPPED_SCOPE_KEY,
-    SIZE_SUGGESTION_SCOPE_KEY,
-    SIZE_SUGGESTION_STATE_KEY,
     SIZE_SUGGESTION_TIMING_KEY,
     render_size_improvement,
 )
@@ -117,8 +115,6 @@ def _display_candidate_status(value: Any) -> str:
         return "passed gate"
     if raw in {"not selected", "rejected", "not accepted"}:
         return "not selected"
-    if raw in {"not testable", "unsupported", "not supported"}:
-        return "not testable"
     return str(value or "")
 
 
@@ -402,7 +398,7 @@ def _clear_auto_opt_suggestion_state() -> None:
 
 
 def _clear_universe_suggestion_state() -> None:
-    """Avoid showing stale phase-3/phase-4 results while earlier phases are unresolved."""
+    """Avoid showing stale phase-3 results while earlier phases are unresolved."""
     st.session_state[UNIVERSE_SUGGESTION_STATE_KEY] = {}
     st.session_state[UNIVERSE_SUGGESTION_SCOPE_KEY] = ""
     st.session_state[UNIVERSE_SUGGESTION_TIMING_KEY] = {}
@@ -411,19 +407,6 @@ def _clear_universe_suggestion_state() -> None:
     st.session_state[UNIVERSE_SKIPPED_SCOPE_KEY] = ""
     st.session_state[UNIVERSE_SKIPPED_LABEL_KEY] = ""
     st.session_state[UNIVERSE_SKIPPED_RUN_SIGNATURE_KEY] = ""
-    _clear_size_suggestion_state()
-
-
-def _clear_size_suggestion_state() -> None:
-    """Avoid showing stale phase-4 results while earlier phases are unresolved."""
-    st.session_state[SIZE_SUGGESTION_STATE_KEY] = {}
-    st.session_state[SIZE_SUGGESTION_SCOPE_KEY] = ""
-    st.session_state[SIZE_SUGGESTION_TIMING_KEY] = {}
-    st.session_state[SIZE_APPLIED_SIGNATURE_KEY] = ""
-    st.session_state[SIZE_APPLIED_LABEL_KEY] = ""
-    st.session_state[SIZE_SKIPPED_SCOPE_KEY] = ""
-    st.session_state[SIZE_SKIPPED_LABEL_KEY] = ""
-    st.session_state[SIZE_SKIPPED_RUN_SIGNATURE_KEY] = ""
 
 
 def _preset_blocks_engine_tuning(preset_flow_state: Any) -> bool:
@@ -466,8 +449,13 @@ def _universe_skipped_for_current_run(run_map: dict) -> bool:
     )
 
 
+def _universe_decision_completed_for_current_run(run_map: dict) -> bool:
+    return bool(_universe_applied_for_current_run(run_map) or _universe_skipped_for_current_run(run_map))
+
+
 def _size_applied_for_current_run(run_map: dict) -> bool:
-    current_run_signature = str(_coerce_mapping(run_map).get("run_signature", "") or "")
+    run_map = _coerce_mapping(run_map)
+    current_run_signature = str(run_map.get("run_signature", "") or "")
     applied_signature = str(st.session_state.get(SIZE_APPLIED_SIGNATURE_KEY, "") or "")
     return bool(current_run_signature and applied_signature and current_run_signature == applied_signature)
 
@@ -482,10 +470,6 @@ def _size_skipped_for_current_run(run_map: dict) -> bool:
         and current_run_signature
         and (not skipped_run_signature or skipped_run_signature == current_run_signature)
     )
-
-
-def _universe_decision_completed_for_current_run(run_map: dict) -> bool:
-    return bool(_universe_applied_for_current_run(run_map) or _universe_skipped_for_current_run(run_map))
 
 
 def _size_decision_completed_for_current_run(run_map: dict) -> bool:
@@ -574,17 +558,19 @@ def _render_size_suggestion_timing_block() -> None:
         return
 
     st.markdown("### Universe size suggestion timing")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("Size test", f"{total_seconds:.2f}s")
     with c2:
         st.metric("Engine-tested sizes", int(candidate_count))
     with c3:
+        st.metric("Planned sizes", int(planned_count))
+    with c4:
         st.metric("Passed gate", int(accepted_count))
 
     st.caption(
         "This is the extra time used by the automatic Step 5 universe-size suggestion. "
-        "Unsupported planned sizes are shown as Not testable instead of rejected candidates."
+        "It tests coarse/refinement sizes after the universe-composition decision has been resolved."
     )
 
     candidate_rows = timing.get("candidate_seconds", [])
@@ -681,7 +667,6 @@ def _render_completed_improvement_flow(run_map: dict) -> None:
     size_skipped = _size_skipped_for_current_run(run_map)
     universe_applied = _universe_applied_for_current_run(run_map)
     universe_skipped = _universe_skipped_for_current_run(run_map)
-
     if size_applied:
         label = str(st.session_state.get(SIZE_APPLIED_LABEL_KEY, "") or "the accepted universe size suggestion")
         message = f"Improvement flow completed: {label}. The rerun-tested candidate is now the current Step 5 result."
@@ -690,10 +675,10 @@ def _render_completed_improvement_flow(run_map: dict) -> None:
         message = f"Improvement flow completed: current universe size kept. Skipped recommendation: {label}."
     elif universe_applied:
         label = str(st.session_state.get(UNIVERSE_APPLIED_LABEL_KEY, "") or "the accepted universe composition suggestion")
-        message = f"Universe composition resolved: {label}. Universe size suggestion is available below."
+        message = f"Universe composition resolved: {label}. Universe size can now be tested for this run."
     elif universe_skipped:
         label = str(st.session_state.get(UNIVERSE_SKIPPED_LABEL_KEY, "") or "the recommended universe composition")
-        message = f"Universe composition resolved: current universe kept. Skipped recommendation: {label}."
+        message = f"Universe composition resolved: current universe kept. Skipped recommendation: {label}. Universe size can now be tested for this run."
     else:
         tuning_label = str(st.session_state.get(AUTO_OPT_APPLIED_LABEL_KEY, "") or "the accepted improvement suggestion")
         message = f"Improvement flow completed: {tuning_label}. The rerun-tested candidate is now the current Step 5 result."
@@ -701,7 +686,7 @@ def _render_completed_improvement_flow(run_map: dict) -> None:
     st.markdown("## 4. Improve this setup (optional)")
     st.success(message)
     st.caption(
-        "Preset, engine-tuning, universe-composition, and universe-size tests are hidden once the full flow is complete. "
+        "Preset, engine-tuning, universe-composition, and universe-size tests are kept sequential to avoid mixing candidate results. "
         "Change the strategy setup, technical controls, Step 4 universe, or run a new baseline if you want to start a fresh improvement cycle."
     )
     _render_completed_improvement_timing_summary()
@@ -850,6 +835,151 @@ def _render_what_to_watch(perf: dict, philosophy: Any) -> None:
         st.markdown("\n".join(f"- {item}" for item in watch_items))
         st.caption(
             "Use the benchmark context above as external reference only; the most direct comparison is still between the tested internal configurations."
+        )
+
+
+def _current_engine_knobs(run_map: dict) -> dict:
+    """Resolve the active low-level engine settings for the explanatory lever block."""
+    for raw in (
+        run_map.get("config_dict"),
+        run_map.get("config"),
+        st.session_state.get("step5_last_cfg_final"),
+        st.session_state.get("last_engine_config"),
+    ):
+        payload = _coerce_mapping(raw)
+        if payload:
+            return payload
+    return {}
+
+
+def _fmt_knob(value: Any) -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        number = float(value)
+        if number.is_integer():
+            return str(int(number))
+        return f"{number:.3f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(value)
+
+
+def _engine_improvement_target(perf: dict, philosophy: Any) -> str:
+    profile = str(philosophy or "Balanced").strip() or "Balanced"
+    cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
+    sharpe = _safe_float(perf.get("sharpe", 0.0), 0.0)
+    vol = _safe_float(perf.get("annual_volatility", perf.get("volatility", 0.0)), 0.0)
+    maxdd = abs(_safe_float(perf.get("max_drawdown", 0.0), 0.0))
+
+    if profile.lower() == "defensive":
+        if maxdd >= 0.15 or vol >= 0.12:
+            return (
+                "For this Defensive setup, the first improvement target is a smoother risk profile: "
+                "try reducing drawdown and volatility before chasing extra CAGR."
+            )
+        return (
+            "For this Defensive setup, the risk profile is already relatively controlled; the useful test is whether "
+            "Sharpe can improve without letting drawdown drift upward."
+        )
+
+    if profile.lower() == "growth":
+        if cagr < 0.08:
+            return (
+                "For this Growth setup, the useful improvement target is higher CAGR without a large Sharpe or drawdown penalty."
+            )
+        return (
+            "For this Growth setup, growth is already present; the useful test is whether Sharpe can improve without removing too much upside."
+        )
+
+    if maxdd >= 0.18 and sharpe >= 0.60:
+        return (
+            "For this Balanced setup, the main opportunity is the drawdown/Sharpe trade-off, not simply raw CAGR: "
+            "try reducing MaxDD toward the high-teens while keeping Sharpe near or above the current level."
+        )
+    if sharpe < 0.50:
+        return (
+            "For this Balanced setup, the main opportunity is signal quality: improve Sharpe before making the strategy more aggressive."
+        )
+    if cagr < 0.05:
+        return (
+            "For this Balanced setup, the main opportunity is return capture: test whether the engine is too defensive or too diluted."
+        )
+    return (
+        "For this Balanced setup, the useful improvement target is incremental: improve Sharpe or drawdown without materially increasing volatility."
+    )
+
+
+def _render_engine_levers_to_try(perf: dict, philosophy: Any, run_map: dict) -> None:
+    """Explain which engine controls map to the issues flagged by the result."""
+    cfg = _current_engine_knobs(run_map)
+    cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
+    sharpe = _safe_float(perf.get("sharpe", 0.0), 0.0)
+    vol = _safe_float(perf.get("annual_volatility", perf.get("volatility", 0.0)), 0.0)
+    maxdd = abs(_safe_float(perf.get("max_drawdown", 0.0), 0.0))
+
+    rows = [
+        {
+            "Goal": "Broader diversification",
+            "Engine levers": "top_k, temperature, weight_shrink",
+            "How to test it": "Increase top_k or temperature slightly; increase weight_shrink to reduce concentration.",
+            "Trade-off": "Can reduce drawdown, but may dilute strong signals and lower CAGR.",
+        },
+        {
+            "Goal": "Smoother risk estimates",
+            "Engine levers": "lookback_mu, lookback_sigma",
+            "How to test it": "Use longer lookbacks so return/risk estimates react less to short-term noise.",
+            "Trade-off": "Usually smoother, but slower to adapt after market regime changes.",
+        },
+        {
+            "Goal": "Lower turnover / more stability",
+            "Engine levers": "inertia",
+            "How to test it": "Increase inertia so the engine changes allocation more gradually.",
+            "Trade-off": "Can make the path steadier, but may react late to new information.",
+        },
+        {
+            "Goal": "Signal quality check",
+            "Engine levers": "signal_mode, feature_mu_enabled, feature_mu_blend",
+            "How to test it": "Compare the current signal setup against a slightly simpler or feature-assisted signal configuration.",
+            "Trade-off": "Can improve Sharpe if signals help, but extra features can overfit if the sample is weak.",
+        },
+    ]
+
+    if maxdd >= 0.18 or vol >= 0.15:
+        suggested_direction = (
+            "Sensible first test: slightly broader selection, longer lookbacks, more weight shrink, and more inertia. "
+            "That is the most direct way to test whether the current drawdown can be reduced without destroying Sharpe."
+        )
+    elif sharpe < 0.50:
+        suggested_direction = (
+            "Sensible first test: keep risk roughly stable and test signal/lookback changes before increasing risk appetite."
+        )
+    elif cagr < 0.05:
+        suggested_direction = (
+            "Sensible first test: check whether the strategy is too defensive or too diluted before changing the universe."
+        )
+    else:
+        suggested_direction = (
+            "Sensible first test: make small technical changes only, then accept them only if the real rerun improves the trade-off."
+        )
+
+    with st.expander("Engine levers that could improve this run", expanded=True):
+        st.markdown(f"**Improvement target:** {_engine_improvement_target(perf, philosophy)}")
+        st.markdown(f"**Suggested first test:** {suggested_direction}")
+
+        current_bits = [
+            f"top_k={_fmt_knob(cfg.get('top_k'))}",
+            f"lookback_mu={_fmt_knob(cfg.get('lookback_mu'))}",
+            f"lookback_sigma={_fmt_knob(cfg.get('lookback_sigma'))}",
+            f"temperature={_fmt_knob(cfg.get('temperature'))}",
+            f"weight_shrink={_fmt_knob(cfg.get('weight_shrink'))}",
+            f"inertia={_fmt_knob(cfg.get('inertia'))}",
+            f"signal_mode={_fmt_knob(cfg.get('signal_mode'))}",
+        ]
+        st.caption("Current engine levers: " + " · ".join(current_bits))
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.info(
+            "The Engine tuning suggestion below tests these kinds of parameter changes with the real engine before showing an Apply button. "
+            "Do not change knobs just because they sound better; compare the rerun-tested metrics."
         )
 
 
@@ -1247,6 +1377,7 @@ def render_post_run(run_result: dict) -> None:
     benchmark_payload = _render_benchmark_context(perf, run_map)
     render_result_reliability_assessment(run_map, benchmark_payload=benchmark_payload)
     _render_what_to_watch(perf, philosophy)
+    _render_engine_levers_to_try(perf, philosophy, run_map)
     _render_reliability_note()
 
     run_signature = str(run_map.get("run_signature", "") or "")
@@ -1266,9 +1397,9 @@ def render_post_run(run_result: dict) -> None:
     if size_flow_completed:
         _render_completed_improvement_flow(run_map)
     elif universe_flow_completed:
-        # Phase 3 has already been resolved for this run. Do not send the
-        # current signature back through Phase 1/2/3; Phase 4 can now test
-        # the active universe size without re-running earlier suggestion layers.
+        # Phase 3 has already been resolved for this run. Do not stop the
+        # improvement flow here: Phase 4 can now test universe size on top of
+        # the active composition baseline.
         st.markdown("## 4. Improve this setup (optional)")
         render_universe_improvement(run_map)
         render_size_improvement(run_map)

@@ -69,6 +69,12 @@ SIZE_SKIPPED_LABEL_KEY = "step5_size_skipped_label_v1"
 SIZE_SKIPPED_RUN_SIGNATURE_KEY = "step5_size_skipped_run_signature_v1"
 SIZE_SUGGESTION_TIMING_KEY = "step5_size_suggestion_timing_v1"
 SIZE_RECOMMENDATION_CONTEXT_KEY = "step5_recommended_size_context_v1"
+
+# Cached deployment panel currently contains 106 assets. Keep Phase 4 honest: never
+# engine-test sizes above the public/demo supported cap. Larger research sizes
+# require a larger live/external data source.
+DEPLOYMENT_MAX_TESTABLE_UNIVERSE_SIZE = 100
+DEPLOYMENT_SUPPORTED_UNIVERSE_SIZES = (12, 25, 50, 75, 100)
 UNIVERSE_RECOMMENDATION_CONTEXT_KEY = "step5_recommended_universe_context_v1"
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
 
@@ -389,45 +395,198 @@ def _size_cap_for_philosophy(philosophy: str) -> int:
     return 50
 
 
-def _coarse_sizes(baseline_size: int, cap_size: int) -> list[int]:
+def _deployment_bundle_asset_capacity(current_panel: pd.DataFrame | None = None) -> int:
+    """Best estimate of the cached deployment bundle capacity.
+
+    The active Step 5 panel can be smaller than the committed cache because it is
+    filtered to the current baseline universe plus support assets. Phase 4 must
+    not use that smaller active-panel count as the hard cap, otherwise a
+    25-asset baseline incorrectly prevents testing 36/50-asset candidates.
+    """
+    candidates: list[int] = [int(DEPLOYMENT_MAX_TESTABLE_UNIVERSE_SIZE)]
+    timings = _coerce_mapping(st.session_state.get(STEP4_PANEL_TIMINGS_KEY, {}))
+    for key in (
+        "deployment_bundle_assets",
+        "cached_bundle_assets",
+        "deployment_raw_daily_bundle_assets",
+        "deployment_raw_weekly_bundle_assets",
+        "deployment_panel_bundle_assets",
+        "deployment_raw_daily_assets",
+        "deployment_raw_weekly_assets",
+        "deployment_panel_assets",
+    ):
+        value = _safe_int(timings.get(key), 0)
+        if value > 0:
+            candidates.append(value)
+    if isinstance(current_panel, pd.DataFrame) and not current_panel.empty:
+        active_assets = len(_panel_assets(current_panel))
+        if active_assets > 0:
+            candidates.append(active_assets)
+    return int(max(candidates))
+
+
+def _deployment_hard_cap(bundle_capacity: int | None = None) -> int:
+    cap = int(DEPLOYMENT_MAX_TESTABLE_UNIVERSE_SIZE)
+    if bundle_capacity is not None and int(bundle_capacity or 0) > 0:
+        cap = min(cap, int(bundle_capacity))
+    return int(max(1, cap))
+
+
+def _deployment_supported_sizes(bundle_capacity: int | None = None) -> list[int]:
+    cap = _deployment_hard_cap(bundle_capacity)
+    return [int(x) for x in DEPLOYMENT_SUPPORTED_UNIVERSE_SIZES if int(x) <= cap]
+
+
+def _size_search_upper_for_philosophy(baseline_size: int, philosophy: str, deployment_cap: int) -> int:
+    """Upper bound for the normal search window.
+
+    Philosophy is used as search guidance, not as hard testability. For Balanced
+    this gives the expected 25 -> 50 search window while still keeping the
+    deployment hard cap at 100.
+    """
     baseline_size = int(baseline_size)
-    cap_size = int(cap_size)
-    if cap_size <= baseline_size:
-        return []
-    span = cap_size - baseline_size
-    if span <= 4:
-        raw = [cap_size]
+    deployment_cap = int(max(1, deployment_cap))
+    guidance = int(_size_cap_for_philosophy(philosophy))
+
+    if baseline_size < guidance:
+        return int(min(guidance, deployment_cap))
+
+    # If the current size is already above the usual guidance window, still allow
+    # a small upward check to the next deployment-supported size when available.
+    higher_supported = [x for x in _deployment_supported_sizes(deployment_cap) if x > baseline_size]
+    if higher_supported:
+        return int(min(higher_supported[0], deployment_cap))
+
+    return int(min(max(baseline_size, guidance), deployment_cap))
+
+
+def _nearest_supported_lower(baseline_size: int, deployment_cap: int) -> int | None:
+    lower = [x for x in _deployment_supported_sizes(deployment_cap) if x < int(baseline_size)]
+    return int(max(lower)) if lower else None
+
+
+def _dedupe_candidate_plan(plan: list[tuple[int, str]], *, baseline_size: int, deployment_cap: int, max_engine_tests: int) -> list[tuple[int, str]]:
+    out: list[tuple[int, str]] = []
+    seen: set[int] = {int(baseline_size)}
+    for raw_size, stage in plan:
+        size = int(round(float(raw_size)))
+        if size <= 0 or size > int(deployment_cap) or size in seen:
+            continue
+        seen.add(size)
+        out.append((size, str(stage)))
+        if len(out) >= int(max_engine_tests):
+            break
+    return out
+
+
+def _size_candidate_plan(
+    baseline_size: int,
+    deployment_cap: int,
+    philosophy: str,
+    *,
+    max_engine_tests: int = 4,
+) -> list[tuple[int, str]]:
+    """Coarse first-pass plan for Phase 4.
+
+    For the common Balanced 25-asset baseline this returns approximately:
+    36 and 50. A separate local-refinement step then tests a nearby value around
+    whichever coarse candidate looked best.
+    """
+    baseline_size = int(baseline_size)
+    deployment_cap = int(deployment_cap)
+    upper = _size_search_upper_for_philosophy(baseline_size, philosophy, deployment_cap)
+    plan: list[tuple[int, str]] = []
+
+    if upper > baseline_size:
+        span = upper - baseline_size
+        midpoint = baseline_size + max(1, int(round(span * 0.45)))
+        plan.append((midpoint, "coarse midpoint"))
+        plan.append((upper, "coarse upper"))
     else:
-        raw = [baseline_size + round(span * 0.45), baseline_size + round(span * 0.75), cap_size]
-    out: list[int] = []
-    for value in raw:
-        size = int(max(baseline_size + 1, min(cap_size, value)))
-        if size not in out:
-            out.append(size)
-    return out[:3]
+        lower = _nearest_supported_lower(baseline_size, deployment_cap)
+        if lower is not None:
+            plan.append((lower, "coarse smaller"))
+
+    return _dedupe_candidate_plan(
+        plan,
+        baseline_size=baseline_size,
+        deployment_cap=deployment_cap,
+        max_engine_tests=max_engine_tests,
+    )
 
 
-def _refinement_size(baseline_size: int, cap_size: int, best_size: int, tested_sizes: set[int]) -> int | None:
+def _coarse_sizes(baseline_size: int, cap_size: int) -> list[int]:
+    """Compatibility helper retained for older callers."""
+    return [size for size, _stage in _size_candidate_plan(int(baseline_size), int(cap_size), _philosophy(), max_engine_tests=3)]
+
+
+def _refinement_sizes(
+    baseline_size: int,
+    cap_size: int,
+    best_size: int,
+    tested_sizes: set[int],
+    *,
+    max_new: int = 2,
+) -> list[int]:
+    """Pick up to two nearby second-pass sizes around the best coarse candidate.
+
+    Phase 4 should behave like a small coarse-to-fine search, not just one
+    extra point. For the common Balanced 25 -> 50 window this gives:
+    - best coarse 36: try roughly 30 and 43
+    - best coarse 50: try roughly 44 and 47
+
+    The function never expands beyond the current guided search cap; larger
+    research sizes remain controlled by the deployment hard cap and Step 4 UI.
+    """
     baseline_size = int(baseline_size)
     cap_size = int(cap_size)
     best_size = int(best_size)
-    if cap_size <= baseline_size:
-        return None
+    tested = {int(x) for x in tested_sizes}
+    out: list[int] = []
 
-    local_step = max(2, int(round((cap_size - baseline_size) / 8.0)))
-    raw_candidates: list[int]
-    if best_size >= cap_size:
-        raw_candidates = [cap_size - local_step, cap_size - (2 * local_step)]
-    elif best_size <= baseline_size + local_step:
-        raw_candidates = [best_size + local_step, best_size + (2 * local_step)]
+    if cap_size <= 0 or max_new <= 0:
+        return out
+
+    span = max(1, cap_size - baseline_size)
+    if best_size <= baseline_size and baseline_size > 1:
+        raw_candidates = [round((best_size + baseline_size) / 2.0)]
+    elif best_size >= cap_size:
+        # Best at the upper edge: stay inside the tested search window and add
+        # two upper-neighbour checks. For 25 -> 50 this is about 44 and 47.
+        raw_candidates = [
+            baseline_size + round(span * 0.75),
+            baseline_size + round(span * 0.88),
+        ]
     else:
-        raw_candidates = [best_size + local_step, best_size - local_step, best_size + (2 * local_step), best_size - (2 * local_step)]
+        # Best is between baseline and cap: bracket it from below and above.
+        # For 25 -> 36 -> 50 this is about 30 and 43.
+        raw_candidates = [
+            round((baseline_size + best_size) / 2.0),
+            round((best_size + cap_size) / 2.0),
+        ]
 
+    # Add small neighbours as fallbacks in case rounding hits an already-tested
+    # size. This keeps the plan compact but avoids losing a second refinement.
+    expanded: list[int] = []
     for raw in raw_candidates:
-        size = int(max(baseline_size + 1, min(cap_size, raw)))
-        if size > baseline_size and size <= cap_size and size not in tested_sizes:
-            return size
-    return None
+        centre = int(max(1, min(cap_size, raw)))
+        for candidate in (centre, centre - 1, centre + 1, centre - 2, centre + 2):
+            if 1 <= int(candidate) <= cap_size:
+                expanded.append(int(candidate))
+
+    for size in expanded:
+        if size == baseline_size or size in tested or size in out:
+            continue
+        out.append(size)
+        if len(out) >= int(max_new):
+            break
+    return out
+
+
+def _refinement_size(baseline_size: int, cap_size: int, best_size: int, tested_sizes: set[int]) -> int | None:
+    """Compatibility wrapper for older callers expecting one refinement."""
+    sizes = _refinement_sizes(baseline_size, cap_size, best_size, tested_sizes, max_new=1)
+    return sizes[0] if sizes else None
 
 
 def _search_pool_assets(current_assets: list[str], strategy: str, cap_size: int) -> list[str]:
@@ -555,12 +714,14 @@ def _build_scope(run_result: dict) -> str:
             "style": style,
             "technical_cfg": base_cfg,
             "baseline_size": int(baseline_size),
-            "cap_size": int(_size_cap_for_philosophy(philosophy)),
+            "philosophy_guidance_cap": int(_size_cap_for_philosophy(philosophy)),
+            "deployment_max_testable_size": int(DEPLOYMENT_MAX_TESTABLE_UNIVERSE_SIZE),
+            "deployment_supported_sizes": list(DEPLOYMENT_SUPPORTED_UNIVERSE_SIZES),
             "universe_strategy": current_strategy,
             "current_assets": current_assets,
             "panel_assets": _panel_assets(panel_df),
             "panel_fp": _stable_panel_fingerprint(panel_df),
-            "phase": "universe_size_v1",
+            "phase": "universe_size_v2_coarse_to_fine",
         }
     )
 
@@ -678,21 +839,36 @@ def _run_size_search(run_result: dict, *, max_engine_tests: int = 4) -> dict:
     current_assets = current_assets[: int(baseline_size)] if baseline_size > 0 else current_assets
 
     universe_strategy = str(run_map.get("universe_strategy", step4_payload.get("strategy", st.session_state.get(UNIVERSE_STRATEGY, ""))) or "")
-    cap_size = int(_size_cap_for_philosophy(philosophy))
-    coarse = _coarse_sizes(int(baseline_size), cap_size)
-    search_assets = _search_pool_assets(current_assets, universe_strategy, cap_size)
+
+    active_panel_assets = len(_panel_assets(current_panel)) if isinstance(current_panel, pd.DataFrame) and not current_panel.empty else 0
+    bundle_capacity = _deployment_bundle_asset_capacity(current_panel)
+    deployment_cap = _deployment_hard_cap(bundle_capacity)
+    philosophy_guidance_cap = int(_size_cap_for_philosophy(philosophy))
+    cap_size = int(_size_search_upper_for_philosophy(int(baseline_size), philosophy, deployment_cap))
+    supported_sizes = _deployment_supported_sizes(bundle_capacity)
+    candidate_plan = _size_candidate_plan(
+        int(baseline_size),
+        int(deployment_cap),
+        philosophy,
+        max_engine_tests=max_engine_tests,
+    )
+
+    # Resolve a temporary search panel large enough for the planned candidates.
+    # This is the key fix: do not cap by the already-filtered active Step 4 panel.
+    search_pool_cap = max([int(baseline_size)] + [int(size) for size, _stage in candidate_plan]) if candidate_plan else int(baseline_size)
+    search_assets = _search_pool_assets(current_assets, universe_strategy, search_pool_cap)
 
     started = time.perf_counter()
     search_panel, panel_note = _resolve_temporary_search_panel(search_assets, current_panel, step4_payload)
 
     evaluations: list[dict] = []
     tested_count = 0
-    for size in coarse:
+    for size, stage in candidate_plan:
         if tested_count >= int(max_engine_tests):
             break
         item = _evaluate_size(
             size=int(size),
-            stage="coarse",
+            stage=str(stage),
             search_panel=search_panel,
             current_assets=current_assets,
             current_perf=current_perf,
@@ -714,11 +890,19 @@ def _run_size_search(run_result: dict, *, max_engine_tests: int = 4) -> dict:
             ),
         )
         tested_sizes = {_safe_int(_coerce_mapping(x).get("universe_size"), 0) for x in evaluations}
-        refine = _refinement_size(int(baseline_size), cap_size, _safe_int(best_stage1.get("universe_size"), int(baseline_size)), tested_sizes)
-        if refine is not None:
+        refinements = _refinement_sizes(
+            int(baseline_size),
+            int(cap_size),
+            _safe_int(best_stage1.get("universe_size"), int(baseline_size)),
+            tested_sizes,
+            max_new=max(0, int(max_engine_tests) - int(tested_count)),
+        )
+        for idx, refine in enumerate(refinements, start=1):
+            if tested_count >= int(max_engine_tests):
+                break
             item = _evaluate_size(
                 size=int(refine),
-                stage="local refinement",
+                stage=f"local refinement {idx}",
                 search_panel=search_panel,
                 current_assets=current_assets,
                 current_perf=current_perf,
@@ -730,11 +914,14 @@ def _run_size_search(run_result: dict, *, max_engine_tests: int = 4) -> dict:
             if not bool(item.get("not_testable", False)):
                 tested_count += 1
 
-    if not coarse:
+    if not candidate_plan:
         evaluations.append(
             _not_testable_eval(
                 int(baseline_size),
-                f"Current size {int(baseline_size)} is already at or above the practical {philosophy} cap ({cap_size}).",
+                (
+                    f"No alternative deployment-supported size was available around current size {int(baseline_size)}. "
+                    f"Supported deployed-demo sizes are {', '.join(map(str, supported_sizes)) or 'none'}."
+                ),
                 stage="range check",
             )
         )
@@ -786,11 +973,19 @@ def _run_size_search(run_result: dict, *, max_engine_tests: int = 4) -> dict:
         "style_preset": style,
         "baseline_size": int(baseline_size),
         "cap_size": int(cap_size),
+        "philosophy_guidance_cap": int(philosophy_guidance_cap),
+        "deployment_max_testable_size": int(DEPLOYMENT_MAX_TESTABLE_UNIVERSE_SIZE),
+        "deployment_supported_sizes": list(supported_sizes),
+        "available_panel_assets": int(active_panel_assets),
+        "deployment_bundle_asset_capacity": int(bundle_capacity),
+        "active_panel_assets": int(active_panel_assets),
         "universe_strategy": universe_strategy,
         "current_assets": list(current_assets),
         "current_perf": dict(current_perf),
         "panel_note": str(panel_note or ""),
         "evaluations": evaluations,
+        "candidate_plan": [{"size": int(size), "stage": str(stage)} for size, stage in candidate_plan],
+        "search_pool_cap": int(search_pool_cap),
         "candidate_count": int(real_tested_count),
         "planned_candidate_count": int(len(evaluations)),
         "timing_summary": {
@@ -1150,11 +1345,26 @@ def render_size_improvement(run_result: dict) -> None:
         return
 
     baseline_size = _safe_int(payload.get("baseline_size", run_map.get("universe_size", st.session_state.get(UNIVERSE_SIZE, 25))), 25)
-    cap_size = _safe_int(payload.get("cap_size", _size_cap_for_philosophy(_philosophy())), _size_cap_for_philosophy(_philosophy()))
+    cap_size = _safe_int(payload.get("cap_size", DEPLOYMENT_MAX_TESTABLE_UNIVERSE_SIZE), DEPLOYMENT_MAX_TESTABLE_UNIVERSE_SIZE)
+    philosophy = str(payload.get("philosophy", _philosophy()) or _philosophy())
+    guidance_cap = _safe_int(payload.get("philosophy_guidance_cap", _size_cap_for_philosophy(philosophy)), _size_cap_for_philosophy(philosophy))
+    deployment_hard_cap = _safe_int(payload.get("deployment_max_testable_size", DEPLOYMENT_MAX_TESTABLE_UNIVERSE_SIZE), DEPLOYMENT_MAX_TESTABLE_UNIVERSE_SIZE)
+    candidate_plan_rows = list(payload.get("candidate_plan", []) or [])
+    coarse_sizes = [
+        _safe_int(_coerce_mapping(row).get("size"), 0)
+        for row in candidate_plan_rows
+        if _safe_int(_coerce_mapping(row).get("size"), 0) > 0
+    ]
+    coarse_label = ", ".join(map(str, coarse_sizes)) if coarse_sizes else "none"
     panel_note = str(payload.get("panel_note", "") or "")
     if panel_note:
         st.caption(panel_note)
-    st.caption(f"Size-search range: current baseline {baseline_size} → practical cap {cap_size}. Baseline is not rerun.")
+    st.caption(
+        f"Size-search window: current baseline {baseline_size} → {philosophy} guidance cap {cap_size} "
+        f"(deployment hard cap {deployment_hard_cap}). "
+        f"Coarse candidates: {coarse_label}. If one coarse size looks promising, up to two local refinements are tested nearby. "
+        "Baseline is not rerun."
+    )
 
     accepted_items = [dict(x) for x in evaluations if bool(_coerce_mapping(x).get("accepted", False))]
     table = _candidate_table(evaluations, perf, baseline_size)
@@ -1170,7 +1380,7 @@ def render_size_improvement(run_result: dict) -> None:
     if not accepted_items:
         st.success("Current universe size has converged: no tested alternative materially improved this run.")
         st.caption(
-            "The diagnostics table shows tested and unsupported sizes. Unsupported sizes are labelled Not testable rather than rejected."
+            "The diagnostics table shows the tested coarse/refinement sizes. If a size cannot be materialised from the cached panel it is labelled Not testable rather than rejected."
         )
     elif size_was_skipped:
         st.info("Current universe size kept for this run. The improvement flow is complete.")

@@ -238,24 +238,6 @@ def _format_currency(value: float, decimals: int = 0) -> str:
     return f"£{value:,.{decimals}f}"
 
 
-def _format_compact_currency(value: Any) -> str:
-    """Compact money labels for narrow metric cards.
-
-    Full values are still shown in tables below; metric cards use this to avoid
-    clipped strings such as "£845,55..." in Streamlit's large-number display.
-    """
-    amount = _safe_float(value, 0.0)
-    sign = "-" if amount < 0 else ""
-    amount = abs(float(amount))
-    if amount >= 1_000_000:
-        return f"{sign}£{amount / 1_000_000:.2f}m"
-    if amount >= 100_000:
-        return f"{sign}£{amount / 1_000:.0f}k"
-    if amount >= 10_000:
-        return f"{sign}£{amount / 1_000:.1f}k"
-    return f"{sign}£{amount:,.0f}"
-
-
 def _format_probability(value: Any) -> str:
     if value is None:
         return "—"
@@ -264,6 +246,42 @@ def _format_probability(value: Any) -> str:
     except Exception:
         return "—"
 
+
+
+def _render_step6_projection_interpretation_note(*, monthly_contribution: float) -> None:
+    """Explain what Step 6 is and is not, without changing projection logic."""
+    st.info(
+        "Step 6 is not a forecast. It is a scenario simulator that translates the historical Step 5 "
+        "strategy return series into possible future wealth paths under your contribution plan."
+    )
+
+    with st.expander("How to read this projection", expanded=False):
+        st.markdown(
+            """
+            **Step 5** answers: *how would this strategy have behaved on the historical market-data panel?*  
+            **Step 6** answers: *if future returns behaved similarly to that historical strategy path, what range of outcomes could my contributions produce?*
+
+            Step 6 should not be read as: **you will end with exactly this amount**. It should be read as:
+
+            **Under these assumptions, using the historical Step 5 return distribution, these are the possible low / middle / high outcome ranges.**
+
+            **Regulatory-style note:** the FCA requires past-performance information to include a prominent warning that figures refer to the past and that past performance is not a reliable indicator of future results. The SEC / investor.gov similarly states that past performance does not necessarily predict future results.
+
+            Why this is useful:
+
+            1. It translates historical return behaviour into personal impact. A CAGR is abstract; a monthly contribution path is easier to understand.
+            2. It compares cash-only and invested paths where available, showing both potential upside and extra uncertainty.
+            3. It shows uncertainty through ranges such as P10 / median / P90, rather than one single promised number.
+            4. It helps test whether a goal looks plausible under the model assumptions, not guaranteed.
+            5. It shows horizon sensitivity: short horizons are dominated by uncertainty; long horizons are more affected by contributions and compounding.
+            6. It connects Step 5 decisions to lived consequences: a higher-return strategy may still feel unacceptable if its downside path is too uncomfortable.
+            """
+        )
+        st.caption(
+            f"Contribution allocation note: this Step 6 view currently works at strategy-return level. "
+            f"It assumes the monthly contribution of {_format_currency(monthly_contribution)}/month is invested into the selected strategy as a whole. "
+            "It does not yet display month-by-month asset-level purchase percentages; those would require exposing the engine's internal portfolio weights as a separate allocation schedule."
+        )
 
 def _extract_projection_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
     summary = _coerce_mapping(payload.get("summary", {}))
@@ -712,8 +730,10 @@ def _render_investment_step6() -> None:
     st.caption(
         "Educational / research use only (Step 6 projection): This application does not provide financial advice, "
         "investment recommendations, or an offer to buy or sell any financial instrument. Results are experimental, "
-        "may not generalise to real-world market conditions, and past performance is not indicative of future results. "
-        "Users remain solely responsible for any investment decisions made using this application."
+        "may not generalise to real-world market conditions. FCA-style warning: figures refer to the past and past "
+        "performance is not a reliable indicator of future results; SEC / investor.gov similarly warns that past "
+        "performance does not necessarily predict future results. Users remain solely responsible for any investment "
+        "decisions made using this application."
     )
     shock_cfg = _render_long_term_shock_control(key_prefix="investment_projection")
     original_monthly_contribution = float(monthly_contribution)
@@ -725,6 +745,8 @@ def _render_investment_step6() -> None:
         f"After optional long-term life-shock drag, projected contribution is **{_format_currency(monthly_contribution)}/month** "
         f"(weekly equivalent: **{_format_currency(weekly_equivalent)}/week**)."
     )
+
+    _render_step6_projection_interpretation_note(monthly_contribution=monthly_contribution)
 
     if monthly_contribution <= 0.0:
         st.info("The projection is inactive until your monthly contribution is above £0.")
@@ -850,37 +872,28 @@ def _render_investment_step6() -> None:
             st.warning(coherence_status["title"])
 
         st.caption(coherence_status["message"])
-
-        recommendation_text = (
+        st.info(
             "Projection coherence suggestion ({philosophy})\n\n"
             "Recommended:\n"
             "• {mode_label}\n"
             "• {days} synthetic trading days/month\n"
             "• {variation:.2f} daily path variation\n\n"
-            "{rationale}"
-        ).format(**recommendation)
+            "{rationale}".format(**recommendation)
+        )
 
-        if coherence_status["status"] == "success":
-            st.info(
-                f"Projection settings already match the recommended {recommendation['philosophy']} profile: "
-                f"{recommendation['mode_label']}, {int(recommendation['days'])} synthetic days/month, "
-                f"and {float(recommendation['variation']):.2f} daily path variation."
+        if st.button(
+            "Apply recommended projection settings",
+            key="step6_apply_projection_recommendation",
+            use_container_width=False,
+        ):
+            queue_and_rerun(
+                {
+                    "investment_projection_simulation_mode_label": str(recommendation["mode_label"]),
+                    "investment_projection_simulation_granularity": str(recommendation["mode"]),
+                    "investment_projection_daily_steps_per_month": int(recommendation["days"]),
+                    "investment_projection_daily_path_noise_scale": float(recommendation["variation"]),
+                }
             )
-        else:
-            st.info(recommendation_text)
-            if st.button(
-                "Apply recommended projection settings",
-                key="step6_apply_projection_recommendation",
-                use_container_width=False,
-            ):
-                queue_and_rerun(
-                    {
-                        "investment_projection_simulation_mode_label": str(recommendation["mode_label"]),
-                        "investment_projection_simulation_granularity": str(recommendation["mode"]),
-                        "investment_projection_daily_steps_per_month": int(recommendation["days"]),
-                        "investment_projection_daily_path_noise_scale": float(recommendation["variation"]),
-                    }
-                )
 
     compare_enabled = bool(
         st.checkbox(
@@ -1021,7 +1034,7 @@ def _render_investment_step6() -> None:
         with top_metrics_1[2]:
             st.metric(
                 "P10–P90 range",
-                f"{_format_compact_currency(metrics['p10_terminal'])}–{_format_compact_currency(metrics['p90_terminal'])}",
+                f"{_format_currency(metrics['p10_terminal'])} ··· {_format_currency(metrics['p90_terminal'])}",
             )
         with top_metrics_1[3]:
             goal_display = "—" if goal_amount <= 0.0 else _format_probability(metrics["goal_probability"])
@@ -1038,13 +1051,13 @@ def _render_investment_step6() -> None:
             st.metric("Loss vs contributions", _format_probability(metrics["loss_probability"]))
 
         st.caption(
-            "These figures are scenario outputs from historical engine returns, not guaranteed forecasts. "
-            "Use them to compare assumptions and uncertainty rather than as expected real-world outcomes."
+            "Projection source: historical strategy OOS returns generated by the Step 5 engine from the validated Step 4 market-data panel. "
+            "In deployment, this uses cached Yahoo-generated panels / daily-to-monthly rebuilds rather than live market-data downloads. "
+            "The monthly contribution is wired directly from Step 4 via the same planning context."
         )
-
         st.caption(
-            "Projection source: historical engine OOS returns. Step 6 now reads stored engine returns from "
-            "investment_context first, while the monthly contribution is wired directly from Step 4 via the same context."
+            "Interpretation: these numbers are model-conditioned scenario ranges. They are useful for comparing configurations and horizons inside the app, "
+            "but they are not guaranteed future return, drawdown, Sharpe, or wealth outcomes."
         )
 
         if not main_chart_df.empty:

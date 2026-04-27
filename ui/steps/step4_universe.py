@@ -45,6 +45,9 @@ from ui.services.step4_universe_service import (
     format_step4_timing_summary,
     STEP4_PANEL_SIGNATURE_KEY,
     STEP4_PANEL_TIMINGS_KEY,
+    STEP4_RAW_DAILY_PANEL_KEY,
+    STEP4_RAW_WEEKLY_PANEL_KEY,
+    STEP4_RAW_PANEL_SOURCE_KEY,
 )
 from ui.state.keys import (
     ASSET_AUTO_ADJUST,
@@ -62,6 +65,16 @@ from ui.state.keys import (
     INVESTMENT_START_DATE_STABILITY_ENABLED,
     UNIVERSE_CUSTOM_ENABLED,
 )
+
+
+# Cached deployment panels contain 106 assets. Keep the public/demo size menu
+# honest by exposing only universe sizes that can be materially supported by
+# the cached data bundle. Larger sizes need a larger external/live data source.
+DEPLOYMENT_MAX_VISIBLE_UNIVERSE_SIZE = 100
+
+
+def _deployment_supported_universe_sizes() -> list[int]:
+    return [int(x) for x in UNIVERSE_SIZES if int(x) <= DEPLOYMENT_MAX_VISIBLE_UNIVERSE_SIZE]
 
 
 PHILOSOPHY_FEEL_CARDS = {
@@ -186,12 +199,30 @@ def _sync_widget_defaults_from_philosophy(philosophy: str) -> None:
 
 
 def _build_visible_size_options(philosophy: str, show_all_sizes: bool, current_size: int) -> list[int]:
+    supported_sizes = _deployment_supported_universe_sizes()
     if show_all_sizes:
-        options = list(UNIVERSE_SIZES)
+        options = list(supported_sizes)
     else:
-        options = list(recommended_universe_sizes_for_philosophy(philosophy))
-    if current_size not in options:
-        options.append(int(current_size))
+        options = [
+            int(x)
+            for x in recommended_universe_sizes_for_philosophy(philosophy)
+            if int(x) in set(supported_sizes)
+        ]
+
+    if not options:
+        options = [25] if 25 in supported_sizes else list(supported_sizes[:1])
+
+    try:
+        current_value = int(current_size)
+    except Exception:
+        current_value = int(options[0])
+
+    # Preserve current selections only when they are supported by the cached
+    # deployment bundle. This intentionally prevents stale 150/250 values from
+    # remaining visible after the project moved to a 106-asset cached panel.
+    if current_value in supported_sizes and current_value not in options:
+        options.append(current_value)
+
     return sorted(set(int(x) for x in options))
 
 
@@ -400,11 +431,15 @@ def render_step_4() -> None:
         selected_size = st.selectbox("Primary universe size", size_options, index=size_options.index(int(st.session_state.get("universe_size_input", current_size))), key="universe_size_input")
         show_all_sizes = bool(
             st.checkbox(
-                "Show all sizes",
+                "Show all deployment-supported sizes",
                 value=bool(st.session_state.get("show_all_sizes_input", False)),
                 key="show_all_sizes_input",
-                help="Show the full research universe-size menu instead of only the sizes preferred for this philosophy.",
+                help="Show all universe sizes supported by the cached deployment panel. Sizes above 100 require a larger live/external data source.",
             )
+        )
+        st.caption(
+            "Cached deployment mode supports universe sizes up to 100 assets from the 106-asset panel. "
+            "150/250-asset research sizes are hidden because they require a larger data source."
         )
 
     current_strategy = str(st.session_state.get("universe_strategy_input", st.session_state.get("universe_strategy", resolve_recommended_strategy_for_size(current_philosophy, selected_size))) or resolve_recommended_strategy_for_size(current_philosophy, selected_size))
@@ -495,8 +530,13 @@ def render_step_4() -> None:
     uploaded_file = None
 
     st.caption(
-        "This prototype uses Yahoo Finance as the validated market-data source "
-        "for the selected investment universe."
+        "This deployed demo uses cached Yahoo-generated return panels from the local data pipeline. "
+        "The committed cache contains 106 assets and avoids live Yahoo Finance rate limits on Streamlit Cloud. "
+        "Monthly mode rebuilds the prepared engine panel from cached daily returns when available, with a cached monthly prepared panel as fallback."
+    )
+    st.caption(
+        "Cached panel coverage: 106 assets · daily/weekly raw returns available for diagnostics · "
+        "monthly prepared engine panel · supported deployed-demo universe sizes: 12, 25, 50, 75 and 100 assets."
     )
 
     # Data-preparation support pool: used only to widen download/validation coverage.
@@ -505,7 +545,7 @@ def render_step_4() -> None:
     if selected_assets:
         _render_combined_yahoo_notice(list(selected_assets), list(candidate_assets))
     else:
-        st.warning("No valid tickers have been selected yet for Yahoo download.")
+        st.warning("No valid tickers have been selected yet for market-data preparation.")
 
     freq_options = ["monthly", "weekly", "daily"]
     current_freq = str(st.session_state.get(ASSET_RETURN_FREQUENCY, "monthly") or "monthly")
@@ -524,22 +564,41 @@ def render_step_4() -> None:
 
     c1, c2 = st.columns(2)
     with c1:
-        start_date = st.date_input("Yahoo start date", value=_default_asset_start_date(), key="asset_start_date_input")
+        start_date = st.date_input("Panel start date", value=_default_asset_start_date(), key="asset_start_date_input")
     with c2:
-        end_date = st.date_input("Yahoo end date", value=_default_asset_end_date(), key="asset_end_date_input")
+        end_date = st.date_input("Panel end date", value=_default_asset_end_date(), key="asset_end_date_input")
 
-    freq = "monthly"
-    st.session_state["asset_return_frequency_input"] = "monthly"
+    # Do not force this back to monthly on every rerun.
+    # The frequency selector is used for local diagnostics and for selecting
+    # matching cached deployment panels. The Step 5 engine still receives the
+    # prepared monthly panel when cached deployment mode is active.
+    freq = str(st.session_state.get("asset_return_frequency_input", current_freq) or current_freq)
+    if freq not in freq_options:
+        freq = "monthly"
+        st.session_state["asset_return_frequency_input"] = "monthly"
+
     auto_adjust = bool(st.session_state.get(ASSET_AUTO_ADJUST, True))
 
     with st.expander("Advanced data controls", expanded=False):
-        freq = st.selectbox("Return frequency", options=freq_options, key="asset_return_frequency_input")
+        freq = st.selectbox(
+            "Return frequency",
+            options=freq_options,
+            index=freq_options.index(freq),
+            key="asset_return_frequency_input",
+        )
         auto_adjust = st.checkbox(
-            "Use Yahoo auto-adjusted prices",
+            "Use Yahoo auto-adjusted prices (live/local download only)",
             value=bool(st.session_state.get(ASSET_AUTO_ADJUST, True)),
             key="asset_auto_adjust_input",
         )
-        st.caption("Monthly is the recommended default for this prototype. Weekly/daily modes are available for diagnostics.")
+        st.caption(
+            "Monthly is the recommended default for deployment. Weekly/daily modes are available "
+            "for diagnostics and for checking the matching cached return panels."
+        )
+        st.caption(
+            "Auto-adjust only affects live/local Yahoo downloads. Cached deployment panels already "
+            "contain prepared returns, so this checkbox does not recalculate cached CSV data."
+        )
     st.session_state[ASSET_START_DATE] = start_date
     st.session_state[ASSET_END_DATE] = end_date
     st.session_state[ASSET_RETURN_FREQUENCY] = freq
@@ -595,7 +654,7 @@ def render_step_4() -> None:
                 _render_data_panel_preview(panel_df)
         except Exception as exc:
             panel_error = str(exc)
-            st.error(f"Could not download data from Yahoo Finance: {panel_error}")
+            st.error(f"Could not load market data: {panel_error}")
     else:
         ready_panel = st.session_state.get(ASSET_PANEL_DF)
         if isinstance(ready_panel, pd.DataFrame) and not ready_panel.empty:
@@ -618,6 +677,14 @@ def render_step_4() -> None:
     if bool(st.session_state.get(ASSET_PANEL_READY, False)):
         st.success("Portfolio and market data ready.")
         st.caption(f"Panel ready · source: {st.session_state.get(ASSET_PANEL_SOURCE_LABEL, '')}")
+        ready_panel_for_summary = st.session_state.get(ASSET_PANEL_DF)
+        ready_asset_count = 0
+        if isinstance(ready_panel_for_summary, pd.DataFrame) and not ready_panel_for_summary.empty and "asset" in ready_panel_for_summary.columns:
+            ready_asset_count = int(ready_panel_for_summary["asset"].nunique())
+        st.caption(
+            f"Deployment coverage: source=cached Yahoo-generated panels · selected frequency={str(st.session_state.get(ASSET_RETURN_FREQUENCY, 'monthly') or 'monthly')} · "
+            f"engine panel assets={ready_asset_count or '—'} · cached bundle assets=106 · max deployed-demo universe size=100 · live Yahoo download avoided by default."
+        )
         with st.expander("Diagnostics (advanced)", expanded=False):
             ready_panel_for_diag = st.session_state.get(ASSET_PANEL_DF)
             tickers_to_download = list(st.session_state.get("_step4_yahoo_tickers_to_download", []) or [])
@@ -650,8 +717,32 @@ def render_step_4() -> None:
                     mime="text/csv",
                     key="step4_download_panel_csv",
                 )
+
+            raw_source = str(st.session_state.get(STEP4_RAW_PANEL_SOURCE_KEY, "") or "")
+            raw_daily_panel = st.session_state.get(STEP4_RAW_DAILY_PANEL_KEY)
+            raw_weekly_panel = st.session_state.get(STEP4_RAW_WEEKLY_PANEL_KEY)
+            if raw_source:
+                st.caption(f"Raw return panel source: {raw_source}")
+
+            if isinstance(raw_daily_panel, pd.DataFrame) and not raw_daily_panel.empty:
+                st.download_button(
+                    "Download raw daily return panel",
+                    data=panel_df_to_csv_bytes(raw_daily_panel),
+                    file_name="yahoo_raw_daily_returns.csv",
+                    mime="text/csv",
+                    key="step4_download_raw_daily_panel_csv",
+                )
+
+            if isinstance(raw_weekly_panel, pd.DataFrame) and not raw_weekly_panel.empty:
+                st.download_button(
+                    "Download raw weekly return panel",
+                    data=panel_df_to_csv_bytes(raw_weekly_panel),
+                    file_name="yahoo_raw_weekly_returns.csv",
+                    mime="text/csv",
+                    key="step4_download_raw_weekly_panel_csv",
+                )
     else:
-        st.error("Step 5 is hard-gated until the asset panel is ready. Load a valid Yahoo Finance panel first.")
+        st.error("Step 5 is hard-gated until the asset panel is ready. Load a valid market-data panel first.")
         if panel_error:
             st.caption(f"Latest panel error: {panel_error}")
 

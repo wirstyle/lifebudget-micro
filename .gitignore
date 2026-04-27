@@ -6,3 +6,7 @@ venv/
 .DS_Store
 __pycache__/ 
 *.pyc 
+
+data/deployment_asset_panel.csv
+data/deployment_daily_returns.csv
+data/deployment_weekly_returns.csv

@@ -844,9 +844,7 @@ def render_preset_improvement(run_result: dict) -> dict:
             1. **Strategy preset suggestion** — tests whether a nearby strategy style gives a better trade-off.
             2. **Engine tuning suggestion** — keeps the same Step 4 universe and strategy preset, but adjusts small technical engine knobs.
             3. **Universe composition suggestion** — keeps the same preset, technical config, and size, but tests whether a different asset mix improves the result.
-
-            **Planned next**
-            4. **Universe size suggestion** — tests whether a smaller or larger universe works better.
+            4. **Universe size suggestion** — tests whether a smaller or larger deployment-supported universe works better.
             """
         )
         st.caption(
