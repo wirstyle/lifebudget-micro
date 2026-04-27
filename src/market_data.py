@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from io import BytesIO
+from io import BytesIO, StringIO
 from typing import Iterable, List, Literal, Optional
 import os
 import urllib.parse
@@ -110,6 +110,54 @@ def _stooq_symbol(ticker: str) -> str:
     return symbol.replace("-", ".").lower() + ".us"
 
 
+def _parse_stooq_csv_response(raw: bytes, ticker: str) -> pd.DataFrame:
+    """Parse Stooq CSV robustly for Streamlit Cloud deployment.
+
+    Stooq normally returns a clean CSV starting with Date,Open,High,Low,Close,Volume.
+    In cloud/server contexts it can sometimes prepend text/status lines or return
+    a malformed body. A direct pd.read_csv(BytesIO(raw)) can then fail with
+    tokenizing errors. This helper finds the real CSV header first and skips
+    malformed rows instead of killing Step 4.
+    """
+    text = raw.decode("utf-8", errors="replace")
+    lines = [line.strip() for line in text.splitlines() if str(line).strip()]
+    if not lines:
+        raise ValueError(f"Stooq returned an empty response for {ticker}.")
+
+    header_idx: int | None = None
+    sep = ","
+    for i, line in enumerate(lines):
+        lower = line.lower()
+        if "date" in lower and "close" in lower:
+            sep = ";" if line.count(";") > line.count(",") else ","
+            header_idx = i
+            break
+
+    if header_idx is None:
+        preview = " | ".join(lines[:4])[:300]
+        raise ValueError(f"Stooq response for {ticker} did not contain a Date/Close header. Preview: {preview}")
+
+    csv_text = "\n".join(lines[header_idx:])
+    try:
+        df = pd.read_csv(StringIO(csv_text), sep=sep, engine="python", on_bad_lines="skip")
+    except Exception as exc:
+        preview = " | ".join(lines[header_idx:header_idx + 4])[:300]
+        raise ValueError(f"Could not parse Stooq CSV for {ticker}. Last error: {exc}. Preview: {preview}")
+
+    if df is None or df.empty:
+        raise ValueError(f"Stooq fallback returned an empty parsed frame for {ticker}.")
+
+    normalised = {str(c).strip().lower(): c for c in df.columns}
+    date_col = normalised.get("date")
+    close_col = normalised.get("close")
+    if date_col is None or close_col is None:
+        raise ValueError(f"Stooq parsed frame for {ticker} is missing Date/Close columns: {list(df.columns)}")
+
+    out = df[[date_col, close_col]].copy()
+    out.columns = ["Date", "Close"]
+    return out
+
+
 def _download_single_stooq_price(
     ticker: str,
     *,
@@ -125,12 +173,17 @@ def _download_single_stooq_price(
     query = urllib.parse.urlencode({"s": symbol, "i": "d", "d1": d1, "d2": d2})
     url = f"https://stooq.com/q/d/l/?{query}"
 
-    with urllib.request.urlopen(url, timeout=float(STOOQ_TIMEOUT_SECONDS)) as response:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; LifeBudgetMicro/1.0; +https://streamlit.app)",
+            "Accept": "text/csv,text/plain,*/*",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=float(STOOQ_TIMEOUT_SECONDS)) as response:
         raw = response.read()
 
-    df = pd.read_csv(BytesIO(raw))
-    if df is None or df.empty or "Date" not in df.columns or "Close" not in df.columns:
-        raise ValueError(f"Stooq fallback returned no usable data for {ticker}.")
+    df = _parse_stooq_csv_response(raw, ticker)
 
     out = df[["Date", "Close"]].copy()
     out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
@@ -141,7 +194,6 @@ def _download_single_stooq_price(
 
     ticker_name = str(ticker).strip().upper()
     return pd.DataFrame({ticker_name: out["Close"].to_numpy()}, index=out["Date"])
-
 
 def _download_stooq_price_panel(
     tickers: Iterable[str],
