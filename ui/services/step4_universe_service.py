@@ -722,17 +722,8 @@ def validate_universe_inputs(universe_size: Any, strategy_name: Any) -> Tuple[in
         size_value = int(universe_size)
     except Exception:
         size_value = 25
-
-    # Canonical UI sizes remain 12/25/50/75/100/150/250, but Step 5's
-    # universe-size optimisation can promote an intermediate, already-tested
-    # size such as 36, 44, or 47. Preserve those safe intermediate values
-    # instead of collapsing them back to 25, otherwise the promoted result and
-    # Step 4 state drift apart after Apply.
-    max_supported = max(UNIVERSE_SIZES) if UNIVERSE_SIZES else 250
-    if size_value <= 0:
+    if size_value not in UNIVERSE_SIZES:
         size_value = 25
-    size_value = int(max(1, min(max_supported, size_value)))
-
     strategy_value = str(strategy_name or UNIVERSE_STRATEGY_CORE)
     allowed = allowed_universe_strategies_for_size(size_value)
     if strategy_value not in allowed:
