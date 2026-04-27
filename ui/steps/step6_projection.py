@@ -238,6 +238,24 @@ def _format_currency(value: float, decimals: int = 0) -> str:
     return f"£{value:,.{decimals}f}"
 
 
+def _format_compact_currency(value: Any) -> str:
+    """Compact money labels for narrow metric cards.
+
+    Full values are still shown in tables below; metric cards use this to avoid
+    clipped strings such as "£845,55..." in Streamlit's large-number display.
+    """
+    amount = _safe_float(value, 0.0)
+    sign = "-" if amount < 0 else ""
+    amount = abs(float(amount))
+    if amount >= 1_000_000:
+        return f"{sign}£{amount / 1_000_000:.2f}m"
+    if amount >= 100_000:
+        return f"{sign}£{amount / 1_000:.0f}k"
+    if amount >= 10_000:
+        return f"{sign}£{amount / 1_000:.1f}k"
+    return f"{sign}£{amount:,.0f}"
+
+
 def _format_probability(value: Any) -> str:
     if value is None:
         return "—"
@@ -832,28 +850,37 @@ def _render_investment_step6() -> None:
             st.warning(coherence_status["title"])
 
         st.caption(coherence_status["message"])
-        st.info(
+
+        recommendation_text = (
             "Projection coherence suggestion ({philosophy})\n\n"
             "Recommended:\n"
             "• {mode_label}\n"
             "• {days} synthetic trading days/month\n"
             "• {variation:.2f} daily path variation\n\n"
-            "{rationale}".format(**recommendation)
-        )
+            "{rationale}"
+        ).format(**recommendation)
 
-        if st.button(
-            "Apply recommended projection settings",
-            key="step6_apply_projection_recommendation",
-            use_container_width=False,
-        ):
-            queue_and_rerun(
-                {
-                    "investment_projection_simulation_mode_label": str(recommendation["mode_label"]),
-                    "investment_projection_simulation_granularity": str(recommendation["mode"]),
-                    "investment_projection_daily_steps_per_month": int(recommendation["days"]),
-                    "investment_projection_daily_path_noise_scale": float(recommendation["variation"]),
-                }
+        if coherence_status["status"] == "success":
+            st.info(
+                f"Projection settings already match the recommended {recommendation['philosophy']} profile: "
+                f"{recommendation['mode_label']}, {int(recommendation['days'])} synthetic days/month, "
+                f"and {float(recommendation['variation']):.2f} daily path variation."
             )
+        else:
+            st.info(recommendation_text)
+            if st.button(
+                "Apply recommended projection settings",
+                key="step6_apply_projection_recommendation",
+                use_container_width=False,
+            ):
+                queue_and_rerun(
+                    {
+                        "investment_projection_simulation_mode_label": str(recommendation["mode_label"]),
+                        "investment_projection_simulation_granularity": str(recommendation["mode"]),
+                        "investment_projection_daily_steps_per_month": int(recommendation["days"]),
+                        "investment_projection_daily_path_noise_scale": float(recommendation["variation"]),
+                    }
+                )
 
     compare_enabled = bool(
         st.checkbox(
@@ -994,7 +1021,7 @@ def _render_investment_step6() -> None:
         with top_metrics_1[2]:
             st.metric(
                 "P10–P90 range",
-                f"{_format_currency(metrics['p10_terminal'])} ··· {_format_currency(metrics['p90_terminal'])}",
+                f"{_format_compact_currency(metrics['p10_terminal'])}–{_format_compact_currency(metrics['p90_terminal'])}",
             )
         with top_metrics_1[3]:
             goal_display = "—" if goal_amount <= 0.0 else _format_probability(metrics["goal_probability"])
@@ -1009,6 +1036,11 @@ def _render_investment_step6() -> None:
             st.metric("Expected profit", _format_currency(metrics["expected_profit"]))
         with top_metrics_2[3]:
             st.metric("Loss vs contributions", _format_probability(metrics["loss_probability"]))
+
+        st.caption(
+            "These figures are scenario outputs from historical engine returns, not guaranteed forecasts. "
+            "Use them to compare assumptions and uncertainty rather than as expected real-world outcomes."
+        )
 
         st.caption(
             "Projection source: historical engine OOS returns. Step 6 now reads stored engine returns from "

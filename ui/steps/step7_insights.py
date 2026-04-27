@@ -81,6 +81,20 @@ def _fmt_gbp0(value: Any) -> str:
     return f"£{_safe_float(value, 0.0):,.0f}"
 
 
+def _fmt_gbp_compact(value: Any) -> str:
+    """Compact money labels for narrow Streamlit metric cards."""
+    amount = _safe_float(value, 0.0)
+    sign = "-" if amount < 0 else ""
+    amount = abs(float(amount))
+    if amount >= 1_000_000:
+        return f"{sign}£{amount / 1_000_000:.2f}m"
+    if amount >= 100_000:
+        return f"{sign}£{amount / 1_000:.0f}k"
+    if amount >= 10_000:
+        return f"{sign}£{amount / 1_000:.1f}k"
+    return f"{sign}£{amount:,.0f}"
+
+
 def _fmt_pct_from_fraction(value: Any, decimals: int = 1) -> str:
     return f"{_safe_float(value, 0.0) * 100.0:.{decimals}f}%"
 
@@ -135,9 +149,13 @@ def _render_projection_summary(proj: Dict[str, Any], *, title: str) -> None:
     with c2:
         st.metric("Median", _fmt_gbp0(median))
     with c3:
-        st.metric("Downside / upside", f"{_fmt_gbp0(p10)} · {_fmt_gbp0(p90)}")
+        st.metric("P10–P90", f"{_fmt_gbp_compact(p10)}–{_fmt_gbp_compact(p90)}")
     with c4:
         st.metric("Growth above contributions", _fmt_gbp0(growth))
+
+    st.caption(
+        "Scenario output only: these figures come from the selected simulation assumptions and are not guaranteed forecasts."
+    )
 
 
 def _render_savings_only_insights(proj: Dict[str, Any]) -> None:
@@ -239,25 +257,25 @@ def _render_investing_insights(proj: Dict[str, Any], cash_proj: Dict[str, Any], 
 
     st.markdown("### Strategy interpretation")
     if sharpe >= 1.0:
-        insight_card("Efficiency", "The strategy shows strong risk-adjusted performance.", level="success")
+        insight_card("Efficiency", "This simulated run shows strong historical risk-adjusted behaviour.", level="success")
     elif sharpe >= 0.7:
-        insight_card("Efficiency", "The strategy has reasonable efficiency, but still room to improve.", level="info")
+        insight_card("Efficiency", "This simulated run shows reasonable historical efficiency, with room to improve.", level="info")
     else:
-        insight_card("Efficiency", "The strategy has low risk-adjusted returns.", level="warning")
+        insight_card("Efficiency", "This simulated run shows lower risk-adjusted efficiency under the current assumptions.", level="warning")
 
     if cagr >= 0.10:
-        insight_card("Growth", "The strategy is clearly growth-oriented.", level="success")
+        insight_card("Growth", "This scenario is growth-oriented relative to contributions alone.", level="success")
     elif cagr >= 0.07:
-        insight_card("Growth", "The strategy has a balanced return profile.", level="info")
+        insight_card("Growth", "This scenario has a balanced historical return profile.", level="info")
     else:
-        insight_card("Growth", "The strategy has a lower-return / more defensive profile.", level="warning")
+        insight_card("Growth", "This scenario has a lower-return / more defensive historical profile.", level="warning")
 
     if abs(max_dd) <= 0.12:
-        insight_card("Risk", "Drawdowns are relatively contained.", level="success")
+        insight_card("Risk", "Drawdowns are relatively contained in the historical path.", level="success")
     elif abs(max_dd) <= 0.20:
-        insight_card("Risk", "Drawdowns are moderate and probably tolerable for many users.", level="info")
+        insight_card("Risk", "Drawdowns are moderate in the historical path and may still feel uncomfortable for some users.", level="info")
     else:
-        insight_card("Risk", "Drawdown risk is high and may be psychologically difficult.", level="warning")
+        insight_card("Risk", "Historical drawdown risk is high and may be psychologically difficult.", level="warning")
 
     if proj:
         _render_projection_summary(proj, title="Investment pathway readout")
@@ -281,7 +299,7 @@ def _render_investing_insights(proj: Dict[str, Any], cash_proj: Dict[str, Any], 
         if diff > 0:
             insight_card(
                 "Decision trade-off",
-                "The investing scenario shows higher central terminal wealth, but that upside comes with market uncertainty and drawdown risk.",
+                "In this scenario, the investing path shows higher central terminal wealth, but that upside comes with market uncertainty and drawdown risk.",
                 level="info",
             )
         else:
@@ -300,7 +318,7 @@ def _render_investing_insights(proj: Dict[str, Any], cash_proj: Dict[str, Any], 
         st.write("• Increase growth exposure only if aligned with risk tolerance.")
     if proj and cash_proj:
         st.write("• Review whether the projected gain over cash-only is large enough to justify additional uncertainty.")
-    st.write("• Treat the outputs as scenario comparison, not as a guaranteed forecast.")
+    st.write("• Treat the outputs as scenario comparisons, not guaranteed forecasts.")
 
 
 def render_step_7() -> None:
@@ -404,7 +422,7 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> None:
     if len(positive_rows) == len(valid):
         insight_card(
             "Comparison readout",
-            "Across the tested horizons, the investing pathway has a higher median outcome than savings-only. The key question is whether the extra upside is worth accepting uncertainty and drawdown risk.",
+            "Across the tested horizons, the simulated investing pathway has a higher median outcome than savings-only. The key question is whether the extra upside is worth accepting uncertainty and drawdown risk.",
             level="info",
         )
     elif len(positive_rows) > 0:
@@ -441,7 +459,7 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> None:
     st.markdown("### What this means")
     st.write("• The comparison is fair only because both branches use the same contribution, starting pot, goal and horizons.")
     st.write("• Savings-only is simpler and avoids market volatility, but has limited upside.")
-    st.write("• Investing may improve the median outcome, but introduces uncertainty and potential drawdowns.")
+    st.write("• In the simulated comparison, investing may improve the median outcome, but it introduces uncertainty and potential drawdowns.")
     st.write("• This is a decision-support comparison, not a recommendation to invest.")
 
 
