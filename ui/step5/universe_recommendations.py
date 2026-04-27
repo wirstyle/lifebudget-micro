@@ -63,6 +63,8 @@ UNIVERSE_SKIPPED_LABEL_KEY = "step5_universe_skipped_label_v1"
 UNIVERSE_SKIPPED_RUN_SIGNATURE_KEY = "step5_universe_skipped_run_signature_v1"
 UNIVERSE_SUGGESTION_TIMING_KEY = "step5_universe_suggestion_timing_v1"
 UNIVERSE_RECOMMENDATION_CONTEXT_KEY = "step5_recommended_universe_context_v1"
+UNIVERSE_BASE_PANEL_FOR_SIZE_KEY = "step5_universe_base_panel_for_size_v1"
+UNIVERSE_BASE_PANEL_FOR_SIZE_SIGNATURE_KEY = "step5_universe_base_panel_for_size_signature_v1"
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
 
 
@@ -260,7 +262,12 @@ def _score_perf(perf: dict, philosophy: str) -> float:
         return float((0.45 * sharpe) + (1.20 * cagr) - (0.20 * maxdd) - (0.08 * vol))
     if profile == "defensive":
         return float((0.70 * sharpe) + (0.20 * cagr) - (1.10 * maxdd) - (0.60 * vol))
-    return float((0.55 * sharpe) + (0.50 * cagr) - (0.70 * maxdd) - (0.35 * vol))
+
+    # Balanced universe selection should preserve risk control. This ranking makes
+    # drawdown/volatility damage more expensive, so diversified candidates that
+    # improve Sharpe without worsening MaxDD are less likely to lose to aggressive
+    # candidates with small score gains.
+    return float((0.56 * sharpe) + (0.48 * cagr) - (1.00 * maxdd) - (0.40 * vol))
 
 
 def _acceptance_gate(candidate_perf: dict, current_perf: dict, philosophy: str) -> tuple[bool, str]:
@@ -301,18 +308,34 @@ def _acceptance_gate(candidate_perf: dict, current_perf: dict, philosophy: str) 
         )
         reason = "Growth gate gives more weight to CAGR, while rejecting candidates that damage Sharpe or drawdown too much."
     else:
-        passed = (
+        # Balanced drawdown-aware gate:
+        # - normal accepted candidates must keep MaxDD almost flat (<= +0.75pp)
+        # - candidates that reduce drawdown/volatility can pass with tiny return trade-offs
+        # - a larger drawdown hit is allowed only for a genuinely large Sharpe improvement
+        balanced_core = (
             delta_score > 0.006
-            and delta_sharpe >= -0.030
-            and delta_cagr >= -0.008
-            and delta_dd <= 0.020
-            and delta_vol <= 0.018
-        ) or (
-            delta_sharpe >= 0.055
-            and delta_dd <= 0.020
-            and delta_vol <= 0.020
+            and delta_sharpe >= 0.000
+            and delta_cagr >= -0.006
+            and delta_dd <= 0.0075
+            and delta_vol <= 0.014
         )
-        reason = "Balanced gate looks for a better overall trade-off without materially worsening Sharpe, drawdown, or volatility."
+        balanced_defensive_trade = (
+            (delta_dd <= -0.005 or delta_vol <= -0.008)
+            and delta_sharpe >= -0.012
+            and delta_cagr >= -0.012
+        )
+        balanced_exceptional_sharpe = (
+            delta_score > 0.025
+            and delta_sharpe >= 0.080
+            and delta_cagr >= -0.004
+            and delta_dd <= 0.012
+            and delta_vol <= 0.018
+        )
+        passed = bool(balanced_core or balanced_defensive_trade or balanced_exceptional_sharpe)
+        reason = (
+            "Balanced drawdown-aware gate: rejects candidates that improve score only by taking a materially worse MaxDD; "
+            "favours cleaner Sharpe gains, lower volatility, or lower drawdown."
+        )
 
     return bool(passed), reason
 
@@ -680,6 +703,43 @@ def _run_universe_search(run_result: dict, *, max_candidates: int = 4) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _freeze_timing_for_decision(*, label: str, status: str) -> dict:
+    """Mark the historical universe-composition timing row the user acted on."""
+    timing = _coerce_mapping(st.session_state.get(UNIVERSE_SUGGESTION_TIMING_KEY, {}))
+    if not timing:
+        return {}
+
+    target_label = str(label or "").strip()
+    decision_status = str(status or "").strip() or "recommended"
+    rows: list[dict] = []
+    matched = False
+    for raw in list(timing.get("candidate_seconds", []) or []):
+        row = _coerce_mapping(raw)
+        candidate_name = str(row.get("candidate", "Candidate") or "Candidate")
+        if target_label and candidate_name == target_label:
+            row["status"] = decision_status
+            matched = True
+        rows.append(row)
+
+    if target_label and not matched:
+        rows.insert(0, {"candidate": target_label, "status": decision_status, "seconds": 0.0})
+
+    accepted_count = _safe_int(timing.get("accepted_count", 0), 0)
+    if decision_status in {"applied recommendation", "skipped recommendation", "recommended"}:
+        accepted_count = max(1, accepted_count)
+
+    timing.update(
+        {
+            "candidate_seconds": rows,
+            "accepted_count": accepted_count,
+            "decision_label": target_label,
+            "decision_status": decision_status,
+            "decision_phase": "universe_composition",
+        }
+    )
+    return timing
+
+
 def _normalise_promoted_candidate_result(candidate: dict, cfg_payload: dict) -> dict:
     candidate_map = _coerce_mapping(candidate)
     raw_result = _coerce_mapping(candidate_map.get("raw_result", {}))
@@ -815,6 +875,16 @@ def _apply_candidate(candidate: dict) -> None:
                 UNIVERSE_SUGGESTION_SCOPE_KEY: "",
                 UNIVERSE_APPLIED_SIGNATURE_KEY: run_signature,
                 UNIVERSE_APPLIED_LABEL_KEY: str(candidate_map.get("label", "Universe composition candidate") or "Universe composition candidate"),
+                UNIVERSE_SUGGESTION_TIMING_KEY: _freeze_timing_for_decision(
+                    label=str(candidate_map.get("label", "Universe composition candidate") or "Universe composition candidate"),
+                    status="applied recommendation",
+                ),
+                # Keep the broad pre-apply panel available for Phase 4.
+                # After applying a composition candidate, the visible panel is narrowed
+                # to the promoted assets; size testing may need the original Step 4
+                # candidate pool to evaluate larger/smaller sizes fairly.
+                UNIVERSE_BASE_PANEL_FOR_SIZE_KEY: source_panel if isinstance(source_panel, pd.DataFrame) and not source_panel.empty else candidate_panel,
+                UNIVERSE_BASE_PANEL_FOR_SIZE_SIGNATURE_KEY: run_signature,
                 "step5_universe_apply_message_v1": (
                     f"Universe composition suggestion applied using the rerun-tested candidate result: "
                     f"{candidate_map.get('label', 'Universe composition candidate')}."
@@ -855,6 +925,10 @@ def _skip_current_universe_candidate(scope: str, label: str, run_signature: str)
         UNIVERSE_SKIPPED_SCOPE_KEY: str(scope or ""),
         UNIVERSE_SKIPPED_LABEL_KEY: str(label or "recommended universe"),
         UNIVERSE_SKIPPED_RUN_SIGNATURE_KEY: str(run_signature or ""),
+        UNIVERSE_SUGGESTION_TIMING_KEY: _freeze_timing_for_decision(
+            label=str(label or "recommended universe"),
+            status="skipped recommendation",
+        ),
         "step5_universe_apply_message_v1": (
             f"Universe composition kept unchanged for this run. Skipped recommendation: {label}."
         ),

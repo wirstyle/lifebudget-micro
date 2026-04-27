@@ -402,7 +402,7 @@ def _build_scope(run_result: dict) -> str:
     })
 
 
-def _run_preset_search(run_result: dict, *, max_candidates: int = 2) -> dict:
+def _run_preset_search(run_result: dict, *, max_candidates: int = 4) -> dict:
     run_map = _coerce_mapping(run_result)
     current_perf = _normalise_perf(run_map.get("performance_summary", {}))
     simple_current = _current_simple_state()
@@ -443,7 +443,9 @@ def _run_preset_search(run_result: dict, *, max_candidates: int = 2) -> dict:
             "strategy_template": template,
             "style_preset": style,
             "slider_defaults": dict(defaults),
+            "simple_cfg": dict(simple_candidate),
             "cfg_payload": dict(cfg_payload),
+            "resolved_cfg": dict(cfg_payload),
             "performance_summary": dict(perf),
             # Keep the real candidate engine output so Apply can promote the already
             # rerun-tested result instead of forcing the user to run the same candidate
@@ -527,10 +529,51 @@ def _clear_auto_opt_state_patch() -> dict:
     return patch
 
 
+def _freeze_timing_for_decision(*, label: str, status: str) -> dict:
+    """Mark the historical preset timing row that the user acted on."""
+    timing = _coerce_mapping(st.session_state.get(PRESET_SUGGESTION_TIMING_KEY, {}))
+    if not timing:
+        return {}
+
+    target_label = str(label or "").strip()
+    decision_status = str(status or "").strip() or "recommended"
+    rows: list[dict] = []
+    matched = False
+    for raw in list(timing.get("candidate_seconds", []) or []):
+        row = _coerce_mapping(raw)
+        candidate_name = str(row.get("candidate", "Candidate") or "Candidate")
+        if target_label and candidate_name == target_label:
+            row["status"] = decision_status
+            matched = True
+        rows.append(row)
+
+    if target_label and not matched:
+        rows.insert(0, {"candidate": target_label, "status": decision_status, "seconds": 0.0})
+
+    accepted_count = _safe_int(timing.get("accepted_count", 0), 0)
+    if decision_status in {"applied recommendation", "skipped recommendation", "recommended"}:
+        accepted_count = max(1, accepted_count)
+
+    timing.update(
+        {
+            "candidate_seconds": rows,
+            "accepted_count": accepted_count,
+            "decision_label": target_label,
+            "decision_status": decision_status,
+            "decision_phase": "preset",
+        }
+    )
+    return timing
+
+
 def _skip_current_preset_candidate(scope: str, label: str = "current preset") -> None:
     patch = {
         PRESET_SKIPPED_SCOPE_KEY: str(scope or ""),
         PRESET_SKIPPED_LABEL_KEY: str(label or "current preset"),
+        PRESET_SUGGESTION_TIMING_KEY: _freeze_timing_for_decision(
+            label=str(label or "current preset"),
+            status="skipped recommendation",
+        ),
     }
     patch.update(_clear_auto_opt_state_patch())
 
@@ -696,6 +739,10 @@ def _apply_candidate(candidate: dict) -> None:
                 **_clear_auto_opt_state_patch(),
                 PRESET_APPLIED_SIGNATURE_KEY: run_signature,
                 PRESET_APPLIED_LABEL_KEY: str(candidate_map.get("label", "Preset candidate") or "Preset candidate"),
+                PRESET_SUGGESTION_TIMING_KEY: _freeze_timing_for_decision(
+                    label=str(candidate_map.get("label", "Preset candidate") or "Preset candidate"),
+                    status="applied recommendation",
+                ),
                 "step5_preset_apply_message_v2": (
                     f"Preset suggestion applied using the rerun-tested candidate result: "
                     f"{candidate_map.get('label', 'Preset candidate')}."
@@ -771,6 +818,87 @@ def _candidate_context_caption(item: dict) -> str:
     return "Tests another philosophy-approved preset combination."
 
 
+
+def _format_float(value: Any, decimals: int = 2) -> str:
+    try:
+        return f"{float(value):.{decimals}f}"
+    except Exception:
+        return "—"
+
+
+def _preset_setup_row(item: dict, *, label: str | None = None) -> dict:
+    """Compact diagnostic row describing what a preset candidate actually tested."""
+    item_map = _coerce_mapping(item)
+    simple_cfg = _coerce_mapping(item_map.get("simple_cfg", {}))
+    cfg = _coerce_mapping(item_map.get("cfg_payload", item_map.get("resolved_cfg", {})))
+    if not simple_cfg:
+        simple_cfg = _build_simple_cfg(
+            philosophy=str(item_map.get("philosophy", st.session_state.get("investment_philosophy", "Balanced")) or "Balanced"),
+            template=str(item_map.get("strategy_template", st.session_state.get("step5_template", "Balanced Risk-Controlled")) or "Balanced Risk-Controlled"),
+            style=str(item_map.get("style_preset", st.session_state.get("step5_style", "Balanced")) or "Balanced"),
+            slider_values=_coerce_mapping(item_map.get("slider_defaults", {})),
+        )
+    return {
+        "candidate": str(label or item_map.get("label", "Current setup") or "Current setup"),
+        "template": str(item_map.get("strategy_template", simple_cfg.get("template", "—")) or "—"),
+        "style": str(item_map.get("style_preset", simple_cfg.get("preset", "—")) or "—"),
+        "family": str(item_map.get("family", "current") or "current"),
+        "combo": str(simple_cfg.get("combo_status", item_map.get("governance_state", "—")) or "—"),
+        "risk": _format_float(simple_cfg.get("risk_appetite"), 2),
+        "drawdown protection": _format_float(simple_cfg.get("drawdown_protection"), 2),
+        "diversification": _format_float(simple_cfg.get("diversification_vs_concentration"), 2),
+        "stability": _format_float(simple_cfg.get("stability_vs_responsiveness"), 2),
+        "confidence": _format_float(simple_cfg.get("confidence_in_signal"), 2),
+        "overlay intensity": _format_float(simple_cfg.get("overlay_intensity"), 2),
+        "top_k": _safe_int(cfg.get("top_k", 0), 0),
+        "lookback_mu": _safe_int(cfg.get("lookback_mu", 0), 0),
+        "lookback_sigma": _safe_int(cfg.get("lookback_sigma", 0), 0),
+        "temperature": _format_float(cfg.get("temperature"), 3),
+        "weight_shrink": _format_float(cfg.get("weight_shrink"), 2),
+        "inertia": _format_float(cfg.get("inertia"), 2),
+        "signal_mode": str(cfg.get("signal_mode", "—") or "—"),
+        "overlay": str(cfg.get("overlay_label", "—") or "—"),
+        "bucket": str(cfg.get("universe_bucket", "—") or "—"),
+    }
+
+
+def _preset_setup_table(evaluations: list[dict]) -> pd.DataFrame:
+    rows = [_preset_setup_row(_coerce_mapping(item)) for item in list(evaluations or [])]
+    return pd.DataFrame(rows)
+
+
+def _current_preset_setup_row(run_result: dict) -> pd.DataFrame:
+    run_map = _coerce_mapping(run_result)
+    simple = _current_simple_state()
+    cfg = _coerce_mapping(run_map.get("config", run_map.get("cfg_final", st.session_state.get("step5_last_cfg_final", {}))))
+    if not cfg:
+        cfg, _gov = _resolve_candidate_cfg_final(simple)
+    item = {
+        "label": "Current baseline",
+        "family": "current",
+        "strategy_template": simple.get("template", "—"),
+        "style_preset": simple.get("preset", "—"),
+        "simple_cfg": simple,
+        "cfg_payload": cfg,
+    }
+    return pd.DataFrame([_preset_setup_row(item, label="Current baseline")])
+
+
+def _render_preset_setup_diagnostics(run_result: dict, evaluations: list[dict]) -> None:
+    st.caption(
+        "These details show the actual preset posture and engine configuration tested for each candidate. "
+        "This helps explain why a preset may improve Sharpe, CAGR, drawdown, or volatility differently."
+    )
+    current_df = _current_preset_setup_row(run_result)
+    if not current_df.empty:
+        st.markdown("**Current baseline setup**")
+        st.dataframe(current_df, use_container_width=True, hide_index=True)
+    setup_df = _preset_setup_table(evaluations)
+    if not setup_df.empty:
+        st.markdown("**Tested preset setup details**")
+        st.dataframe(setup_df, use_container_width=True, hide_index=True)
+
+
 def _render_recommended_candidate(candidate: dict, current_perf: dict) -> None:
     """Render only the best accepted preset as the actionable recommendation."""
     item = _coerce_mapping(candidate)
@@ -811,7 +939,66 @@ def _render_recommended_candidate(candidate: dict, current_perf: dict) -> None:
             f"template={item.get('strategy_template', '—')} · style={item.get('style_preset', '—')} · "
             f"governance={item.get('governance_state', '—')} · score_delta={_safe_float(item.get('score_delta'), 0.0):+.3f}"
         )
+        detail_df = pd.DataFrame([_preset_setup_row(item)])
+        if not detail_df.empty:
+            st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
+
+
+def _render_tested_preset_choice(scope: str, evaluations: list[dict]) -> None:
+    """Let the user apply any preset candidate that has already been engine-tested."""
+    candidates = [_coerce_mapping(x) for x in list(evaluations or []) if _coerce_mapping(x).get("raw_result")]
+    if not candidates:
+        return
+
+    st.markdown("### Choose from tested preset candidates")
+    st.caption(
+        "These options have already been tested by the real engine. The automatic gate is conservative; "
+        "you can still apply a tested candidate manually if its trade-off fits your goal."
+    )
+
+    def _option_label(item: dict) -> str:
+        perf = _normalise_perf(item.get("performance_summary", {}))
+        accepted = bool(item.get("accepted", False))
+        status = "passed gate" if accepted else "not selected"
+        return (
+            f"{item.get('label', 'Preset candidate')} — {status} · "
+            f"CAGR {_format_pct(perf.get('cagr', 0.0))} · "
+            f"MaxDD -{100.0 * abs(perf.get('max_drawdown', 0.0)):.2f}% · "
+            f"Sharpe {perf.get('sharpe', 0.0):.2f}"
+        )
+
+    key_suffix = _hash_scope({"scope": scope, "labels": [str(x.get("label", "")) for x in candidates]})
+    labels = [_option_label(x) for x in candidates]
+    selected_label = st.selectbox(
+        "Select a tested preset to apply",
+        labels,
+        key=f"step5_select_tested_preset_candidate_{key_suffix}",
+    )
+    selected_idx = labels.index(selected_label) if selected_label in labels else 0
+    selected = candidates[selected_idx]
+
+    if not bool(selected.get("accepted", False)):
+        st.warning(
+            "This candidate did not pass the automatic acceptance gate. Applying it is allowed because it was rerun-tested, "
+            "but it may worsen one or more risk metrics."
+        )
+
+    left, right = st.columns(2)
+    with left:
+        if st.button(
+            "Apply selected tested preset",
+            key=f"step5_apply_selected_tested_preset_{key_suffix}",
+            use_container_width=True,
+        ):
+            _apply_candidate(selected)
+    with right:
+        if st.button(
+            "Keep current preset and continue",
+            key=f"step5_keep_current_preset_after_choice_{key_suffix}",
+            use_container_width=True,
+        ):
+            _skip_current_preset_candidate(scope, "current preset")
 
 def render_preset_improvement(run_result: dict) -> dict:
     """Render the first restored Step 5 preset-improvement assistant.
@@ -844,9 +1031,7 @@ def render_preset_improvement(run_result: dict) -> dict:
             1. **Strategy preset suggestion** — tests whether a nearby strategy style gives a better trade-off.
             2. **Engine tuning suggestion** — keeps the same Step 4 universe and strategy preset, but adjusts small technical engine knobs.
             3. **Universe composition suggestion** — keeps the same preset, technical config, and size, but tests whether a different asset mix improves the result.
-
-            **Planned next**
-            4. **Universe size suggestion** — tests whether a smaller or larger universe works better.
+            4. **Universe size suggestion** — keeps the same preset and technical config, but tests whether a smaller or larger universe works better.
             """
         )
         st.caption(
@@ -856,6 +1041,10 @@ def render_preset_improvement(run_result: dict) -> dict:
     st.caption(
         "Phase 1 tests nearby strategy presets after the real engine run. "
         "This does not change the Step 4 universe, assets, size, or market-data panel."
+    )
+    st.caption(
+        "Diagnostic mode: up to four philosophy-approved preset combinations are tested so the setup differences are visible, "
+        "not just the final recommendation."
     )
 
     # After applying an accepted preset we keep this section intentionally quiet:
@@ -893,7 +1082,7 @@ def render_preset_improvement(run_result: dict) -> dict:
     # choice directly.
     if saved_scope != scope or not evaluations:
         with st.spinner("Testing nearby preset alternatives with the real engine..."):
-            payload = _run_preset_search(run_map, max_candidates=2)
+            payload = _run_preset_search(run_map, max_candidates=4)
         st.session_state[PRESET_SUGGESTION_STATE_KEY] = payload
         st.session_state[PRESET_SUGGESTION_SCOPE_KEY] = str(payload.get("scope", scope))
         st.session_state[PRESET_SUGGESTION_TIMING_KEY] = _coerce_mapping(payload.get("timing_summary", {}))
@@ -910,13 +1099,16 @@ def render_preset_improvement(run_result: dict) -> dict:
     skipped_label = str(st.session_state.get(PRESET_SKIPPED_LABEL_KEY, "") or "")
     preset_was_skipped = bool(skipped_scope and skipped_scope == scope)
 
-    if not accepted_items:
+    if not accepted_items and preset_was_skipped:
+        st.info("Current preset kept for this run. Engine tuning can continue on the existing strategy setup.")
+        flow_state.update({"status": "skipped", "has_recommendation": False, "blocks_auto_opt": False})
+    elif not accepted_items:
         st.success("Current preset loop has converged: no tested preset materially improved this run.")
         st.caption(
-            "The tested alternatives are kept below for transparency, but none is offered as an action because "
-            "the acceptance gate did not find a better trade-off. Engine tuning can continue on the current preset."
+            "The tested alternatives are kept below for transparency. You can either keep the current preset or manually apply "
+            "one of the rerun-tested candidates below."
         )
-        flow_state.update({"status": "converged", "has_recommendation": False})
+        flow_state.update({"status": "pending_manual_choice", "has_recommendation": False, "blocks_auto_opt": True})
     elif preset_was_skipped:
         st.info(
             "Current preset kept for this run. Engine tuning can now test small technical variations on the existing strategy setup."
@@ -930,8 +1122,8 @@ def render_preset_improvement(run_result: dict) -> dict:
         st.success("Recommended preset improvement found. The best accepted candidate is shown below.")
         _render_recommended_candidate(best_candidate, perf)
         st.caption(
-            "The table below shows every preset candidate tested by the engine. Only the best accepted candidate "
-            "is offered as the main action; rejected candidates are shown for transparency, not as recommendations."
+            "The table below shows every preset candidate tested by the engine. The automatic recommendation is shown above, "
+            "and you can also manually apply any tested candidate below."
         )
 
     with st.expander("Preset test diagnostics", expanded=False):
@@ -942,15 +1134,8 @@ def render_preset_improvement(run_result: dict) -> dict:
         if not table.empty:
             st.dataframe(table, use_container_width=True, hide_index=True)
 
-    if accepted_items and not preset_was_skipped:
-        best_candidate = accepted_items[0]
-        left, right = st.columns(2)
-        with left:
-            if st.button("Apply recommended preset", key="step5_apply_best_preset_candidate_v3", use_container_width=True):
-                _apply_candidate(best_candidate)
-        with right:
-            if st.button("Keep current preset and continue", key="step5_skip_best_preset_candidate_v1", use_container_width=True):
-                _skip_current_preset_candidate(scope, str(best_candidate.get("label", "recommended preset") or "recommended preset"))
+    if not preset_was_skipped:
+        _render_tested_preset_choice(scope, evaluations)
 
     return flow_state
 

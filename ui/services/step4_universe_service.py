@@ -336,6 +336,39 @@ INVESTMENT_PHILOSOPHY_BUNDLES = {
     },
 }
 
+
+# Step 4 prepares a broader data panel than the primary displayed universe so
+# Step 5 can run a bounded size search without downloading new data. These caps
+# are intentionally smaller than the full "show all sizes" research space.
+PHILOSOPHY_SIZE_TEST_CAPS = {
+    "Defensive": 25,
+    "Balanced": 50,
+    "Growth": 100,
+}
+
+
+def philosophy_size_test_cap(philosophy: Any) -> int:
+    philosophy_name = str(philosophy or "Balanced")
+    return int(PHILOSOPHY_SIZE_TEST_CAPS.get(philosophy_name, PHILOSOPHY_SIZE_TEST_CAPS["Balanced"]))
+
+
+def resolve_data_prep_pool_size(philosophy: Any, universe_size: Any) -> int:
+    """Return the Step 4 data-preparation target size.
+
+    The primary universe can stay at the philosophy default, e.g. Balanced=25,
+    while Step 4 prepares enough validated assets to let Step 5 test the next
+    philosophy-capped size band, e.g. Balanced up to 50. If the user manually
+    selects a larger universe, preserve that larger request rather than shrinking
+    the panel.
+    """
+    try:
+        current_size = int(universe_size)
+    except Exception:
+        current_size = 25
+    current_size = max(1, current_size)
+    cap = philosophy_size_test_cap(philosophy)
+    return int(max(current_size, cap))
+
 UNIVERSE_ALLOWED_STRATEGIES_BY_SIZE = {
     12: [UNIVERSE_STRATEGY_CORE, UNIVERSE_STRATEGY_EQUITY, UNIVERSE_STRATEGY_DEFENSIVE, UNIVERSE_STRATEGY_REAL_ASSETS, UNIVERSE_STRATEGY_QUALITY, UNIVERSE_STRATEGY_LOW_VOL, UNIVERSE_STRATEGY_LONG_HISTORY],
     25: STRATEGIES,
@@ -675,6 +708,8 @@ def build_universe_size_status(philosophy: Any, universe_size: Any) -> Dict[str,
         status = "Ideal default"
     elif size_value in recommended:
         status = "Recommended subset"
+    elif size_value not in UNIVERSE_SIZES:
+        status = "Optimised intermediate size"
     else:
         status = "Outside recommended subset"
     return {
@@ -722,8 +757,13 @@ def validate_universe_inputs(universe_size: Any, strategy_name: Any) -> Tuple[in
         size_value = int(universe_size)
     except Exception:
         size_value = 25
-    if size_value not in UNIVERSE_SIZES:
+    # Canonical UI sizes remain the normal path, but Step 5 size optimisation can
+    # promote an intermediate size (for example 30/34/37). Preserve those values
+    # instead of collapsing them back to 25, while still clamping obviously unsafe
+    # input.
+    if size_value <= 0:
         size_value = 25
+    size_value = max(1, min(int(size_value), max(UNIVERSE_SIZES) if UNIVERSE_SIZES else 250))
     strategy_value = str(strategy_name or UNIVERSE_STRATEGY_CORE)
     allowed = allowed_universe_strategies_for_size(size_value)
     if strategy_value not in allowed:
@@ -739,28 +779,61 @@ def parse_custom_assets(raw_text: Any) -> List[str]:
 def build_generated_universe(universe_size: Any, strategy_name: Any) -> List[str]:
     size_value, strategy_value = validate_universe_inputs(universe_size, strategy_name)
     seed = list(STRATEGY_SEEDS.get(strategy_value, STRATEGY_SEEDS[UNIVERSE_STRATEGY_CORE]))
-    return _unique_preserve_order(seed)[:size_value]
+    if int(size_value) in set(UNIVERSE_SIZES):
+        return _unique_preserve_order(seed)[:size_value]
+
+    # Intermediate sizes are used only when Step 5 promotes an optimised size.
+    # Use the broader candidate pool so a size like 34/37 can be reproduced by
+    # Step 4 instead of silently falling back to the nearest canonical default.
+    pool = _unique_preserve_order(seed)
+    if len(pool) < int(size_value):
+        fallback_union: List[str] = []
+        for strategy_seed in STRATEGY_SEEDS.values():
+            fallback_union.extend(list(strategy_seed or []))
+        pool = _unique_preserve_order(pool + fallback_union)
+    return pool[:size_value]
 
 
-def build_strategy_candidate_pool(universe_size: Any, strategy_name: Any) -> List[str]:
+def build_strategy_candidate_pool(
+    universe_size: Any,
+    strategy_name: Any,
+    philosophy: Any | None = None,
+    pool_target_size: Any | None = None,
+) -> List[str]:
     """
-    Build a candidate pool for Step 4 / Step 5 universe-size search.
+    Build the broader Step 4 candidate/data-preparation pool.
 
-    Important:
-    - canonical UI sizes remain validated elsewhere (12/25/50/75/...)
-    - this helper must still behave sensibly when the optimisation layer passes
-      intermediate refinement sizes (for example 44 / 47 / 53 / 56)
-    - we therefore avoid collapsing non-canonical refinement sizes back to 25
-      via validate_universe_inputs()
+    The displayed primary universe stays at ``universe_size``. The data panel can
+    be wider, capped by philosophy, so Step 5 can test a small number of size
+    alternatives without rebuilding/downloading a new panel:
+    - Defensive: primary 12, prepare up to 25
+    - Balanced: primary 25, prepare up to 50
+    - Growth: primary 50, prepare up to 100
 
-    Strategy validation still follows the current size bucket rules, but the
-    requested size itself is preserved as the real target for the candidate pool.
+    Intermediate optimisation sizes (for example 34 / 44 / 88) are preserved and
+    reproduced from this broader pool instead of being collapsed back to a
+    canonical UI size.
     """
     try:
         requested_size = int(universe_size)
     except Exception:
         requested_size = 25
     requested_size = max(1, requested_size)
+
+    if philosophy is None:
+        try:
+            philosophy = get_canonical_investment_philosophy()
+        except Exception:
+            philosophy = "Balanced"
+
+    if pool_target_size is None:
+        target_size = resolve_data_prep_pool_size(philosophy, requested_size)
+    else:
+        try:
+            target_size = int(pool_target_size)
+        except Exception:
+            target_size = resolve_data_prep_pool_size(philosophy, requested_size)
+    target_size = max(requested_size, max(1, int(target_size)))
 
     _canonical_size, strategy_value = validate_universe_inputs(requested_size, strategy_name)
 
@@ -773,10 +846,7 @@ def build_strategy_candidate_pool(universe_size: Any, strategy_name: Any) -> Lis
     if not pool_source:
         return []
 
-    extra = max(12, requested_size // 2)
-    target_size = requested_size + extra
-    return pool_source[: min(len(pool_source), target_size)]
-
+    return pool_source[: min(len(pool_source), int(target_size))]
 
 def resolve_universe_selection(universe_size: Any, strategy_name: Any, custom_enabled: bool, custom_text: Any) -> Tuple[List[str], str]:
     generated = build_generated_universe(universe_size, strategy_name)
@@ -872,7 +942,7 @@ def sync_step4_state(*, philosophy: str, universe_size: int, strategy_name: str,
     st.session_state[UNIVERSE_CUSTOM_ENABLED_SOURCE] = str(selection_source)
     st.session_state[LAST_USED_UNIVERSE_ASSETS] = list(selected_assets)
     st.session_state[RECOMMENDED_UNIVERSE_ASSETS] = list(selected_assets)
-    st.session_state[LAST_RECOMMENDATION_CANDIDATE_ASSETS] = list(build_strategy_candidate_pool(universe_size, strategy_name))
+    st.session_state[LAST_RECOMMENDATION_CANDIDATE_ASSETS] = list(build_strategy_candidate_pool(universe_size, strategy_name, philosophy))
 
 
 def build_bridge_explanation(context: dict) -> str:
@@ -1158,7 +1228,7 @@ def build_step4_universe_payload_from_state() -> Dict[str, Any]:
         "custom_text": str(st.session_state.get(CUSTOM_UNIVERSE_TEXT, "") or ""),
         "selection_source": str(selection_source),
         "selected_assets": list(selected_assets),
-        "candidate_assets": build_strategy_candidate_pool(size_value, strategy_value),
+        "candidate_assets": build_strategy_candidate_pool(size_value, strategy_value, get_canonical_investment_philosophy()),
         "philosophy": get_canonical_investment_philosophy(),
         "style_preset": str(st.session_state.get(UNIVERSE_SIMPLE_STYLE_PRESET, "Balanced") or "Balanced"),
         "strategy_template": str(st.session_state.get(UNIVERSE_SIMPLE_STRATEGY_TEMPLATE, "Balanced Risk-Controlled") or "Balanced Risk-Controlled"),

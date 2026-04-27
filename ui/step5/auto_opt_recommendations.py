@@ -235,7 +235,12 @@ def _score_perf(perf: dict, philosophy: str) -> float:
         return float((0.45 * sharpe) + (1.20 * cagr) - (0.20 * maxdd) - (0.08 * vol))
     if profile == "defensive":
         return float((0.70 * sharpe) + (0.20 * cagr) - (1.10 * maxdd) - (0.60 * vol))
-    return float((0.55 * sharpe) + (0.50 * cagr) - (0.70 * maxdd) - (0.35 * vol))
+
+    # Balanced should not behave like a light-growth profile. A small Sharpe/CAGR
+    # improvement is not enough if the candidate makes the worst drawdown clearly
+    # worse. The heavier MaxDD penalty helps the ranking prefer candidates that
+    # preserve the risk-control character of the Balanced philosophy.
+    return float((0.56 * sharpe) + (0.48 * cagr) - (0.95 * maxdd) - (0.38 * vol))
 
 
 def _acceptance_gate(candidate_perf: dict, current_perf: dict, philosophy: str) -> tuple[bool, str]:
@@ -276,18 +281,34 @@ def _acceptance_gate(candidate_perf: dict, current_perf: dict, philosophy: str) 
         )
         reason = "Growth gate gives more weight to CAGR, while rejecting candidates that damage Sharpe or drawdown too much."
     else:
-        passed = (
-            delta_score > 0.004
-            and delta_sharpe >= -0.030
-            and delta_cagr >= -0.008
-            and delta_dd <= 0.020
-            and delta_vol <= 0.015
-        ) or (
-            delta_sharpe >= 0.050
-            and delta_dd <= 0.020
-            and delta_vol <= 0.020
+        # Balanced drawdown-aware gate:
+        # - normal improvements must keep MaxDD almost flat (<= +0.75pp)
+        # - drawdown/volatility-reducing candidates may pass even with tiny Sharpe/CAGR trade-offs
+        # - only a very large Sharpe improvement can justify a slightly larger drawdown hit
+        balanced_core = (
+            delta_score > 0.005
+            and delta_sharpe >= 0.000
+            and delta_cagr >= -0.004
+            and delta_dd <= 0.0075
+            and delta_vol <= 0.012
         )
-        reason = "Balanced gate looks for a better overall trade-off without materially worsening Sharpe, drawdown, or volatility."
+        balanced_defensive_trade = (
+            (delta_dd <= -0.005 or delta_vol <= -0.006)
+            and delta_sharpe >= -0.010
+            and delta_cagr >= -0.010
+        )
+        balanced_exceptional_sharpe = (
+            delta_score > 0.020
+            and delta_sharpe >= 0.080
+            and delta_cagr >= -0.002
+            and delta_dd <= 0.012
+            and delta_vol <= 0.015
+        )
+        passed = bool(balanced_core or balanced_defensive_trade or balanced_exceptional_sharpe)
+        reason = (
+            "Balanced drawdown-aware gate: rejects small Sharpe/CAGR improvements when MaxDD worsens too much; "
+            "accepts only cleaner risk-adjusted gains or clear drawdown/volatility reductions."
+        )
 
     return bool(passed), reason
 
@@ -572,6 +593,43 @@ def _run_auto_opt_search(run_result: dict, *, max_candidates: int = 3) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _freeze_timing_for_decision(*, label: str, status: str) -> dict:
+    """Mark the historical engine-tuning timing row that the user acted on."""
+    timing = _coerce_mapping(st.session_state.get(AUTO_OPT_SUGGESTION_TIMING_KEY, {}))
+    if not timing:
+        return {}
+
+    target_label = str(label or "").strip()
+    decision_status = str(status or "").strip() or "recommended"
+    rows: list[dict] = []
+    matched = False
+    for raw in list(timing.get("candidate_seconds", []) or []):
+        row = _coerce_mapping(raw)
+        candidate_name = str(row.get("candidate", "Candidate") or "Candidate")
+        if target_label and candidate_name == target_label:
+            row["status"] = decision_status
+            matched = True
+        rows.append(row)
+
+    if target_label and not matched:
+        rows.insert(0, {"candidate": target_label, "status": decision_status, "seconds": 0.0})
+
+    accepted_count = _safe_int(timing.get("accepted_count", 0), 0)
+    if decision_status in {"applied recommendation", "skipped recommendation", "recommended"}:
+        accepted_count = max(1, accepted_count)
+
+    timing.update(
+        {
+            "candidate_seconds": rows,
+            "accepted_count": accepted_count,
+            "decision_label": target_label,
+            "decision_status": decision_status,
+            "decision_phase": "engine_tuning",
+        }
+    )
+    return timing
+
+
 def _build_apply_patch(cfg_payload: Any) -> dict:
     payload = _coerce_cfg_payload(cfg_payload)
     return {FIELD_TO_WIDGET_KEY[field]: payload[field] for field in SAFE_TUNING_FIELDS if field in payload and field in FIELD_TO_WIDGET_KEY}
@@ -661,6 +719,10 @@ def _apply_candidate(candidate: dict) -> None:
                 AUTO_OPT_SUGGESTION_SCOPE_KEY: "",
                 AUTO_OPT_APPLIED_SIGNATURE_KEY: run_signature,
                 AUTO_OPT_APPLIED_LABEL_KEY: str(candidate_map.get("label", "Technical tuning candidate") or "Technical tuning candidate"),
+                AUTO_OPT_SUGGESTION_TIMING_KEY: _freeze_timing_for_decision(
+                    label=str(candidate_map.get("label", "Technical tuning candidate") or "Technical tuning candidate"),
+                    status="applied recommendation",
+                ),
                 "step5_auto_opt_apply_message_v1": (
                     f"Engine tuning suggestion applied using the rerun-tested candidate result: "
                     f"{candidate_map.get('label', 'Technical tuning candidate')}."
@@ -701,6 +763,10 @@ def _skip_current_auto_opt_candidate(scope: str, label: str, run_signature: str)
         AUTO_OPT_SKIPPED_SCOPE_KEY: str(scope or ""),
         AUTO_OPT_SKIPPED_LABEL_KEY: str(label or "recommended tuning"),
         AUTO_OPT_SKIPPED_RUN_SIGNATURE_KEY: str(run_signature or ""),
+        AUTO_OPT_SUGGESTION_TIMING_KEY: _freeze_timing_for_decision(
+            label=str(label or "recommended tuning"),
+            status="skipped recommendation",
+        ),
         "step5_auto_opt_apply_message_v1": (
             f"Engine tuning kept unchanged for this run. Skipped recommendation: {label}."
         ),
@@ -741,6 +807,7 @@ def _candidate_table(evaluations: list[dict], current_perf: dict) -> pd.DataFram
                 "Sharpe": f"{perf.get('sharpe', 0.0):.2f}",
                 "Δ Sharpe": f"{perf.get('sharpe', 0.0) - base.get('sharpe', 0.0):+.2f}",
                 "Δ Score": f"{_safe_float(item.get('score_delta'), 0.0):+.3f}",
+                "gate": str(item.get("gate_reason", "") or ""),
                 "Seconds": f"{_safe_float(item.get('elapsed_sec'), 0.0):.2f}s",
             }
         )

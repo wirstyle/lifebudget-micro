@@ -8,7 +8,12 @@ import streamlit.components.v1 as components
 import pandas as pd
 
 from ui.step5.run_panel import clear_retired_step5_state
-from ui.step5.preset_recommendations import render_preset_improvement
+from ui.step5.preset_recommendations import (
+    PRESET_APPLIED_LABEL_KEY,
+    PRESET_SKIPPED_LABEL_KEY,
+    PRESET_SUGGESTION_STATE_KEY,
+    render_preset_improvement,
+)
 from ui.step5.auto_opt_recommendations import (
     AUTO_OPT_APPLIED_LABEL_KEY,
     AUTO_OPT_APPLIED_SIGNATURE_KEY,
@@ -30,6 +35,17 @@ from ui.step5.universe_recommendations import (
     UNIVERSE_SUGGESTION_STATE_KEY,
     UNIVERSE_SUGGESTION_TIMING_KEY,
     render_universe_improvement,
+)
+from ui.step5.size_recommendations import (
+    UNIVERSE_SIZE_APPLIED_LABEL_KEY,
+    UNIVERSE_SIZE_APPLIED_SIGNATURE_KEY,
+    UNIVERSE_SIZE_SKIPPED_LABEL_KEY,
+    UNIVERSE_SIZE_SKIPPED_RUN_SIGNATURE_KEY,
+    UNIVERSE_SIZE_SKIPPED_SCOPE_KEY,
+    UNIVERSE_SIZE_SUGGESTION_SCOPE_KEY,
+    UNIVERSE_SIZE_SUGGESTION_STATE_KEY,
+    UNIVERSE_SIZE_SUGGESTION_TIMING_KEY,
+    render_universe_size_improvement,
 )
 from ui.step5.reliability_assessment import render_result_reliability_assessment, render_start_date_robustness_timing_block
 
@@ -100,13 +116,32 @@ def _pct(v: float) -> str:
 
 def _display_candidate_status(value: Any) -> str:
     raw = str(value or "").strip().lower().replace("_", " ")
+    if raw in {"applied", "applied recommendation", "accepted applied"}:
+        return "applied recommendation"
+    if raw in {"skipped", "skipped recommendation", "kept current", "kept current setup"}:
+        return "skipped recommendation"
     if raw in {"recommended", "selected", "best"}:
         return "recommended"
     if raw in {"accepted", "passed", "passed gate", "pass gate"}:
         return "passed gate"
+    if raw in {"not testable", "skipped not testable", "insufficient panel assets"}:
+        return "not testable"
     if raw in {"not selected", "rejected", "not accepted"}:
         return "not selected"
     return str(value or "")
+
+
+def _timing_accepted_count(timing: dict) -> int:
+    count = _safe_int(_coerce_mapping(timing).get("accepted_count", 0), 0)
+    rows = _coerce_mapping(timing).get("candidate_seconds", [])
+    if isinstance(rows, list):
+        row_count = 0
+        for row in rows:
+            status = _display_candidate_status(_coerce_mapping(row).get("status", ""))
+            if status in {"recommended", "passed gate", "applied recommendation", "skipped recommendation"}:
+                row_count += 1
+        count = max(count, row_count)
+    return int(count)
 
 
 def _parse_feature_family_counts(raw: Any) -> dict[str, int]:
@@ -297,7 +332,7 @@ def _render_preset_suggestion_timing_block() -> None:
 
     total_seconds = _safe_float(timing.get("total_seconds", 0.0), 0.0)
     candidate_count = _safe_int(timing.get("candidate_count", 0), 0)
-    accepted_count = _safe_int(timing.get("accepted_count", 0), 0)
+    accepted_count = _timing_accepted_count(timing)
     if total_seconds <= 0 and candidate_count <= 0:
         return
 
@@ -340,7 +375,7 @@ def _render_auto_opt_suggestion_timing_block() -> None:
 
     total_seconds = _safe_float(timing.get("total_seconds", 0.0), 0.0)
     candidate_count = _safe_int(timing.get("candidate_count", 0), 0)
-    accepted_count = _safe_int(timing.get("accepted_count", 0), 0)
+    accepted_count = _timing_accepted_count(timing)
     if total_seconds <= 0 and candidate_count <= 0:
         return
 
@@ -398,6 +433,19 @@ def _clear_universe_suggestion_state() -> None:
     st.session_state[UNIVERSE_SKIPPED_SCOPE_KEY] = ""
     st.session_state[UNIVERSE_SKIPPED_LABEL_KEY] = ""
     st.session_state[UNIVERSE_SKIPPED_RUN_SIGNATURE_KEY] = ""
+    _clear_universe_size_suggestion_state()
+
+
+def _clear_universe_size_suggestion_state() -> None:
+    """Avoid showing stale phase-4 results while earlier phases are unresolved."""
+    st.session_state[UNIVERSE_SIZE_SUGGESTION_STATE_KEY] = {}
+    st.session_state[UNIVERSE_SIZE_SUGGESTION_SCOPE_KEY] = ""
+    st.session_state[UNIVERSE_SIZE_SUGGESTION_TIMING_KEY] = {}
+    st.session_state[UNIVERSE_SIZE_APPLIED_SIGNATURE_KEY] = ""
+    st.session_state[UNIVERSE_SIZE_APPLIED_LABEL_KEY] = ""
+    st.session_state[UNIVERSE_SIZE_SKIPPED_SCOPE_KEY] = ""
+    st.session_state[UNIVERSE_SIZE_SKIPPED_LABEL_KEY] = ""
+    st.session_state[UNIVERSE_SIZE_SKIPPED_RUN_SIGNATURE_KEY] = ""
 
 
 def _preset_blocks_engine_tuning(preset_flow_state: Any) -> bool:
@@ -444,6 +492,28 @@ def _universe_decision_completed_for_current_run(run_map: dict) -> bool:
     return bool(_universe_applied_for_current_run(run_map) or _universe_skipped_for_current_run(run_map))
 
 
+def _universe_size_applied_for_current_run(run_map: dict) -> bool:
+    current_run_signature = str(_coerce_mapping(run_map).get("run_signature", "") or "")
+    applied_signature = str(st.session_state.get(UNIVERSE_SIZE_APPLIED_SIGNATURE_KEY, "") or "")
+    return bool(current_run_signature and applied_signature and current_run_signature == applied_signature)
+
+
+def _universe_size_skipped_for_current_run(run_map: dict) -> bool:
+    run_map = _coerce_mapping(run_map)
+    current_run_signature = str(run_map.get("run_signature", "") or "")
+    skipped_run_signature = str(st.session_state.get(UNIVERSE_SIZE_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
+    skipped_scope = str(st.session_state.get(UNIVERSE_SIZE_SKIPPED_SCOPE_KEY, "") or "")
+    return bool(
+        skipped_scope
+        and current_run_signature
+        and (not skipped_run_signature or skipped_run_signature == current_run_signature)
+    )
+
+
+def _universe_size_decision_completed_for_current_run(run_map: dict) -> bool:
+    return bool(_universe_size_applied_for_current_run(run_map) or _universe_size_skipped_for_current_run(run_map))
+
+
 def _auto_opt_blocks_universe(run_map: dict) -> bool:
     """Return True when phase 2 has a pending accepted candidate.
 
@@ -469,6 +539,178 @@ def _render_universe_waiting_for_engine_tuning() -> None:
     st.caption(
         "This avoids testing asset-composition changes on top of technical settings that may still be replaced in the previous phase."
     )
+
+
+def _universe_blocks_size(run_map: dict) -> bool:
+    """Return True when phase 3 has a pending accepted universe candidate."""
+    if _universe_applied_for_current_run(run_map) or _universe_skipped_for_current_run(run_map):
+        return False
+
+    payload = _coerce_mapping(st.session_state.get(UNIVERSE_SUGGESTION_STATE_KEY, {}))
+    evaluations = list(payload.get("evaluations", []) or [])
+    accepted_items = [x for x in evaluations if bool(_coerce_mapping(x).get("accepted", False))]
+    return bool(accepted_items)
+
+
+def _render_size_waiting_for_universe() -> None:
+    _clear_universe_size_suggestion_state()
+    st.markdown("### Universe size suggestion")
+    st.info(
+        "Universe size becomes available after you apply the universe-composition suggestion, keep the current universe, or the composition test converges with no accepted candidate."
+    )
+    st.caption(
+        "This avoids testing size changes on top of an asset composition that may still be replaced in the previous phase."
+    )
+
+
+def _phase_summary_state(
+    *,
+    timing_key: str,
+    applied_label_key: str,
+    skipped_label_key: str,
+    default_label: str,
+) -> dict:
+    """Return a compact decision-state payload for one improvement phase.
+
+    The suggestion cards disappear after they are resolved so the user cannot
+    re-apply stale buttons. This helper keeps a separate, stable decision
+    summary visible near the top of the flow. It does not run tests or mutate
+    session_state.
+    """
+    timing = _coerce_mapping(st.session_state.get(timing_key, {}))
+    applied_label = str(st.session_state.get(applied_label_key, "") or "").strip()
+    skipped_label = str(st.session_state.get(skipped_label_key, "") or "").strip()
+    decision_status = _display_candidate_status(timing.get("decision_status", ""))
+    decision_label = str(timing.get("decision_label", "") or "").strip()
+    candidate_count = _safe_int(timing.get("candidate_count", 0), 0)
+    accepted_count = _timing_accepted_count(timing)
+
+    if applied_label:
+        return {
+            "kind": "applied",
+            "complete": True,
+            "label": applied_label,
+            "detail": f"Applied: {applied_label}",
+        }
+    if decision_status == "applied recommendation":
+        label = decision_label or default_label
+        return {"kind": "applied", "complete": True, "label": label, "detail": f"Applied: {label}"}
+
+    if skipped_label:
+        return {
+            "kind": "skipped",
+            "complete": True,
+            "label": skipped_label,
+            "detail": f"Kept current setup; skipped: {skipped_label}",
+        }
+    if decision_status == "skipped recommendation":
+        label = decision_label or default_label
+        return {
+            "kind": "skipped",
+            "complete": True,
+            "label": label,
+            "detail": f"Kept current setup; skipped: {label}",
+        }
+
+    if candidate_count > 0 and accepted_count <= 0:
+        return {
+            "kind": "converged",
+            "complete": True,
+            "label": "No accepted candidate",
+            "detail": "Completed: no tested candidate passed the acceptance gate.",
+        }
+
+    if candidate_count > 0 and accepted_count > 0:
+        return {
+            "kind": "pending",
+            "complete": False,
+            "label": "Recommendation ready",
+            "detail": "Action needed: a tested recommendation is available below.",
+        }
+
+    return {
+        "kind": "not_started",
+        "complete": False,
+        "label": "Not started",
+        "detail": "Waiting for previous phase.",
+    }
+
+
+def _render_improvement_flow_status(run_map: dict) -> None:
+    """Show the decision history for completed suggestion phases.
+
+    The actual suggestion cards are intentionally hidden once a phase is applied,
+    skipped, or converged. This summary prevents the UX from feeling like earlier
+    decisions vanished.
+    """
+    phases = [
+        {
+            "title": "Phase 1 — Strategy preset",
+            "state": _phase_summary_state(
+                timing_key=PRESET_SUGGESTION_TIMING_KEY,
+                applied_label_key=PRESET_APPLIED_LABEL_KEY,
+                skipped_label_key=PRESET_SKIPPED_LABEL_KEY,
+                default_label="preset recommendation",
+            ),
+        },
+        {
+            "title": "Phase 2 — Engine tuning",
+            "state": _phase_summary_state(
+                timing_key=AUTO_OPT_SUGGESTION_TIMING_KEY,
+                applied_label_key=AUTO_OPT_APPLIED_LABEL_KEY,
+                skipped_label_key=AUTO_OPT_SKIPPED_LABEL_KEY,
+                default_label="engine tuning recommendation",
+            ),
+        },
+        {
+            "title": "Phase 3 — Universe composition",
+            "state": _phase_summary_state(
+                timing_key=UNIVERSE_SUGGESTION_TIMING_KEY,
+                applied_label_key=UNIVERSE_APPLIED_LABEL_KEY,
+                skipped_label_key=UNIVERSE_SKIPPED_LABEL_KEY,
+                default_label="universe composition recommendation",
+            ),
+        },
+        {
+            "title": "Phase 4 — Universe size",
+            "state": _phase_summary_state(
+                timing_key=UNIVERSE_SIZE_SUGGESTION_TIMING_KEY,
+                applied_label_key=UNIVERSE_SIZE_APPLIED_LABEL_KEY,
+                skipped_label_key=UNIVERSE_SIZE_SKIPPED_LABEL_KEY,
+                default_label="universe size recommendation",
+            ),
+        },
+    ]
+
+    active_index = next((i for i, phase in enumerate(phases) if not bool(phase["state"].get("complete"))), None)
+
+    st.markdown("### Improvement flow status")
+    st.caption(
+        "Completed phases stay summarised here so the active suggestion card can stay focused and stale Apply buttons stay hidden. "
+        "Detailed timing diagnostics remain available below."
+    )
+
+    cols = st.columns(4)
+    for idx, (col, phase) in enumerate(zip(cols, phases)):
+        state = _coerce_mapping(phase.get("state", {}))
+        kind = str(state.get("kind", "not_started") or "not_started")
+        detail = str(state.get("detail", "") or "")
+        title = str(phase.get("title", "Phase") or "Phase")
+        with col:
+            st.markdown(f"**{title}**")
+            if kind == "applied":
+                st.success(detail)
+            elif kind == "skipped":
+                st.info(detail)
+            elif kind == "converged":
+                st.success(detail)
+            elif active_index == idx:
+                if kind == "pending":
+                    st.warning(detail)
+                else:
+                    st.info("Current phase: tests or decision appear below.")
+            else:
+                st.caption(detail or "Waiting for previous phase.")
 
 
 def _render_universe_suggestion_timing_block() -> None:
@@ -513,21 +755,65 @@ def _render_universe_suggestion_timing_block() -> None:
                 st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
 
 
+def _render_universe_size_suggestion_timing_block() -> None:
+    timing = _coerce_mapping(st.session_state.get(UNIVERSE_SIZE_SUGGESTION_TIMING_KEY, {}))
+    if not timing:
+        return
+
+    total_seconds = _safe_float(timing.get("total_seconds", 0.0), 0.0)
+    candidate_count = _safe_int(timing.get("candidate_count", 0), 0)
+    accepted_count = _safe_int(timing.get("accepted_count", 0), 0)
+    if total_seconds <= 0 and candidate_count <= 0:
+        return
+
+    st.markdown("### Universe size suggestion timing")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Size test", f"{total_seconds:.2f}s")
+    with c2:
+        st.metric("Candidates tested", int(candidate_count))
+    with c3:
+        st.metric("Passed gate", int(accepted_count))
+
+    st.caption(
+        "This is the extra time used by the automatic Step 5 universe-size suggestion. "
+        "It tests only a small number of philosophy-compatible sizes and promotes only a rerun-tested candidate."
+    )
+
+    candidate_rows = timing.get("candidate_seconds", [])
+    if isinstance(candidate_rows, list) and candidate_rows:
+        clean_rows = []
+        for row in candidate_rows:
+            row_map = _coerce_mapping(row)
+            clean_rows.append(
+                {
+                    "candidate": str(row_map.get("candidate", "Candidate") or "Candidate"),
+                    "status": _display_candidate_status(row_map.get("status", "")),
+                    "seconds": _safe_float(row_map.get("seconds", 0.0), 0.0),
+                }
+            )
+        if clean_rows:
+            with st.expander("Universe size suggestion timing breakdown", expanded=False):
+                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+
+
 def _render_completed_improvement_timing_summary() -> None:
     """Keep historical suggestion timing visible after Apply without re-running tests."""
     preset_timing = _coerce_mapping(st.session_state.get(PRESET_SUGGESTION_TIMING_KEY, {}))
     tuning_timing = _coerce_mapping(st.session_state.get(AUTO_OPT_SUGGESTION_TIMING_KEY, {}))
     universe_timing = _coerce_mapping(st.session_state.get(UNIVERSE_SUGGESTION_TIMING_KEY, {}))
+    size_timing = _coerce_mapping(st.session_state.get(UNIVERSE_SIZE_SUGGESTION_TIMING_KEY, {}))
 
     preset_total = _safe_float(preset_timing.get("total_seconds", 0.0), 0.0)
     tuning_total = _safe_float(tuning_timing.get("total_seconds", 0.0), 0.0)
     universe_total = _safe_float(universe_timing.get("total_seconds", 0.0), 0.0)
-    total = float(max(0.0, preset_total) + max(0.0, tuning_total) + max(0.0, universe_total))
+    size_total = _safe_float(size_timing.get("total_seconds", 0.0), 0.0)
+    total = float(max(0.0, preset_total) + max(0.0, tuning_total) + max(0.0, universe_total) + max(0.0, size_total))
     if total <= 0.0:
         return
 
     st.markdown("### Completed improvement flow timing")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         st.metric("Preset test", f"{preset_total:.2f}s" if preset_total > 0 else "—")
     with c2:
@@ -535,20 +821,25 @@ def _render_completed_improvement_timing_summary() -> None:
     with c3:
         st.metric("Universe test", f"{universe_total:.2f}s" if universe_total > 0 else "—")
     with c4:
+        st.metric("Size test", f"{size_total:.2f}s" if size_total > 0 else "—")
+    with c5:
         st.metric("Total overhead", f"{total:.2f}s")
 
     preset_candidates = _safe_int(preset_timing.get("candidate_count", 0), 0)
-    preset_accepted = _safe_int(preset_timing.get("accepted_count", 0), 0)
+    preset_accepted = _timing_accepted_count(preset_timing)
     tuning_candidates = _safe_int(tuning_timing.get("candidate_count", 0), 0)
-    tuning_accepted = _safe_int(tuning_timing.get("accepted_count", 0), 0)
+    tuning_accepted = _timing_accepted_count(tuning_timing)
     universe_candidates = _safe_int(universe_timing.get("candidate_count", 0), 0)
-    universe_accepted = _safe_int(universe_timing.get("accepted_count", 0), 0)
+    universe_accepted = _timing_accepted_count(universe_timing)
+    size_candidates = _safe_int(size_timing.get("candidate_count", 0), 0)
+    size_accepted = _timing_accepted_count(size_timing)
     st.caption(
         "Historical timing only: these suggestion tests were not re-run after Apply; "
         "the current result was promoted from the previously tested candidate. "
         f"Preset candidates={preset_candidates}, passed_gate={preset_accepted} · "
         f"Engine tuning candidates={tuning_candidates}, passed_gate={tuning_accepted} · "
-        f"Universe candidates={universe_candidates}, passed_gate={universe_accepted}. "
+        f"Universe candidates={universe_candidates}, passed_gate={universe_accepted} · "
+        f"Size candidates={size_candidates}, passed_gate={size_accepted}. "
         "Only the highest-scoring passed-gate candidate was promoted."
     )
 
@@ -557,6 +848,7 @@ def _render_completed_improvement_timing_summary() -> None:
         ("Preset suggestion", preset_timing),
         ("Engine tuning", tuning_timing),
         ("Universe composition", universe_timing),
+        ("Universe size", size_timing),
     ]:
         candidate_rows = timing.get("candidate_seconds", [])
         if not isinstance(candidate_rows, list):
@@ -578,24 +870,24 @@ def _render_completed_improvement_timing_summary() -> None:
 
 
 def _render_completed_improvement_flow(run_map: dict) -> None:
-    universe_applied = _universe_applied_for_current_run(run_map)
-    universe_skipped = _universe_skipped_for_current_run(run_map)
-    if universe_applied:
-        label = str(st.session_state.get(UNIVERSE_APPLIED_LABEL_KEY, "") or "the accepted universe composition suggestion")
+    size_applied = _universe_size_applied_for_current_run(run_map)
+    size_skipped = _universe_size_skipped_for_current_run(run_map)
+    if size_applied:
+        label = str(st.session_state.get(UNIVERSE_SIZE_APPLIED_LABEL_KEY, "") or "the accepted universe size suggestion")
         message = f"Improvement flow completed: {label}. The rerun-tested candidate is now the current Step 5 result."
-    elif universe_skipped:
-        label = str(st.session_state.get(UNIVERSE_SKIPPED_LABEL_KEY, "") or "the recommended universe composition")
-        message = f"Improvement flow completed: current universe kept. Skipped recommendation: {label}."
+    elif size_skipped:
+        label = str(st.session_state.get(UNIVERSE_SIZE_SKIPPED_LABEL_KEY, "") or "the recommended universe size")
+        message = f"Improvement flow completed: current universe size kept. Skipped recommendation: {label}."
     else:
-        tuning_label = str(st.session_state.get(AUTO_OPT_APPLIED_LABEL_KEY, "") or "the accepted improvement suggestion")
-        message = f"Improvement flow completed: {tuning_label}. The rerun-tested candidate is now the current Step 5 result."
+        message = "Improvement flow completed for this run."
 
     st.markdown("## 4. Improve this setup (optional)")
     st.success(message)
     st.caption(
-        "Preset, engine-tuning, and universe-composition tests are hidden for this result to avoid re-testing the same loop. "
+        "Preset, engine-tuning, universe-composition, and universe-size tests are hidden for this result to avoid re-testing the same loop. "
         "Change the strategy setup, technical controls, Step 4 universe, or run a new baseline if you want to start a fresh improvement cycle."
     )
+    _render_improvement_flow_status(run_map)
     _render_completed_improvement_timing_summary()
 
 
@@ -1150,18 +1442,42 @@ def render_post_run(run_result: dict) -> None:
     panel_assets = int(_safe_float(run_map.get("asset_panel_n_assets", 0), 0))
     panel_shape = run_map.get("panel_shape", None)
 
-    improvement_flow_completed = _universe_decision_completed_for_current_run(run_map)
-    auto_opt_already_applied = _auto_opt_applied_for_current_run(run_map)
-    auto_opt_already_skipped = _auto_opt_skipped_for_current_run(run_map)
+    improvement_flow_completed = _universe_size_decision_completed_for_current_run(run_map)
+    universe_decision_completed = _universe_decision_completed_for_current_run(run_map)
+    auto_opt_decision_completed = bool(
+        _auto_opt_applied_for_current_run(run_map) or _auto_opt_skipped_for_current_run(run_map)
+    )
+
+    if not improvement_flow_completed:
+        st.markdown("## 4. Improve this setup (optional)")
+        st.caption(
+            "This section tests optional improvements step by step. Suggestions are only shown after they have been rerun-tested "
+            "against the current Step 4 data panel."
+        )
+        with st.expander("How the improvement flow works", expanded=False):
+            st.write(
+                "The flow is sequential: preset first, then engine tuning, then universe composition, then universe size. "
+                "Completed phases stay summarised here but their Apply buttons are hidden to avoid duplicate reruns."
+            )
+        _render_improvement_flow_status(run_map)
 
     if improvement_flow_completed:
         _render_completed_improvement_flow(run_map)
-    elif auto_opt_already_applied or auto_opt_already_skipped:
-        # Phase 2 has already been resolved for this run. Do not send the
-        # current signature back through Phase 1, otherwise the preset search
-        # is tested again before Phase 3 becomes available.
-        render_auto_opt_improvement(run_map)
+    elif universe_decision_completed:
+        # Phase 3 has already been resolved for this promoted result. Do not
+        # call render_universe_improvement() again: that function owns the
+        # expensive candidate search, and calling it here can re-test the
+        # universe immediately after Apply. Move directly to Phase 4.
+        render_universe_size_improvement(run_map)
+    elif auto_opt_decision_completed:
+        # Phase 2 has already been resolved for this run. Do not re-render the
+        # engine-tuning assistant, otherwise stale/pending tuning cards can show
+        # inside the next phase and confuse the sequential flow.
         render_universe_improvement(run_map)
+        if _universe_blocks_size(run_map):
+            _render_size_waiting_for_universe()
+        else:
+            render_universe_size_improvement(run_map)
     else:
         preset_flow_state = render_preset_improvement(run_map)
         if _preset_blocks_engine_tuning(preset_flow_state):
@@ -1172,6 +1488,10 @@ def render_post_run(run_result: dict) -> None:
                 _render_universe_waiting_for_engine_tuning()
             else:
                 render_universe_improvement(run_map)
+                if _universe_blocks_size(run_map):
+                    _render_size_waiting_for_universe()
+                else:
+                    render_universe_size_improvement(run_map)
 
     st.markdown("## 5. Ready for projection")
     n_oos = _store_projection_bridge_context(run_map)
@@ -1205,6 +1525,7 @@ def render_post_run(run_result: dict) -> None:
         _render_preset_suggestion_timing_block()
         _render_auto_opt_suggestion_timing_block()
         _render_universe_suggestion_timing_block()
+        _render_universe_size_suggestion_timing_block()
         render_start_date_robustness_timing_block(run_map)
         _render_feature_mu_block(run_map)
 
