@@ -17,21 +17,19 @@ except Exception:  # pragma: no cover
 
 PriceField = Literal["Adj Close", "Close"]
 
-# Streamlit Community Cloud / shared cloud IPs can be slow or rate-limited by Yahoo.
-# Keep calls bounded so Step 4 does not hang for minutes before falling back.
-YAHOO_TIMEOUT_SECONDS = float(os.getenv("LIFEBUDGET_YAHOO_TIMEOUT_SECONDS", "12"))
-YAHOO_DEFAULT_CHUNK_SIZE = int(os.getenv("LIFEBUDGET_YAHOO_CHUNK_SIZE", "10"))
+# -----------------------------------------------------------------------------
+# Deployment controls
+# -----------------------------------------------------------------------------
+# Streamlit Community Cloud often rate-limits Yahoo/yfinance from shared IPs.
+# Therefore the public deployment path uses Stooq first by default for standard
+# US ETF/equity panels. Yahoo is retained as an opt-in fallback for local/dev use.
+
 STOOQ_TIMEOUT_SECONDS = float(os.getenv("LIFEBUDGET_STOOQ_TIMEOUT_SECONDS", "10"))
 ENABLE_STOOQ_FALLBACK = str(os.getenv("LIFEBUDGET_ENABLE_STOOQ_FALLBACK", "1")).strip().lower() not in {
     "0",
     "false",
     "no",
 }
-
-# Deployment-first guard:
-# Streamlit Community Cloud often hits Yahoo/yfinance rate limits from shared IPs.
-# For public demos, prefer Stooq first for standard US-listed ETF/equity universes,
-# then fall back to Yahoo only if Stooq cannot provide enough usable assets.
 PREFER_STOOQ_FIRST = str(os.getenv("LIFEBUDGET_PREFER_STOOQ_FIRST", "1")).strip().lower() not in {
     "0",
     "false",
@@ -39,10 +37,29 @@ PREFER_STOOQ_FIRST = str(os.getenv("LIFEBUDGET_PREFER_STOOQ_FIRST", "1")).strip(
 }
 MIN_STOOQ_ASSETS = int(os.getenv("LIFEBUDGET_MIN_STOOQ_ASSETS", "12"))
 
+# Yahoo fallback is deliberately OFF by default on cloud. If you want local Yahoo
+# behaviour, set LIFEBUDGET_ALLOW_YAHOO_FALLBACK=1 in your environment.
+ALLOW_YAHOO_FALLBACK = str(os.getenv("LIFEBUDGET_ALLOW_YAHOO_FALLBACK", "0")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+ALLOW_YAHOO_MACRO = str(os.getenv("LIFEBUDGET_ALLOW_YAHOO_MACRO", "0")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+YAHOO_TIMEOUT_SECONDS = float(os.getenv("LIFEBUDGET_YAHOO_TIMEOUT_SECONDS", "12"))
+YAHOO_DEFAULT_CHUNK_SIZE = int(os.getenv("LIFEBUDGET_YAHOO_CHUNK_SIZE", "10"))
+
+
+# -----------------------------------------------------------------------------
+# Generic helpers
+# -----------------------------------------------------------------------------
 
 def _normalize_tickers(tickers: Iterable[str]) -> List[str]:
     out: List[str] = []
-    seen = set()
+    seen: set[str] = set()
     for t in tickers or []:
         s = str(t).strip().upper()
         if s and s not in seen:
@@ -56,56 +73,6 @@ def _safe_date_yyyymmdd(value: str) -> str:
     if pd.isna(dt):
         return str(value or "")
     return dt.strftime("%Y%m%d")
-
-
-def _pick_price_frame(df: pd.DataFrame, preferred_field: PriceField = "Adj Close") -> pd.DataFrame:
-    """
-    yfinance.download can return:
-    - a simple frame for one ticker
-    - a column MultiIndex for multiple tickers
-
-    This helper supports both common MultiIndex layouts:
-    - level 0 = price field, level 1 = ticker   (group_by='column')
-    - level 0 = ticker, level 1 = price field   (some yfinance versions)
-    """
-    if df is None or df.empty:
-        raise ValueError("Yahoo download returned an empty price frame.")
-
-    if isinstance(df.columns, pd.MultiIndex):
-        level0 = [str(x) for x in df.columns.get_level_values(0)]
-        level1 = [str(x) for x in df.columns.get_level_values(1)]
-
-        # Standard group_by='column': ("Close", "SPY")
-        if preferred_field in set(level0) or "Close" in set(level0):
-            field = preferred_field if preferred_field in set(level0) else "Close"
-            out = df[field].copy()
-            out.columns = [str(c).upper() for c in out.columns]
-            return out
-
-        # Defensive support for group_by='ticker': ("SPY", "Close")
-        if preferred_field in set(level1) or "Close" in set(level1):
-            field = preferred_field if preferred_field in set(level1) else "Close"
-            parts: dict[str, pd.Series] = {}
-            for ticker in sorted(set(level0)):
-                try:
-                    series = df[(ticker, field)]
-                    parts[str(ticker).upper()] = pd.to_numeric(series, errors="coerce")
-                except Exception:
-                    continue
-            if parts:
-                return pd.DataFrame(parts)
-
-        raise ValueError("Could not find Adj Close or Close in Yahoo download output.")
-
-    # single ticker case
-    if preferred_field in df.columns:
-        out = df[[preferred_field]].copy()
-    elif "Close" in df.columns:
-        out = df[["Close"]].copy()
-    else:
-        raise ValueError("Could not find Adj Close or Close in Yahoo download output.")
-    out.columns = ["SINGLE_ASSET"]
-    return out
 
 
 def _clean_price_frame(prices: pd.DataFrame, *, require_non_empty: bool = True) -> pd.DataFrame:
@@ -122,146 +89,21 @@ def _clean_price_frame(prices: pd.DataFrame, *, require_non_empty: bool = True) 
     out = out.dropna(axis=1, how="all").dropna(how="all")
     out = out.loc[:, ~out.columns.duplicated()]
     if require_non_empty and out.empty:
-        raise ValueError("Yahoo download returned no usable prices after cleaning.")
+        raise ValueError("Price download returned no usable prices after cleaning.")
     return out
 
 
 def _looks_like_yahoo_rate_limit(exc: Exception | None) -> bool:
     text = str(exc or "").lower()
-    return any(
-        token in text
-        for token in (
-            "too many requests",
-            "ratelimit",
-            "rate limit",
-            "yfRateLimitError".lower(),
-            "429",
-        )
-    )
+    return any(token in text for token in ("too many requests", "ratelimit", "rate limit", "429"))
 
 
-def _yf_download_safe(
-    tickers: list[str],
-    *,
-    start_date: str,
-    end_date: str,
-    interval: Literal["1d", "1wk", "1mo"],
-    auto_adjust: bool,
-    threads: bool,
-) -> pd.DataFrame:
-    if yf is None:
-        raise ImportError(
-            "yfinance is not installed. Install it with `pip install yfinance` to use Yahoo Finance download in the app."
-        )
-
-    kwargs = dict(
-        tickers=tickers if len(tickers) != 1 else tickers[0],
-        start=str(start_date),
-        end=str(end_date),
-        interval=str(interval),
-        auto_adjust=bool(auto_adjust),
-        progress=False,
-        group_by="column",
-        threads=bool(threads),
-    )
-    try:
-        return yf.download(**kwargs, timeout=float(YAHOO_TIMEOUT_SECONDS))
-    except TypeError:
-        # Older yfinance builds may not accept timeout.
-        return yf.download(**kwargs)
-
-
-def _download_single_yahoo_history(
-    ticker: str,
-    *,
-    start_date: str,
-    end_date: str,
-    interval: Literal["1d", "1wk", "1mo"],
-    auto_adjust: bool,
-    preferred_field: PriceField,
-) -> pd.DataFrame:
-    if yf is None:
-        raise ImportError("yfinance is not installed.")
-
-    t = str(ticker or "").strip().upper()
-    if not t:
-        raise ValueError("Empty ticker.")
-
-    obj = yf.Ticker(t)
-    kwargs = dict(
-        start=str(start_date),
-        end=str(end_date),
-        interval=str(interval),
-        auto_adjust=bool(auto_adjust),
-        actions=False,
-    )
-    try:
-        raw = obj.history(**kwargs, timeout=float(YAHOO_TIMEOUT_SECONDS))
-    except TypeError:
-        raw = obj.history(**kwargs)
-
-    prices = _pick_price_frame(raw, preferred_field=preferred_field)
-    prices = _clean_price_frame(prices)
-    if prices.columns.tolist() == ["SINGLE_ASSET"]:
-        prices.columns = [t]
-    else:
-        prices = prices.iloc[:, :1].copy()
-        prices.columns = [t]
-    return prices
-
-
-def _download_yahoo_price_panel_chunked(
-    tickers: Iterable[str],
-    *,
-    start_date: str,
-    end_date: str,
-    interval: Literal["1d", "1wk", "1mo"] = "1d",
-    auto_adjust: bool = False,
-    preferred_field: PriceField = "Adj Close",
-    chunk_size: int = YAHOO_DEFAULT_CHUNK_SIZE,
-) -> pd.DataFrame:
-    tickers_list = _normalize_tickers(tickers)
-    if not tickers_list:
-        raise ValueError("No tickers were provided for Yahoo download.")
-
-    parts: list[pd.DataFrame] = []
-    last_error: Exception | None = None
-    effective_chunk_size = max(1, int(chunk_size or YAHOO_DEFAULT_CHUNK_SIZE))
-
-    for i in range(0, len(tickers_list), effective_chunk_size):
-        batch = tickers_list[i:i + effective_chunk_size]
-        try:
-            raw = _yf_download_safe(
-                batch,
-                start_date=start_date,
-                end_date=end_date,
-                interval=interval,
-                auto_adjust=auto_adjust,
-                threads=False,
-            )
-            prices = _pick_price_frame(raw, preferred_field=preferred_field)
-            if prices.columns.tolist() == ["SINGLE_ASSET"] and len(batch) == 1:
-                prices.columns = batch
-            prices = _clean_price_frame(prices, require_non_empty=False)
-            if not prices.empty:
-                parts.append(prices)
-        except Exception as exc:
-            last_error = exc
-            continue
-
-    if not parts:
-        raise ValueError(f"Yahoo chunked download returned no usable prices after cleaning. Last error: {last_error}")
-
-    merged = pd.concat(parts, axis=1)
-    merged = _clean_price_frame(merged)
-    if merged.empty:
-        raise ValueError("Yahoo chunked download returned an empty merged price frame.")
-    return merged
-
+# -----------------------------------------------------------------------------
+# Stooq download path — default for Streamlit Cloud deployment
+# -----------------------------------------------------------------------------
 
 def _stooq_symbol(ticker: str) -> str:
-    # Stooq generally serves US ETFs/stocks as lower-case ticker + ".us".
-    # Symbols with "^" are Yahoo index symbols and are intentionally skipped.
+    """Map common US ETF/equity tickers to Stooq CSV symbols."""
     symbol = str(ticker or "").strip().upper()
     if not symbol or symbol.startswith("^") or symbol.endswith("=F") or "/" in symbol:
         return ""
@@ -297,7 +139,8 @@ def _download_single_stooq_price(
     if out.empty:
         raise ValueError(f"Stooq fallback returned an empty cleaned frame for {ticker}.")
 
-    return pd.DataFrame({str(ticker).strip().upper(): out["Close"].to_numpy()}, index=out["Date"])
+    ticker_name = str(ticker).strip().upper()
+    return pd.DataFrame({ticker_name: out["Close"].to_numpy()}, index=out["Date"])
 
 
 def _download_stooq_price_panel(
@@ -305,12 +148,17 @@ def _download_stooq_price_panel(
     *,
     start_date: str,
     end_date: str,
+    min_assets: int | None = None,
 ) -> pd.DataFrame:
     if not ENABLE_STOOQ_FALLBACK:
         raise ValueError("Stooq fallback is disabled by LIFEBUDGET_ENABLE_STOOQ_FALLBACK=0.")
 
     tickers_list = _normalize_tickers(tickers)
+    if not tickers_list:
+        raise ValueError("No tickers were provided for Stooq download.")
+
     parts: list[pd.DataFrame] = []
+    failed: list[str] = []
     last_error: Exception | None = None
 
     for ticker in tickers_list:
@@ -319,17 +167,135 @@ def _download_stooq_price_panel(
             prices = _clean_price_frame(prices, require_non_empty=False)
             if not prices.empty:
                 parts.append(prices)
+            else:
+                failed.append(ticker)
         except Exception as exc:
             last_error = exc
+            failed.append(ticker)
             continue
 
     if not parts:
-        raise ValueError(f"Stooq fallback returned no usable prices. Last error: {last_error}")
+        raise ValueError(f"Stooq returned no usable prices. Last error: {last_error}")
 
     merged = pd.concat(parts, axis=1)
     merged = _clean_price_frame(merged)
+
+    required = int(min_assets if min_assets is not None else min(int(MIN_STOOQ_ASSETS), len(tickers_list)))
+    if int(merged.shape[1]) < required:
+        raise ValueError(
+            f"Stooq returned only {int(merged.shape[1])} usable assets; required at least {required}. "
+            f"Failed tickers: {failed[:12]}"
+        )
+
     return merged
 
+
+# -----------------------------------------------------------------------------
+# Yahoo helpers — retained only as an opt-in/local fallback
+# -----------------------------------------------------------------------------
+
+def _pick_price_frame(df: pd.DataFrame, preferred_field: PriceField = "Adj Close") -> pd.DataFrame:
+    """Extract Adj Close/Close from common yfinance output layouts."""
+    if df is None or df.empty:
+        raise ValueError("Yahoo download returned an empty price frame.")
+
+    if isinstance(df.columns, pd.MultiIndex):
+        level0 = [str(x) for x in df.columns.get_level_values(0)]
+        level1 = [str(x) for x in df.columns.get_level_values(1)]
+
+        if preferred_field in set(level0) or "Close" in set(level0):
+            field = preferred_field if preferred_field in set(level0) else "Close"
+            out = df[field].copy()
+            out.columns = [str(c).upper() for c in out.columns]
+            return out
+
+        if preferred_field in set(level1) or "Close" in set(level1):
+            field = preferred_field if preferred_field in set(level1) else "Close"
+            parts: dict[str, pd.Series] = {}
+            for ticker in sorted(set(level0)):
+                try:
+                    series = df[(ticker, field)]
+                    parts[str(ticker).upper()] = pd.to_numeric(series, errors="coerce")
+                except Exception:
+                    continue
+            if parts:
+                return pd.DataFrame(parts)
+
+        raise ValueError("Could not find Adj Close or Close in Yahoo download output.")
+
+    if preferred_field in df.columns:
+        out = df[[preferred_field]].copy()
+    elif "Close" in df.columns:
+        out = df[["Close"]].copy()
+    else:
+        raise ValueError("Could not find Adj Close or Close in Yahoo download output.")
+    out.columns = ["SINGLE_ASSET"]
+    return out
+
+
+def _yf_download_safe(
+    tickers: list[str],
+    *,
+    start_date: str,
+    end_date: str,
+    interval: Literal["1d", "1wk", "1mo"],
+    auto_adjust: bool,
+    threads: bool,
+) -> pd.DataFrame:
+    if yf is None:
+        raise ImportError("yfinance is not installed.")
+
+    kwargs = dict(
+        tickers=tickers if len(tickers) != 1 else tickers[0],
+        start=str(start_date),
+        end=str(end_date),
+        interval=str(interval),
+        auto_adjust=bool(auto_adjust),
+        progress=False,
+        group_by="column",
+        threads=bool(threads),
+    )
+    try:
+        return yf.download(**kwargs, timeout=float(YAHOO_TIMEOUT_SECONDS))
+    except TypeError:
+        return yf.download(**kwargs)
+
+
+def _download_yahoo_price_panel_minimal(
+    tickers: Iterable[str],
+    *,
+    start_date: str,
+    end_date: str,
+    interval: Literal["1d", "1wk", "1mo"] = "1d",
+    auto_adjust: bool = False,
+    preferred_field: PriceField = "Adj Close",
+) -> pd.DataFrame:
+    """Single Yahoo batch attempt. No ticker-by-ticker retry on cloud."""
+    if yf is None:
+        raise ImportError("yfinance is not installed.")
+
+    tickers_list = _normalize_tickers(tickers)
+    if not tickers_list:
+        raise ValueError("No tickers were provided for Yahoo download.")
+
+    raw = _yf_download_safe(
+        tickers_list,
+        start_date=start_date,
+        end_date=end_date,
+        interval=interval,
+        auto_adjust=auto_adjust,
+        threads=False,
+    )
+    prices = _pick_price_frame(raw, preferred_field=preferred_field)
+    prices = _clean_price_frame(prices)
+    if prices.columns.tolist() == ["SINGLE_ASSET"] and len(tickers_list) == 1:
+        prices.columns = tickers_list
+    return prices
+
+
+# -----------------------------------------------------------------------------
+# Public API used by Step 4 / feature pipeline
+# -----------------------------------------------------------------------------
 
 def download_yahoo_price_panel(
     tickers: Iterable[str],
@@ -343,147 +309,45 @@ def download_yahoo_price_panel(
 ) -> pd.DataFrame:
     """Download a price panel for the selected universe.
 
-    In local development, Yahoo Finance through yfinance is usually fine. In
-    Streamlit Community Cloud, Yahoo can rate-limit shared server IPs and return
-    empty frames. For deployment robustness, this function now prefers the Stooq
-    fallback first for standard daily US ETF/equity universes. This keeps the demo
-    usable instead of hard-gating Step 5 when Yahoo blocks the cloud instance.
+    Despite the historical function name, the deployment-safe default is Stooq.
+    Yahoo/yfinance is available only when LIFEBUDGET_ALLOW_YAHOO_FALLBACK=1.
+    This avoids repeated Yahoo rate-limit failures on Streamlit Community Cloud.
     """
     tickers_list = _normalize_tickers(tickers)
     if not tickers_list:
-        raise ValueError("No tickers were provided for Yahoo download.")
+        raise ValueError("No tickers were provided for market-data download.")
 
     last_error: Exception | None = None
 
-    def _finalize_prices(prices: pd.DataFrame) -> pd.DataFrame:
-        prices = _clean_price_frame(prices)
-        if prices.columns.tolist() == ["SINGLE_ASSET"] and len(tickers_list) == 1:
-            prices.columns = tickers_list
-        return prices
-
-    def _maybe_stooq_first() -> pd.DataFrame | None:
-        if not (ENABLE_STOOQ_FALLBACK and PREFER_STOOQ_FIRST and str(interval) == "1d"):
-            return None
+    if ENABLE_STOOQ_FALLBACK and PREFER_STOOQ_FIRST:
         try:
-            prices = _download_stooq_price_panel(tickers_list, start_date=start_date, end_date=end_date)
-            prices = _finalize_prices(prices)
-            if int(prices.shape[1]) >= min(int(MIN_STOOQ_ASSETS), len(tickers_list)):
-                return prices
-        except Exception as exc:
-            nonlocal_last_error[0] = exc
-        return None
-
-    # Python's nonlocal cannot be used in a nested helper that may be edited in
-    # older environments without care, so keep the Stooq-first error in a tiny box.
-    nonlocal_last_error: list[Exception | None] = [None]
-
-    stooq_prices = _maybe_stooq_first()
-    if stooq_prices is not None:
-        return stooq_prices
-    if nonlocal_last_error[0] is not None:
-        last_error = nonlocal_last_error[0]
-
-    if yf is None:
-        # If Yahoo is unavailable but Stooq failed too, surface the real fallback error.
-        raise ValueError(f"Market-data download failed. Last fallback error: {last_error}")
-
-    # 1) Batch Yahoo. One attempt only. If this shows rate limiting, do not hammer
-    # Yahoo ticker-by-ticker because it makes the public app slower and more likely
-    # to stay blocked.
-    yahoo_rate_limited = False
-    try:
-        raw = _yf_download_safe(
-            tickers_list,
-            start_date=start_date,
-            end_date=end_date,
-            interval=interval,
-            auto_adjust=auto_adjust,
-            threads=False,
-        )
-        prices = _pick_price_frame(raw, preferred_field=preferred_field)
-        return _finalize_prices(prices)
-    except Exception as exc:
-        last_error = exc
-        yahoo_rate_limited = _looks_like_yahoo_rate_limit(exc)
-
-    # If Yahoo has rate-limited the cloud instance, jump straight to Stooq instead
-    # of producing 37 repeated YFRateLimitError lines in the Streamlit logs.
-    if yahoo_rate_limited:
-        try:
-            prices = _download_stooq_price_panel(tickers_list, start_date=start_date, end_date=end_date)
-            prices = _finalize_prices(prices)
-            if int(prices.shape[1]) >= min(int(MIN_STOOQ_ASSETS), len(tickers_list)):
-                return prices
+            return _download_stooq_price_panel(
+                tickers_list,
+                start_date=start_date,
+                end_date=end_date,
+                min_assets=min(int(MIN_STOOQ_ASSETS), len(tickers_list)),
+            )
         except Exception as exc:
             last_error = exc
-        raise ValueError(f"Yahoo is rate-limiting this cloud app and fallback data was insufficient. Last error: {last_error}")
+            if not ALLOW_YAHOO_FALLBACK:
+                raise ValueError(f"Stooq deployment data failed and Yahoo fallback is disabled. Last error: {last_error}")
 
-    # 2) Small Yahoo chunks. Cloud-safe: avoid one huge request and avoid threads.
-    try:
-        prices = _download_yahoo_price_panel_chunked(
-            tickers_list,
-            start_date=start_date,
-            end_date=end_date,
-            interval=interval,
-            auto_adjust=auto_adjust,
-            preferred_field=preferred_field,
-            chunk_size=int(chunk_size or YAHOO_DEFAULT_CHUNK_SIZE),
-        )
-        return _finalize_prices(prices)
-    except Exception as exc:
-        last_error = exc
-        if _looks_like_yahoo_rate_limit(exc):
-            try:
-                prices = _download_stooq_price_panel(tickers_list, start_date=start_date, end_date=end_date)
-                prices = _finalize_prices(prices)
-                if int(prices.shape[1]) >= min(int(MIN_STOOQ_ASSETS), len(tickers_list)):
-                    return prices
-            except Exception as fallback_exc:
-                last_error = fallback_exc
-            raise ValueError(f"Yahoo is rate-limiting this cloud app and fallback data was insufficient. Last error: {last_error}")
-
-    # 3) Per-ticker Yahoo download. Only use this when we are not seeing rate-limit
-    # symptoms. It helps with one bad ticker, but it is the wrong strategy for 429s.
-    successful_parts: list[pd.DataFrame] = []
-    for ticker in tickers_list:
+    if ALLOW_YAHOO_FALLBACK:
         try:
-            raw = _yf_download_safe(
-                [ticker],
+            return _download_yahoo_price_panel_minimal(
+                tickers_list,
                 start_date=start_date,
                 end_date=end_date,
                 interval=interval,
                 auto_adjust=auto_adjust,
-                threads=False,
+                preferred_field=preferred_field,
             )
-            prices = _pick_price_frame(raw, preferred_field=preferred_field)
-            prices = _finalize_prices(prices)
-            if prices.columns.tolist() == ["SINGLE_ASSET"]:
-                prices.columns = [ticker]
-            if not prices.empty:
-                successful_parts.append(prices)
         except Exception as exc:
             last_error = exc
             if _looks_like_yahoo_rate_limit(exc):
-                break
-            continue
+                raise ValueError(f"Yahoo is rate-limiting this cloud app. Last error: {last_error}")
 
-    if successful_parts:
-        merged = pd.concat(successful_parts, axis=1)
-        merged = _clean_price_frame(merged)
-        if not merged.empty:
-            return merged
-
-    # 4) Deployment fallback: Stooq daily close data for US-listed ETFs/stocks.
-    # This avoids blocking the public demo when Yahoo returns empty frames from Streamlit Cloud.
-    try:
-        prices = _download_stooq_price_panel(tickers_list, start_date=start_date, end_date=end_date)
-        prices = _finalize_prices(prices)
-        if int(prices.shape[1]) >= min(int(MIN_STOOQ_ASSETS), len(tickers_list)):
-            return prices
-    except Exception as exc:
-        last_error = exc
-
-    raise ValueError(f"Yahoo download failed for the requested universe and fallback data was insufficient. Last error: {last_error}")
+    raise ValueError(f"Market-data download failed. Last error: {last_error}")
 
 
 def build_return_panel_from_prices(
@@ -511,13 +375,13 @@ def build_return_panel_from_prices(
 
     rets = sampled.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).dropna(how="all")
     if rets.empty:
-        raise ValueError("Return panel is empty after pct_change; try a wider Yahoo date range.")
+        raise ValueError("Return panel is empty after pct_change; try a wider date range.")
 
-    # Avoid passing stack(dropna=...) because pandas' new stack implementation rejects
-    # explicit dropna/sort arguments in some dependency combinations.
+    # Avoid stack(dropna=...) because newer pandas stack implementations reject
+    # explicit dropna/sort args in some dependency combinations.
     long_df = rets.stack().rename("return").reset_index()
     if long_df.shape[1] < 3:
-        raise ValueError("Unexpected Yahoo return panel shape after stacking.")
+        raise ValueError("Unexpected return panel shape after stacking.")
 
     date_col = str(long_df.columns[0])
     asset_col = str(long_df.columns[1])
@@ -554,6 +418,10 @@ def download_yahoo_return_panel(
     return build_return_panel_from_prices(prices, frequency=frequency)
 
 
+# -----------------------------------------------------------------------------
+# Macro features — optional; never block Step 4 on cloud
+# -----------------------------------------------------------------------------
+
 MACRO_TICKER_MAP = {
     "^VIX": "macro_vix",
     "^TNX": "macro_rate_10y",
@@ -570,29 +438,25 @@ def download_yahoo_macro_feature_panel(
     ticker_map: Optional[dict[str, str]] = None,
     preferred_field: PriceField = "Adj Close",
 ) -> pd.DataFrame:
-    """Download a small macro context panel (VIX / rates) from Yahoo and return date-keyed features.
+    """Download optional macro context features.
 
-    Output columns are date plus macro_* feature columns. Levels are forward-filled before computing
-    daily/weekly/monthly change features. For rates tickers like ^TNX and ^IRX, raw quoted levels are kept.
-
-    Deployment note
-    ---------------
-    Macro tickers are Yahoo/index symbols and are not available through the Stooq ETF fallback.
-    If Yahoo is rate-limited on Streamlit Cloud, return an empty date-only frame instead of
-    blocking the Step 4 asset panel. The downstream feature pipeline should tolerate the
-    missing macro overlay.
+    On Streamlit Cloud this returns an empty date-only frame by default so Yahoo
+    rate limits cannot block the Step 4 asset panel. Enable with
+    LIFEBUDGET_ALLOW_YAHOO_MACRO=1 when running locally.
     """
+    if not ALLOW_YAHOO_MACRO:
+        return pd.DataFrame({"date": pd.to_datetime([], errors="coerce")})
+
     tmap = dict(ticker_map or MACRO_TICKER_MAP)
 
     try:
-        prices = _download_yahoo_price_panel_full(
+        prices = _download_yahoo_price_panel_minimal(
             _normalize_tickers(tmap.keys()),
             start_date=start_date,
             end_date=end_date,
             interval="1d",
             auto_adjust=auto_adjust,
             preferred_field=preferred_field,
-            chunk_size=3,
         )
     except Exception:
         return pd.DataFrame({"date": pd.to_datetime([], errors="coerce")})
