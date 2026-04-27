@@ -28,6 +28,17 @@ ENABLE_STOOQ_FALLBACK = str(os.getenv("LIFEBUDGET_ENABLE_STOOQ_FALLBACK", "1")).
     "no",
 }
 
+# Deployment-first guard:
+# Streamlit Community Cloud often hits Yahoo/yfinance rate limits from shared IPs.
+# For public demos, prefer Stooq first for standard US-listed ETF/equity universes,
+# then fall back to Yahoo only if Stooq cannot provide enough usable assets.
+PREFER_STOOQ_FIRST = str(os.getenv("LIFEBUDGET_PREFER_STOOQ_FIRST", "1")).strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+MIN_STOOQ_ASSETS = int(os.getenv("LIFEBUDGET_MIN_STOOQ_ASSETS", "12"))
+
 
 def _normalize_tickers(tickers: Iterable[str]) -> List[str]:
     out: List[str] = []
@@ -113,6 +124,20 @@ def _clean_price_frame(prices: pd.DataFrame, *, require_non_empty: bool = True) 
     if require_non_empty and out.empty:
         raise ValueError("Yahoo download returned no usable prices after cleaning.")
     return out
+
+
+def _looks_like_yahoo_rate_limit(exc: Exception | None) -> bool:
+    text = str(exc or "").lower()
+    return any(
+        token in text
+        for token in (
+            "too many requests",
+            "ratelimit",
+            "rate limit",
+            "yfRateLimitError".lower(),
+            "429",
+        )
+    )
 
 
 def _yf_download_safe(
@@ -318,15 +343,12 @@ def download_yahoo_price_panel(
 ) -> pd.DataFrame:
     """Download a price panel for the selected universe.
 
-    Primary source remains Yahoo Finance through yfinance. For Streamlit Cloud,
-    where Yahoo often returns empty frames from shared IPs, this function uses
-    bounded fallbacks and finally a Stooq daily-price fallback for US-listed ETFs.
+    In local development, Yahoo Finance through yfinance is usually fine. In
+    Streamlit Community Cloud, Yahoo can rate-limit shared server IPs and return
+    empty frames. For deployment robustness, this function now prefers the Stooq
+    fallback first for standard daily US ETF/equity universes. This keeps the demo
+    usable instead of hard-gating Step 5 when Yahoo blocks the cloud instance.
     """
-    if yf is None:
-        raise ImportError(
-            "yfinance is not installed. Install it with `pip install yfinance` to use Yahoo Finance download in the app."
-        )
-
     tickers_list = _normalize_tickers(tickers)
     if not tickers_list:
         raise ValueError("No tickers were provided for Yahoo download.")
@@ -339,7 +361,36 @@ def download_yahoo_price_panel(
             prices.columns = tickers_list
         return prices
 
-    # 1) Batch Yahoo.
+    def _maybe_stooq_first() -> pd.DataFrame | None:
+        if not (ENABLE_STOOQ_FALLBACK and PREFER_STOOQ_FIRST and str(interval) == "1d"):
+            return None
+        try:
+            prices = _download_stooq_price_panel(tickers_list, start_date=start_date, end_date=end_date)
+            prices = _finalize_prices(prices)
+            if int(prices.shape[1]) >= min(int(MIN_STOOQ_ASSETS), len(tickers_list)):
+                return prices
+        except Exception as exc:
+            nonlocal_last_error[0] = exc
+        return None
+
+    # Python's nonlocal cannot be used in a nested helper that may be edited in
+    # older environments without care, so keep the Stooq-first error in a tiny box.
+    nonlocal_last_error: list[Exception | None] = [None]
+
+    stooq_prices = _maybe_stooq_first()
+    if stooq_prices is not None:
+        return stooq_prices
+    if nonlocal_last_error[0] is not None:
+        last_error = nonlocal_last_error[0]
+
+    if yf is None:
+        # If Yahoo is unavailable but Stooq failed too, surface the real fallback error.
+        raise ValueError(f"Market-data download failed. Last fallback error: {last_error}")
+
+    # 1) Batch Yahoo. One attempt only. If this shows rate limiting, do not hammer
+    # Yahoo ticker-by-ticker because it makes the public app slower and more likely
+    # to stay blocked.
+    yahoo_rate_limited = False
     try:
         raw = _yf_download_safe(
             tickers_list,
@@ -353,6 +404,19 @@ def download_yahoo_price_panel(
         return _finalize_prices(prices)
     except Exception as exc:
         last_error = exc
+        yahoo_rate_limited = _looks_like_yahoo_rate_limit(exc)
+
+    # If Yahoo has rate-limited the cloud instance, jump straight to Stooq instead
+    # of producing 37 repeated YFRateLimitError lines in the Streamlit logs.
+    if yahoo_rate_limited:
+        try:
+            prices = _download_stooq_price_panel(tickers_list, start_date=start_date, end_date=end_date)
+            prices = _finalize_prices(prices)
+            if int(prices.shape[1]) >= min(int(MIN_STOOQ_ASSETS), len(tickers_list)):
+                return prices
+        except Exception as exc:
+            last_error = exc
+        raise ValueError(f"Yahoo is rate-limiting this cloud app and fallback data was insufficient. Last error: {last_error}")
 
     # 2) Small Yahoo chunks. Cloud-safe: avoid one huge request and avoid threads.
     try:
@@ -368,8 +432,18 @@ def download_yahoo_price_panel(
         return _finalize_prices(prices)
     except Exception as exc:
         last_error = exc
+        if _looks_like_yahoo_rate_limit(exc):
+            try:
+                prices = _download_stooq_price_panel(tickers_list, start_date=start_date, end_date=end_date)
+                prices = _finalize_prices(prices)
+                if int(prices.shape[1]) >= min(int(MIN_STOOQ_ASSETS), len(tickers_list)):
+                    return prices
+            except Exception as fallback_exc:
+                last_error = fallback_exc
+            raise ValueError(f"Yahoo is rate-limiting this cloud app and fallback data was insufficient. Last error: {last_error}")
 
-    # 3) Per-ticker Yahoo download. This recovers when one bad ticker breaks a batch.
+    # 3) Per-ticker Yahoo download. Only use this when we are not seeing rate-limit
+    # symptoms. It helps with one bad ticker, but it is the wrong strategy for 429s.
     successful_parts: list[pd.DataFrame] = []
     for ticker in tickers_list:
         try:
@@ -389,6 +463,8 @@ def download_yahoo_price_panel(
                 successful_parts.append(prices)
         except Exception as exc:
             last_error = exc
+            if _looks_like_yahoo_rate_limit(exc):
+                break
             continue
 
     if successful_parts:
@@ -397,39 +473,17 @@ def download_yahoo_price_panel(
         if not merged.empty:
             return merged
 
-    # 4) Per-ticker Ticker.history. Some yfinance versions succeed here when download() fails.
-    history_parts: list[pd.DataFrame] = []
-    for ticker in tickers_list:
-        try:
-            prices = _download_single_yahoo_history(
-                ticker,
-                start_date=start_date,
-                end_date=end_date,
-                interval=interval,
-                auto_adjust=auto_adjust,
-                preferred_field=preferred_field,
-            )
-            if not prices.empty:
-                history_parts.append(prices)
-        except Exception as exc:
-            last_error = exc
-            continue
-
-    if history_parts:
-        merged = pd.concat(history_parts, axis=1)
-        merged = _clean_price_frame(merged)
-        if not merged.empty:
-            return merged
-
-    # 5) Deployment fallback: Stooq daily close data for US-listed ETFs/stocks.
+    # 4) Deployment fallback: Stooq daily close data for US-listed ETFs/stocks.
     # This avoids blocking the public demo when Yahoo returns empty frames from Streamlit Cloud.
     try:
         prices = _download_stooq_price_panel(tickers_list, start_date=start_date, end_date=end_date)
-        return _finalize_prices(prices)
+        prices = _finalize_prices(prices)
+        if int(prices.shape[1]) >= min(int(MIN_STOOQ_ASSETS), len(tickers_list)):
+            return prices
     except Exception as exc:
         last_error = exc
 
-    raise ValueError(f"Yahoo download failed for the requested universe. Last error: {last_error}")
+    raise ValueError(f"Yahoo download failed for the requested universe and fallback data was insufficient. Last error: {last_error}")
 
 
 def build_return_panel_from_prices(
@@ -520,16 +574,29 @@ def download_yahoo_macro_feature_panel(
 
     Output columns are date plus macro_* feature columns. Levels are forward-filled before computing
     daily/weekly/monthly change features. For rates tickers like ^TNX and ^IRX, raw quoted levels are kept.
+
+    Deployment note
+    ---------------
+    Macro tickers are Yahoo/index symbols and are not available through the Stooq ETF fallback.
+    If Yahoo is rate-limited on Streamlit Cloud, return an empty date-only frame instead of
+    blocking the Step 4 asset panel. The downstream feature pipeline should tolerate the
+    missing macro overlay.
     """
     tmap = dict(ticker_map or MACRO_TICKER_MAP)
-    prices = download_yahoo_price_panel(
-        tmap.keys(),
-        start_date=start_date,
-        end_date=end_date,
-        interval="1d",
-        auto_adjust=auto_adjust,
-        preferred_field=preferred_field,
-    )
+
+    try:
+        prices = _download_yahoo_price_panel_full(
+            _normalize_tickers(tmap.keys()),
+            start_date=start_date,
+            end_date=end_date,
+            interval="1d",
+            auto_adjust=auto_adjust,
+            preferred_field=preferred_field,
+            chunk_size=3,
+        )
+    except Exception:
+        return pd.DataFrame({"date": pd.to_datetime([], errors="coerce")})
+
     prices = prices.rename(columns={k: v for k, v in tmap.items() if k in prices.columns})
     prices = prices.sort_index().ffill()
 
