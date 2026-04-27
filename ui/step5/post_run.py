@@ -171,8 +171,8 @@ def _render_feature_mu_block(run_map: dict) -> None:
             st.write("No family summary available.")
 
     if selected_cols:
-        with st.expander("Selected feature_mu columns", expanded=False):
-            st.write(selected_cols)
+        st.markdown("**Selected feature_mu columns**")
+        st.write(selected_cols)
 
 
 
@@ -291,8 +291,8 @@ def _render_engine_timing_block(run_map: dict) -> None:
                 detail_rows.append({"component": key, "seconds": float(value)})
 
     if detail_rows:
-        with st.expander("Engine timing breakdown", expanded=False):
-            st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+        st.markdown("**Engine timing breakdown**")
+        st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
 
 
 
@@ -337,8 +337,8 @@ def _render_preset_suggestion_timing_block() -> None:
                 }
             )
         if clean_rows:
-            with st.expander("Preset suggestion timing breakdown", expanded=False):
-                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+            st.markdown("**Preset suggestion timing breakdown**")
+            st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
 
 
 def _render_auto_opt_suggestion_timing_block() -> None:
@@ -380,8 +380,8 @@ def _render_auto_opt_suggestion_timing_block() -> None:
                 }
             )
         if clean_rows:
-            with st.expander("Engine tuning timing breakdown", expanded=False):
-                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+            st.markdown("**Engine tuning timing breakdown**")
+            st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
 
 
 def _clear_auto_opt_suggestion_state() -> None:
@@ -541,8 +541,8 @@ def _render_universe_suggestion_timing_block() -> None:
                 }
             )
         if clean_rows:
-            with st.expander("Universe suggestion timing breakdown", expanded=False):
-                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+            st.markdown("**Universe suggestion timing breakdown**")
+            st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
 
 
 def _render_size_suggestion_timing_block() -> None:
@@ -586,8 +586,8 @@ def _render_size_suggestion_timing_block() -> None:
                 }
             )
         if clean_rows:
-            with st.expander("Universe size suggestion timing breakdown", expanded=False):
-                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+            st.markdown("**Universe size suggestion timing breakdown**")
+            st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
 
 
 def _render_completed_improvement_timing_summary() -> None:
@@ -658,8 +658,8 @@ def _render_completed_improvement_timing_summary() -> None:
             )
 
     if rows:
-        with st.expander("Completed suggestion timing breakdown", expanded=False):
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.markdown("**Completed suggestion timing breakdown**")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def _render_completed_improvement_flow(run_map: dict) -> None:
