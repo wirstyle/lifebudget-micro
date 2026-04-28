@@ -36,6 +36,8 @@ AUTO_OPT_SKIPPED_LABEL_KEY = "step5_auto_opt_skipped_label_v1"
 AUTO_OPT_SKIPPED_RUN_SIGNATURE_KEY = "step5_auto_opt_skipped_run_signature_v1"
 AUTO_OPT_SUGGESTION_TIMING_KEY = "step5_auto_opt_suggestion_timing_v1"
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
+STEP5_DEMO_SPEED_MODE_KEY = "step5_demo_speed_mode_v1"
+
 
 SAFE_TUNING_FIELDS: tuple[str, ...] = (
     "top_k",
@@ -54,6 +56,13 @@ FIELD_TO_WIDGET_KEY: dict[str, str] = {
     "weight_shrink": "step5_basic_weight_shrink",
     "inertia": "step5_basic_inertia",
 }
+
+
+def _demo_speed_mode_enabled() -> bool:
+    """Use smaller candidate budgets by default in hosted/demo mode."""
+    if STEP5_DEMO_SPEED_MODE_KEY not in st.session_state:
+        st.session_state[STEP5_DEMO_SPEED_MODE_KEY] = True
+    return bool(st.session_state.get(STEP5_DEMO_SPEED_MODE_KEY, True))
 
 
 # ---------------------------------------------------------------------------
@@ -428,9 +437,9 @@ def _candidate_specs(base_cfg: dict, philosophy: str, universe_size: int, *, max
             if cfg_payload.get(field) != base_cfg.get(field)
         }
         unique.append(item_map)
-        if len(unique) >= max(2, int(max_candidates)):
+        if len(unique) >= max(1, int(max_candidates)):
             break
-    return unique[: max(2, int(max_candidates))]
+    return unique[: max(1, int(max_candidates))]
 
 
 def _run_candidate(cfg_payload: dict, panel_df: pd.DataFrame) -> dict:
@@ -835,9 +844,44 @@ def render_auto_opt_improvement(run_result: dict) -> None:
     payload = _coerce_mapping(st.session_state.get(AUTO_OPT_SUGGESTION_STATE_KEY, {}))
     evaluations = list(payload.get("evaluations", []) or []) if saved_scope == scope else []
 
+    skipped_scope = str(st.session_state.get(AUTO_OPT_SKIPPED_SCOPE_KEY, "") or "")
+    skipped_label = str(st.session_state.get(AUTO_OPT_SKIPPED_LABEL_KEY, "") or "")
+    skipped_run_signature = str(st.session_state.get(AUTO_OPT_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
+    if (
+        skipped_scope
+        and skipped_scope == scope
+        and (not skipped_run_signature or skipped_run_signature == current_run_signature)
+        and not evaluations
+    ):
+        st.info("Engine-tuning check skipped for this run. Universe composition can now be reviewed or skipped.")
+        if skipped_label:
+            st.caption(f"Skipped engine-tuning check: {skipped_label}.")
+        return
+
     if saved_scope != scope or not evaluations:
+        quick_mode = _demo_speed_mode_enabled()
+        max_candidates = 1 if quick_mode else 3
+        estimate = "~30s" if quick_mode else "~90s+"
+        st.info(
+            f"Engine tuning is optional and reruns {max_candidates} technical candidate"
+            f"{'s' if max_candidates != 1 else ''} with the real engine. Estimated time: {estimate}."
+        )
+        left, right = st.columns(2)
+        should_run = False
+        with left:
+            should_run = st.button(
+                "Run quick engine-tuning check" if quick_mode else "Run full engine-tuning check",
+                key="step5_run_auto_opt_suggestion_check_v1",
+                use_container_width=True,
+            )
+        with right:
+            if st.button("Skip engine-tuning check", key="step5_skip_auto_opt_check_not_run_v1", use_container_width=True):
+                _skip_current_auto_opt_candidate(scope, "engine-tuning check skipped", current_run_signature)
+        if not should_run:
+            return
+
         with st.spinner("Testing small technical engine variations with the real engine..."):
-            payload = _run_auto_opt_search(run_map, max_candidates=3)
+            payload = _run_auto_opt_search(run_map, max_candidates=max_candidates)
         st.session_state[AUTO_OPT_SUGGESTION_STATE_KEY] = payload
         st.session_state[AUTO_OPT_SUGGESTION_SCOPE_KEY] = str(payload.get("scope", scope))
         st.session_state[AUTO_OPT_SUGGESTION_TIMING_KEY] = _coerce_mapping(payload.get("timing_summary", {}))

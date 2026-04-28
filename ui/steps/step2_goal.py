@@ -52,7 +52,7 @@ def _safe_money(value: float) -> str:
         return "£0"
 
 
-def _render_no_margin_mode(snapshot: dict, *, planning_horizon: int) -> None:
+def _render_no_margin_mode(snapshot: dict, *, planning_horizon: int, embedded: bool = False) -> None:
     baseline_margin = float(snapshot.get("baseline_savings_weekly", 0.0) or 0.0)
     discretionary_monthly = float(snapshot.get("discretionary_spending_monthly", 0.0) or 0.0)
     discretionary_weekly = discretionary_monthly * 12.0 / 52.0
@@ -64,7 +64,10 @@ def _render_no_margin_mode(snapshot: dict, *, planning_horizon: int) -> None:
     max_possible_margin = baseline_margin + max(discretionary_weekly, 0.0)
     structural_deficit = max_possible_margin < 0.0
 
-    section_header("Step 2 — Restore weekly margin first")
+    if embedded:
+        st.markdown("### Restore weekly margin first")
+    else:
+        section_header("Step 2 — Restore weekly margin first")
     st.warning(
         "Your current snapshot does not leave a weekly surplus yet. "
         "Before choosing a savings target, the useful next step is to restore break-even."
@@ -115,14 +118,17 @@ def _render_no_margin_mode(snapshot: dict, *, planning_horizon: int) -> None:
             )
 
     st.markdown("### Next action")
-    if st.button("Back to Step 1", key="step2_no_margin_back"):
-        st.session_state[CURRENT_STEP] = 1
-        st.rerun()
+    if embedded:
+        st.caption("Adjust the current situation section above until weekly surplus is restored.")
+    else:
+        if st.button("Back to Step 1", key="step2_no_margin_back"):
+            st.session_state[CURRENT_STEP] = 1
+            st.rerun()
 
     st.caption("Once weekly surplus is restored, Step 2 savings planning will unlock.")
 
 
-def render_step_2() -> None:
+def render_step_2(*, embedded: bool = False) -> None:
     snapshot = coerce_snapshot()
     intent = resolve_intent(snapshot)
     init_state = initialize_step2_state(snapshot)
@@ -136,10 +142,13 @@ def render_step_2() -> None:
 
     baseline_weekly = float(target_context.get("baseline_weekly", snapshot.get("baseline_savings_weekly", 0.0)) or 0.0)
     if baseline_weekly <= 0.0:
-        _render_no_margin_mode(snapshot, planning_horizon=planning_horizon)
+        _render_no_margin_mode(snapshot, planning_horizon=planning_horizon, embedded=embedded)
         return
 
-    section_header("Step 2 — Choose your savings goal")
+    if embedded:
+        st.caption("Choose a weekly savings target. The feasibility section updates below.")
+    else:
+        section_header("Step 2 — Choose your savings goal")
     st.info(INTENT_COPY[intent]["info"])
     st.caption(INTENT_COPY[intent]["tip"])
 
@@ -232,6 +241,10 @@ def render_step_2() -> None:
         feasibility=feasibility,
     )
     persist_step2_snapshot(updated_snapshot)
+
+    if embedded:
+        st.caption("Savings target saved. Review the short-term feasibility section below.")
+        return
 
     left, right = st.columns(2)
     with left:

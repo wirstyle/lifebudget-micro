@@ -64,6 +64,15 @@ UNIVERSE_SKIPPED_RUN_SIGNATURE_KEY = "step5_universe_skipped_run_signature_v1"
 UNIVERSE_SUGGESTION_TIMING_KEY = "step5_universe_suggestion_timing_v1"
 UNIVERSE_RECOMMENDATION_CONTEXT_KEY = "step5_recommended_universe_context_v1"
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
+STEP5_DEMO_SPEED_MODE_KEY = "step5_demo_speed_mode_v1"
+
+
+
+def _demo_speed_mode_enabled() -> bool:
+    """Use smaller candidate budgets by default in hosted/demo mode."""
+    if STEP5_DEMO_SPEED_MODE_KEY not in st.session_state:
+        st.session_state[STEP5_DEMO_SPEED_MODE_KEY] = True
+    return bool(st.session_state.get(STEP5_DEMO_SPEED_MODE_KEY, True))
 
 
 # ---------------------------------------------------------------------------
@@ -994,9 +1003,44 @@ def render_universe_improvement(run_result: dict) -> None:
     payload = _coerce_mapping(st.session_state.get(UNIVERSE_SUGGESTION_STATE_KEY, {}))
     evaluations = list(payload.get("evaluations", []) or []) if saved_scope == scope else []
 
+    skipped_scope = str(st.session_state.get(UNIVERSE_SKIPPED_SCOPE_KEY, "") or "")
+    skipped_label = str(st.session_state.get(UNIVERSE_SKIPPED_LABEL_KEY, "") or "")
+    skipped_run_signature = str(st.session_state.get(UNIVERSE_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
+    if (
+        skipped_scope
+        and skipped_scope == scope
+        and (not skipped_run_signature or skipped_run_signature == current_run_signature)
+        and not evaluations
+    ):
+        st.info("Universe-composition check skipped for this run. Universe size can now be reviewed or skipped.")
+        if skipped_label:
+            st.caption(f"Skipped universe-composition check: {skipped_label}.")
+        return
+
     if saved_scope != scope or not evaluations:
+        quick_mode = _demo_speed_mode_enabled()
+        max_candidates = 4
+        estimate = "~90s+"
+        st.info(
+            f"Universe composition is optional and reruns {max_candidates} asset-composition candidates "
+            f"with the real engine. Estimated time: {estimate}."
+        )
+        left, right = st.columns(2)
+        should_run = False
+        with left:
+            should_run = st.button(
+                "Run universe composition check" if quick_mode else "Run full universe check",
+                key="step5_run_universe_suggestion_check_v1",
+                use_container_width=True,
+            )
+        with right:
+            if st.button("Skip universe-composition check", key="step5_skip_universe_check_not_run_v1", use_container_width=True):
+                _skip_current_universe_candidate(scope, "universe-composition check skipped", current_run_signature)
+        if not should_run:
+            return
+
         with st.spinner("Testing alternative universe compositions with the real engine..."):
-            payload = _run_universe_search(run_map, max_candidates=4)
+            payload = _run_universe_search(run_map, max_candidates=max_candidates)
         st.session_state[UNIVERSE_SUGGESTION_STATE_KEY] = payload
         st.session_state[UNIVERSE_SUGGESTION_SCOPE_KEY] = str(payload.get("scope", scope))
         st.session_state[UNIVERSE_SUGGESTION_TIMING_KEY] = _coerce_mapping(payload.get("timing_summary", {}))

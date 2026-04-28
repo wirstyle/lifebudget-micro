@@ -47,6 +47,63 @@ from ui.step5.reliability_assessment import render_result_reliability_assessment
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
 PRESET_SUGGESTION_TIMING_KEY = "step5_preset_suggestion_timing_v1"
 STEP5_REAL_RUN_RESULT_ANCHOR_ID = "step5-real-run-result-anchor"
+STEP5_DEMO_SPEED_MODE_KEY = "step5_demo_speed_mode_v1"
+
+
+
+def _demo_speed_mode_enabled() -> bool:
+    """Return whether optional improvement checks should use a smaller candidate budget.
+
+    Demo speed mode is ON by default because Streamlit Cloud runs are user-facing
+    and each candidate reruns the real engine. Users can disable it from the
+    Step 5 improvement area when they intentionally want fuller diagnostics.
+    """
+    if STEP5_DEMO_SPEED_MODE_KEY not in st.session_state:
+        st.session_state[STEP5_DEMO_SPEED_MODE_KEY] = True
+    return bool(st.session_state.get(STEP5_DEMO_SPEED_MODE_KEY, True))
+
+
+def _render_improvement_mode_control() -> None:
+    """Render the global mode/gating note for Step 5 optional suggestions."""
+    if STEP5_DEMO_SPEED_MODE_KEY not in st.session_state:
+        st.session_state[STEP5_DEMO_SPEED_MODE_KEY] = True
+
+    st.markdown("## 4. Improve this setup (optional)")
+    st.info(
+        "Optional improvement checks rerun candidate strategies with the real engine. "
+        "They are useful for audit/comparison, but they are not required before Step 6 projection."
+    )
+    st.checkbox(
+        "Demo speed mode — test fewer candidates for a faster hosted demo",
+        key=STEP5_DEMO_SPEED_MODE_KEY,
+        help=(
+            "Recommended for Streamlit Cloud. ON uses a smaller candidate budget; "
+            "OFF runs the fuller diagnostic search and may take several minutes."
+        ),
+    )
+    if _demo_speed_mode_enabled():
+        st.caption(
+            "Current mode: quick checks. Preset/engine tuning test 1 candidate each; "
+            "universe composition keeps the full 4-candidate comparison; size remains capped for speed. Use full mode only for deeper diagnostics."
+        )
+    else:
+        st.warning(
+            "Full diagnostic mode is enabled. The optional suggestion flow can take several minutes on Streamlit Cloud.",
+            icon="⚠️",
+        )
+
+
+def _auto_opt_has_any_candidate_payload() -> bool:
+    payload = _coerce_mapping(st.session_state.get(AUTO_OPT_SUGGESTION_STATE_KEY, {}))
+    return bool(list(payload.get("evaluations", []) or []))
+
+
+def _render_universe_waiting_for_engine_tuning_not_run() -> None:
+    st.markdown("### Universe composition suggestion")
+    st.info(
+        "Universe composition is waiting for the engine-tuning decision. "
+        "Run or skip the engine-tuning check first so the sequence stays auditable."
+    )
 
 
 def _maybe_scroll_to_real_run_result() -> None:
@@ -683,7 +740,7 @@ def _render_completed_improvement_flow(run_map: dict) -> None:
         tuning_label = str(st.session_state.get(AUTO_OPT_APPLIED_LABEL_KEY, "") or "the accepted improvement suggestion")
         message = f"Improvement flow completed: {tuning_label}. The rerun-tested candidate is now the current Step 5 result."
 
-    st.markdown("## 4. Improve this setup (optional)")
+    _render_improvement_mode_control()
     st.success(message)
     st.caption(
         "Preset, engine-tuning, universe-composition, and universe-size tests are kept sequential to avoid mixing candidate results. "
@@ -1400,16 +1457,18 @@ def render_post_run(run_result: dict) -> None:
         # Phase 3 has already been resolved for this run. Do not stop the
         # improvement flow here: Phase 4 can now test universe size on top of
         # the active composition baseline.
-        st.markdown("## 4. Improve this setup (optional)")
+        _render_improvement_mode_control()
         render_universe_improvement(run_map)
         render_size_improvement(run_map)
     elif auto_opt_already_applied or auto_opt_already_skipped:
         # Phase 2 has already been resolved for this run. Do not send the
         # current signature back through Phase 1, otherwise the preset search
         # is tested again before Phase 3 becomes available.
+        _render_improvement_mode_control()
         render_auto_opt_improvement(run_map)
         render_universe_improvement(run_map)
     else:
+        _render_improvement_mode_control()
         preset_flow_state = render_preset_improvement(run_map)
         if _preset_blocks_engine_tuning(preset_flow_state):
             _render_engine_tuning_waiting_for_preset()
@@ -1417,6 +1476,12 @@ def render_post_run(run_result: dict) -> None:
             render_auto_opt_improvement(run_map)
             if _auto_opt_blocks_universe(run_map):
                 _render_universe_waiting_for_engine_tuning()
+            elif (
+                not _auto_opt_applied_for_current_run(run_map)
+                and not _auto_opt_skipped_for_current_run(run_map)
+                and not _auto_opt_has_any_candidate_payload()
+            ):
+                _render_universe_waiting_for_engine_tuning_not_run()
             else:
                 render_universe_improvement(run_map)
 

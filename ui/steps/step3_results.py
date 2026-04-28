@@ -399,15 +399,19 @@ def _render_action_guidance(summary: dict, next_actions: dict) -> None:
         )
 
 
-def render_step_3() -> None:
-    section_header("Step 3 — Short-term feasibility")
+def render_step_3(*, embedded: bool = False) -> None:
+    if embedded:
+        st.caption("Stress-test the selected weekly savings target before continuing.")
+    else:
+        section_header("Step 3 — Short-term feasibility")
     snapshot = coerce_snapshot()
     if not snapshot:
-        st.warning("No planning snapshot found yet. Complete Steps 1 and 2 first.")
-        if st.button("Go back to Step 1", key="step3_go_step1"):
-            st.session_state[CURRENT_STEP] = 1
-            st.session_state["current_step"] = 1
-            st.rerun()
+        st.warning("No planning snapshot found yet. Complete the current situation and savings target sections first.")
+        if not embedded:
+            if st.button("Go back to Step 1", key="step3_go_step1"):
+                st.session_state[CURRENT_STEP] = 1
+                st.session_state["current_step"] = 1
+                st.rerun()
         return
 
     pathway = _current_pathway()
@@ -455,6 +459,12 @@ def render_step_3() -> None:
 
     st.markdown("---")
     card_title, card_body, button_label, next_step = _branch_card(pathway)
+    if embedded:
+        st.caption(f"**{card_title}:** {card_body}")
+        if st.button(button_label, key=f"step3_continue_branch_{pathway}", use_container_width=True):
+            _go_to_next_branch(pathway, next_step)
+        return
+
     left, right = st.columns([1.0, 2.0])
     with left:
         if st.button("Back to Step 2", key="step3_back"):

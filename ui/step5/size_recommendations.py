@@ -69,6 +69,8 @@ SIZE_SKIPPED_LABEL_KEY = "step5_size_skipped_label_v1"
 SIZE_SKIPPED_RUN_SIGNATURE_KEY = "step5_size_skipped_run_signature_v1"
 SIZE_SUGGESTION_TIMING_KEY = "step5_size_suggestion_timing_v1"
 SIZE_RECOMMENDATION_CONTEXT_KEY = "step5_recommended_size_context_v1"
+STEP5_DEMO_SPEED_MODE_KEY = "step5_demo_speed_mode_v1"
+
 
 # Cached deployment panel currently contains 106 assets. Keep Phase 4 honest: never
 # engine-test sizes above the public/demo supported cap. Larger research sizes
@@ -89,6 +91,13 @@ TECHNICAL_WIDGET_KEYS: dict[str, str] = {
     "feature_mu_enabled": "step5_basic_feature_mu_enabled",
     "feature_mu_blend": "step5_basic_feature_mu_blend",
 }
+
+
+def _demo_speed_mode_enabled() -> bool:
+    """Use smaller candidate budgets by default in hosted/demo mode."""
+    if STEP5_DEMO_SPEED_MODE_KEY not in st.session_state:
+        st.session_state[STEP5_DEMO_SPEED_MODE_KEY] = True
+    return bool(st.session_state.get(STEP5_DEMO_SPEED_MODE_KEY, True))
 
 
 # ---------------------------------------------------------------------------
@@ -1328,9 +1337,44 @@ def render_size_improvement(run_result: dict) -> None:
     payload = _coerce_mapping(st.session_state.get(SIZE_SUGGESTION_STATE_KEY, {}))
     evaluations = list(payload.get("evaluations", []) or []) if saved_scope == scope else []
 
+    skipped_scope = str(st.session_state.get(SIZE_SKIPPED_SCOPE_KEY, "") or "")
+    skipped_label = str(st.session_state.get(SIZE_SKIPPED_LABEL_KEY, "") or "")
+    skipped_run_signature = str(st.session_state.get(SIZE_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
+    if (
+        skipped_scope
+        and skipped_scope == scope
+        and (not skipped_run_signature or skipped_run_signature == current_run_signature)
+        and not evaluations
+    ):
+        st.success("Universe-size check skipped for this run. The optional improvement flow is complete.")
+        if skipped_label:
+            st.caption(f"Skipped size check: {skipped_label}.")
+        return
+
     if saved_scope != scope or not evaluations:
+        quick_mode = _demo_speed_mode_enabled()
+        max_engine_tests = 2 if quick_mode else 4
+        estimate = "~45–75s" if quick_mode else "~2 min+"
+        st.info(
+            f"Universe size is the slowest optional check. It will rerun up to {max_engine_tests} size candidate"
+            f"{'s' if max_engine_tests != 1 else ''} with the real engine. Estimated time: {estimate}."
+        )
+        left, right = st.columns(2)
+        should_run = False
+        with left:
+            should_run = st.button(
+                "Run quick size check" if quick_mode else "Run full size check",
+                key="step5_run_size_suggestion_check_v1",
+                use_container_width=True,
+            )
+        with right:
+            if st.button("Skip size check and finish", key="step5_skip_size_check_not_run_v1", use_container_width=True):
+                _skip_current_size_candidate(scope, "size check skipped", current_run_signature)
+        if not should_run:
+            return
+
         with st.spinner("Testing universe-size candidates with the real engine..."):
-            payload = _run_size_search(run_map, max_engine_tests=4)
+            payload = _run_size_search(run_map, max_engine_tests=max_engine_tests)
         st.session_state[SIZE_SUGGESTION_STATE_KEY] = payload
         st.session_state[SIZE_SUGGESTION_SCOPE_KEY] = str(payload.get("scope", scope))
         st.session_state[SIZE_SUGGESTION_TIMING_KEY] = _coerce_mapping(payload.get("timing_summary", {}))
@@ -1362,8 +1406,8 @@ def render_size_improvement(run_result: dict) -> None:
     st.caption(
         f"Size-search window: current baseline {baseline_size} → {philosophy} guidance cap {cap_size} "
         f"(deployment hard cap {deployment_hard_cap}). "
-        f"Coarse candidates: {coarse_label}. If one coarse size looks promising, up to two local refinements are tested nearby. "
-        "Baseline is not rerun."
+        f"Planned candidates: {coarse_label}. Demo speed mode may stop after the capped coarse tests; "
+        "full mode can add nearby local refinements. Baseline is not rerun."
     )
 
     accepted_items = [dict(x) for x in evaluations if bool(_coerce_mapping(x).get("accepted", False))]

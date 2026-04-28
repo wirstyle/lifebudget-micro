@@ -48,6 +48,8 @@ PRESET_SKIPPED_SCOPE_KEY = "step5_preset_skipped_scope_v1"
 PRESET_SKIPPED_LABEL_KEY = "step5_preset_skipped_label_v1"
 PRESET_SUGGESTION_TIMING_KEY = "step5_preset_suggestion_timing_v1"
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
+STEP5_DEMO_SPEED_MODE_KEY = "step5_demo_speed_mode_v1"
+
 
 # Keep these as string constants instead of importing auto_opt_recommendations here.
 # Importing the second-phase module from the first-phase module is unnecessary and
@@ -60,6 +62,13 @@ AUTO_OPT_STATE_KEYS_TO_CLEAR = (
     "step5_auto_opt_applied_run_signature_v1",
     "step5_auto_opt_applied_label_v1",
 )
+
+
+def _demo_speed_mode_enabled() -> bool:
+    """Use smaller candidate budgets by default in hosted/demo mode."""
+    if STEP5_DEMO_SPEED_MODE_KEY not in st.session_state:
+        st.session_state[STEP5_DEMO_SPEED_MODE_KEY] = True
+    return bool(st.session_state.get(STEP5_DEMO_SPEED_MODE_KEY, True))
 
 
 # ---------------------------------------------------------------------------
@@ -831,28 +840,9 @@ def render_preset_improvement(run_result: dict) -> dict:
     if not perf:
         return flow_state
 
-    st.markdown("## 4. Improve this setup (optional)")
+    st.markdown("### Preset suggestion")
     st.caption(
-        "This section tests optional improvements step by step. Suggestions are only shown after they have been "
-        "rerun-tested against the current Step 4 data panel."
-    )
-
-    with st.expander("How the improvement flow works", expanded=False):
-        st.markdown(
-            """
-            **Available now**
-            1. **Strategy preset suggestion** — tests whether a nearby strategy style gives a better trade-off.
-            2. **Engine tuning suggestion** — keeps the same Step 4 universe and strategy preset, but adjusts small technical engine knobs.
-            3. **Universe composition suggestion** — keeps the same preset, technical config, and size, but tests whether a different asset mix improves the result.
-            4. **Universe size suggestion** — tests whether a smaller or larger deployment-supported universe works better.
-            """
-        )
-        st.caption(
-            "Suggestions appear sequentially. Later checks only become available after the previous decision has been applied or skipped."
-        )
-
-    st.caption(
-        "Phase 1 tests nearby strategy presets after the real engine run. "
+        "Optional phase 1: tests nearby strategy presets after the real engine run. "
         "This does not change the Step 4 universe, assets, size, or market-data panel."
     )
 
@@ -885,13 +875,44 @@ def render_preset_improvement(run_result: dict) -> dict:
     payload = _coerce_mapping(st.session_state.get(PRESET_SUGGESTION_STATE_KEY, {}))
     evaluations = list(payload.get("evaluations", []) or []) if saved_scope == scope else []
 
+    skipped_scope = str(st.session_state.get(PRESET_SKIPPED_SCOPE_KEY, "") or "")
+    skipped_label = str(st.session_state.get(PRESET_SKIPPED_LABEL_KEY, "") or "")
+    if skipped_scope and skipped_scope == scope and not evaluations:
+        st.info("Preset check skipped for this run. Engine tuning can now be reviewed or skipped.")
+        if skipped_label:
+            st.caption(f"Skipped preset check: {skipped_label}.")
+        flow_state.update({"status": "skipped", "has_recommendation": False, "blocks_auto_opt": False})
+        return flow_state
+
     # Product flow: after the user runs the real engine, do not ask them to run a
     # second diagnostic button. Test the nearby preset candidates once for the
     # current run scope, cache them in session_state, and then show the Apply
     # choice directly.
     if saved_scope != scope or not evaluations:
+        quick_mode = _demo_speed_mode_enabled()
+        max_candidates = 1 if quick_mode else 2
+        estimate = "~30s" if quick_mode else "~60s+"
+        st.info(
+            f"Preset suggestion is optional and reruns {max_candidates} candidate"
+            f"{'s' if max_candidates != 1 else ''} with the real engine. Estimated time: {estimate}."
+        )
+        left, right = st.columns(2)
+        should_run = False
+        with left:
+            should_run = st.button(
+                "Run quick preset check" if quick_mode else "Run full preset check",
+                key="step5_run_preset_suggestion_check_v1",
+                use_container_width=True,
+            )
+        with right:
+            if st.button("Skip preset check and continue", key="step5_skip_preset_check_not_run_v1", use_container_width=True):
+                _skip_current_preset_candidate(scope, "preset check skipped")
+        if not should_run:
+            flow_state.update({"status": "waiting_for_user", "has_recommendation": False, "blocks_auto_opt": True})
+            return flow_state
+
         with st.spinner("Testing nearby preset alternatives with the real engine..."):
-            payload = _run_preset_search(run_map, max_candidates=2)
+            payload = _run_preset_search(run_map, max_candidates=max_candidates)
         st.session_state[PRESET_SUGGESTION_STATE_KEY] = payload
         st.session_state[PRESET_SUGGESTION_SCOPE_KEY] = str(payload.get("scope", scope))
         st.session_state[PRESET_SUGGESTION_TIMING_KEY] = _coerce_mapping(payload.get("timing_summary", {}))
