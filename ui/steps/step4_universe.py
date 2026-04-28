@@ -570,21 +570,32 @@ def _render_alignment_message(current_combo_status: str, current_philosophy: str
 
 
 def _render_universe_mix_compact(selected_assets: list[str]) -> None:
+    """Render universe mix details without creating a nested expander.
+
+    This helper is called from inside the Step 4 advanced setup expander.
+    Streamlit does not allow expanders inside expanders, so the table content
+    must be rendered directly here rather than wrapped in another st.expander.
+    """
+    st.markdown("**Universe mix and full composition**")
     mix_df, mix_summary = build_universe_mix(selected_assets)
     detail_df = build_universe_mix_detail(selected_assets)
-    with st.expander("Universe mix and full composition", expanded=False):
-        rendered = show_table_if_not_empty(mix_df, empty_message="No universe mix available yet.", use_container_width=True, hide_index=True)
-        if rendered:
-            n_assets = int(mix_summary.get("n_assets", len(selected_assets)) or len(selected_assets))
-            group_count = int(mix_summary.get("group_count", 0) or 0)
-            if group_count <= 0 and isinstance(mix_df, pd.DataFrame) and "group" in mix_df.columns:
-                group_count = int(mix_df["group"].nunique())
-            classified_share = float(mix_summary.get("classified_share", 0.0) or 0.0)
-            st.caption(f"{n_assets} assets across {group_count} groups. Classified share: {classified_share:.0%}.")
-        if isinstance(detail_df, pd.DataFrame) and not detail_df.empty:
-            st.dataframe(detail_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No detailed universe taxonomy is available yet.")
+    rendered = show_table_if_not_empty(
+        mix_df,
+        empty_message="No universe mix available yet.",
+        use_container_width=True,
+        hide_index=True,
+    )
+    if rendered:
+        n_assets = int(mix_summary.get("n_assets", len(selected_assets)) or len(selected_assets))
+        group_count = int(mix_summary.get("group_count", 0) or 0)
+        if group_count <= 0 and isinstance(mix_df, pd.DataFrame) and "group" in mix_df.columns:
+            group_count = int(mix_df["group"].nunique())
+        classified_share = float(mix_summary.get("classified_share", 0.0) or 0.0)
+        st.caption(f"{n_assets} assets across {group_count} groups. Classified share: {classified_share:.0%}.")
+    if isinstance(detail_df, pd.DataFrame) and not detail_df.empty:
+        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No detailed universe taxonomy is available yet.")
 
 
 
