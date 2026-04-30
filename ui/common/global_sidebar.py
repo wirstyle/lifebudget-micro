@@ -1347,20 +1347,62 @@ def _render_step5_next_action() -> None:
 def _render_step5_q_and_a() -> None:
     with st.expander("Strategy Engine Q&A", expanded=False):
         st.markdown("**Does this guarantee future returns?**")
-        st.caption("No. It tests a strategy against historical data. Future markets can behave differently.")
+        st.caption(
+            "No. It is a historical strategy test. It helps compare setups inside the app, but future markets can behave differently."
+        )
 
         st.markdown("**Why is the engine needed?**")
-        st.caption("The selected universe is only a list of assets. The engine creates a tested portfolio by selecting and weighting assets over time.")
+        st.caption(
+            "Step 4 gives the app a universe of possible assets. The engine turns that universe into an actual tested portfolio "
+            "by choosing weights through time. The headline metrics are calculated after that return path exists."
+        )
 
         st.markdown("**What can the engine improve?**")
-        st.caption("Diversification, drawdown control, dynamic asset selection, and alignment with the chosen risk profile.")
+        st.caption(
+            "It can improve diversification, drawdown control, dynamic asset selection, and fit with the chosen risk profile."
+        )
 
         st.markdown("**What can the engine worsen?**")
-        st.caption("It may lag simple assets in strong bull markets; risk controls can reduce upside; weak signals can overfit; extra complexity can add turnover and parameter sensitivity.")
+        st.caption(
+            "It can lag simple benchmarks in strong bull markets, reduce upside through risk controls, overfit weak signals, "
+            "or add turnover and parameter sensitivity."
+        )
+
+        st.markdown("**What does CAGR mean here?**")
+        st.caption(
+            "CAGR is the annualised growth rate of the tested strategy over the evaluated historical window. "
+            "It summarises long-run growth, but it is not a promised future return."
+        )
+
+        st.markdown("**What does volatility mean here?**")
+        st.caption(
+            "Volatility is the bumpiness of the tested return path. Higher volatility usually means the journey feels less stable, "
+            "even when the long-term return looks attractive."
+        )
+
+        st.markdown("**What does Sharpe mean here?**")
+        st.caption(
+            "Sharpe compares return with volatility. A higher Sharpe usually means the strategy was paid better for the risk it took, "
+            "but it still depends on the tested period and assumptions."
+        )
+
+        st.markdown("**What does max drawdown mean?**")
+        st.caption(
+            "Max drawdown is the worst historical fall from a previous high to a later low. It is the main pain-test metric: "
+            "it shows how much discomfort the user would have needed to tolerate before recovery."
+        )
+
+        st.markdown("**Why can a good CAGR still feel uncomfortable?**")
+        st.caption(
+            "Because CAGR describes the whole-period average, while volatility and drawdown describe the journey. "
+            "A strategy can finish well and still have difficult periods along the way."
+        )
 
         st.markdown("**Why run this before projection?**")
-        st.caption("Without a tested engine run, the long-term module can only use savings-only or educational proxy assumptions.")
-
+        st.caption(
+            "The projection module needs a return path or a fallback assumption. A real Step 5 run gives it a tested strategy path "
+            "instead of a generic educational proxy."
+        )
 
 def _render_step5_terms() -> None:
     with st.expander("Strategy Engine terms", expanded=False):
@@ -1370,36 +1412,37 @@ def _render_step5_terms() -> None:
         st.markdown("**Style preset**")
         st.caption("The risk posture applied to the selected template.")
 
-        st.markdown("**CAGR**")
-        st.caption("Annualised growth rate of the tested strategy over the historical period. It is not a guaranteed future return.")
-
-        st.markdown("**Volatility**")
-        st.caption("How much the strategy return path fluctuated. Higher volatility usually means a rougher ride.")
-
-        st.markdown("**Sharpe**")
-        st.caption("Risk-adjusted return measure. Higher can be better, but it depends on the tested period and assumptions.")
-
-        st.markdown("**Max drawdown**")
-        st.caption("The largest peak-to-trough loss during the tested period.")
-
         st.markdown("**Out-of-sample path**")
         st.caption("The tested return series after model decisions; closer to a backtest than an in-sample fit.")
 
-        st.caption("These metrics describe historical test behaviour; they are not predictions or investment advice.")
-
+        st.caption("Metric explanations are in the Strategy Engine Q&A above. These terms are not predictions or investment advice.")
 
 def _render_step5_sidebar(step: int) -> None:
-    """Render a focused sidebar for the Strategy Engine module."""
+    """Render a focused sidebar for the Strategy Engine module.
+
+    Before a portfolio run, the sidebar prioritises setup context. After a
+    successful run, it prioritises the stored result and headline metrics.
+    """
     _render_step5_navigation_block()
 
-    st.divider()
-    _render_step5_engine_setup()
+    if _has_step5_result():
+        st.divider()
+        _render_step5_run_status()
 
-    st.divider()
-    _render_step5_funding_bridge()
+        st.divider()
+        _render_step5_engine_setup()
 
-    st.divider()
-    _render_step5_run_status()
+        st.divider()
+        _render_step5_funding_bridge()
+    else:
+        st.divider()
+        _render_step5_engine_setup()
+
+        st.divider()
+        _render_step5_funding_bridge()
+
+        st.divider()
+        _render_step5_run_status()
 
     st.divider()
     _render_step5_next_action()

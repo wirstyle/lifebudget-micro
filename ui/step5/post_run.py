@@ -1108,6 +1108,41 @@ def _render_metric_explainer(perf: dict) -> None:
 
 
 
+def _decision_guide_message(perf: dict, philosophy: Any) -> str:
+    """Return the single post-run decision guide tailored to the selected risk profile."""
+    profile = str(philosophy or "Balanced").strip() or "Balanced"
+    profile_key = profile.lower()
+    cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
+    sharpe = _safe_float(perf.get("sharpe", 0.0), 0.0)
+    vol = _safe_float(perf.get("annual_volatility", perf.get("volatility", 0.0)), 0.0)
+    maxdd = abs(_safe_float(perf.get("max_drawdown", 0.0), 0.0))
+
+    if profile_key in {"defensive", "conservative"}:
+        philosophy_rule = (
+            "For a Defensive/Conservative profile, prioritise lower drawdown and lower volatility, "
+            "but do not accept a change that weakens Sharpe so much that the smoother path stops being worth it."
+        )
+    elif profile_key == "growth":
+        philosophy_rule = (
+            "For a Growth profile, the useful improvement is better Sharpe or lower drawdown without killing upside; "
+            "do not accept a safer-looking rerun if it removes too much of the CAGR case."
+        )
+    else:
+        philosophy_rule = (
+            "For a Balanced profile, judge the full trade-off: lower drawdown is useful, but not if Sharpe or CAGR "
+            "falls enough to make the strategy less balanced overall."
+        )
+
+    return (
+        "**Decision guide:** only apply a suggestion if the rerun-tested result improves the decision trade-off, "
+        "not just one isolated metric. "
+        f"Current result: CAGR {_pct(cagr)}, volatility {_pct(vol)}, MaxDD -{100.0 * maxdd:.2f}%, "
+        f"Sharpe {sharpe:.2f}. {philosophy_rule} "
+        "If this result already feels acceptable, the next step is to continue to the Long-Term Scenario Explorer; "
+        "benchmark, reliability, and improvement checks are optional review layers."
+    )
+
+
 def _render_what_to_watch(perf: dict, philosophy: Any, *, as_expander: bool = True) -> None:
     profile = str(philosophy or "Balanced").strip() or "Balanced"
     cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
@@ -1273,7 +1308,7 @@ def _render_engine_levers_to_try(perf: dict, philosophy: Any, run_map: dict, *, 
         )
 
     def _body() -> None:
-        st.markdown("**Engine levers that could improve this run**")
+        st.markdown("**Engine levers considered by the improvement checks**")
         st.markdown(f"**Improvement target:** {_engine_improvement_target(perf, philosophy)}")
         st.markdown(f"**Suggested first test:** {suggested_direction}")
 
@@ -1288,13 +1323,13 @@ def _render_engine_levers_to_try(perf: dict, philosophy: Any, run_map: dict, *, 
         ]
         st.caption("Current engine levers: " + " · ".join(current_bits))
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        st.info(
-            "The improvement phases below test these kinds of changes with the real engine before showing an Apply button. "
-            "Do not change knobs just because they sound better; compare the rerun-tested metrics."
-        )
 
     if as_expander:
-        with st.expander("Engine levers that could improve this run", expanded=False):
+        with st.expander("Improvement test diagnostics", expanded=False):
+            st.caption(
+                "Optional diagnostic: shows which engine controls the improvement checks may adjust. "
+                "Suggestions below are still rerun with the real engine before they can be applied."
+            )
             _body()
     else:
         _body()
@@ -1528,6 +1563,255 @@ def _benchmark_context_rows(perf: dict, run_map: dict) -> tuple[pd.DataFrame, li
     return pd.DataFrame(rows), notes, window_meta
 
 
+def _parse_percent_label(value: Any) -> float | None:
+    """Convert labels such as '9.73%' or '-19.43%' back to decimal values."""
+    try:
+        text = str(value or "").strip().replace("%", "").replace("+", "")
+        if not text or text == "—":
+            return None
+        return float(text) / 100.0
+    except Exception:
+        return None
+
+
+def _benchmark_row_for(bench_df: pd.DataFrame, needle: str) -> dict:
+    if not isinstance(bench_df, pd.DataFrame) or bench_df.empty or "Reference" not in bench_df.columns:
+        return {}
+    try:
+        rows = bench_df.loc[bench_df["Reference"].astype(str).str.contains(needle, case=False, regex=False)]
+        if rows.empty:
+            return {}
+        return dict(rows.iloc[0])
+    except Exception:
+        return {}
+
+
+def _render_compact_same_period_context(perf: dict, run_map: dict) -> None:
+    """Show a small same-period benchmark context inside the result-reading expander.
+
+    The full benchmark tables remain in Benchmark sanity check. This block keeps
+    the main interpretation compact by showing only the strategy, S&P 500 and
+    Nasdaq-100 over the same evaluated period.
+    """
+    bench_df, _, _ = _benchmark_context_rows(perf, run_map)
+    if not isinstance(bench_df, pd.DataFrame) or bench_df.empty:
+        return
+
+    strategy = _benchmark_row_for(bench_df, "Your strategy")
+    sp500 = _benchmark_row_for(bench_df, "SPY")
+    nasdaq = _benchmark_row_for(bench_df, "QQQ")
+    if not strategy or not sp500 or not nasdaq:
+        return
+
+    strategy_cagr = _parse_percent_label(strategy.get("CAGR"))
+    sp500_cagr = _parse_percent_label(sp500.get("CAGR"))
+    nasdaq_cagr = _parse_percent_label(nasdaq.get("CAGR"))
+    strategy_vol = _parse_percent_label(strategy.get("Vol"))
+    nasdaq_vol = _parse_percent_label(nasdaq.get("Vol"))
+    strategy_dd = _parse_percent_label(strategy.get("MaxDD"))
+    nasdaq_dd = _parse_percent_label(nasdaq.get("MaxDD"))
+
+    if (
+        strategy_cagr is not None
+        and sp500_cagr is not None
+        and nasdaq_cagr is not None
+        and strategy_vol is not None
+        and nasdaq_vol is not None
+        and strategy_dd is not None
+        and nasdaq_dd is not None
+        and strategy_cagr < sp500_cagr
+        and strategy_cagr < nasdaq_cagr
+        and strategy_vol < nasdaq_vol
+        and abs(strategy_dd) < abs(nasdaq_dd)
+    ):
+        context_text = (
+            "**Same-period context:** Over the same evaluated period, this strategy had lower CAGR "
+            "than the S&P 500 and Nasdaq-100, but also lower volatility and a less severe max drawdown "
+            "than Nasdaq-100. This suggests a more risk-controlled profile rather than a pure growth "
+            "benchmark profile."
+        )
+    else:
+        context_text = (
+            "**Same-period context:** The table below compares this strategy with the S&P 500 and "
+            "Nasdaq-100 over the same evaluated period. Use it as context for the risk/return profile, "
+            "not as a replacement for the active strategy result."
+        )
+
+    st.markdown(context_text)
+
+    rows = [
+        {
+            "Reference": "Your strategy",
+            "CAGR": strategy.get("CAGR", "—"),
+            "Vol": strategy.get("Vol", "—"),
+            "MaxDD": strategy.get("MaxDD", "—"),
+            "Sharpe": strategy.get("Sharpe", "—"),
+        },
+        {
+            "Reference": "S&P 500",
+            "CAGR": sp500.get("CAGR", "—"),
+            "Vol": sp500.get("Vol", "—"),
+            "MaxDD": sp500.get("MaxDD", "—"),
+            "Sharpe": sp500.get("Sharpe", "—"),
+        },
+        {
+            "Reference": "Nasdaq-100",
+            "CAGR": nasdaq.get("CAGR", "—"),
+            "Vol": nasdaq.get("Vol", "—"),
+            "MaxDD": nasdaq.get("MaxDD", "—"),
+            "Sharpe": nasdaq.get("Sharpe", "—"),
+        },
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+def _profile_family_for_verdict(philosophy: Any) -> str:
+    raw = str(philosophy or "Balanced").strip().lower()
+    if "defensive" in raw or "conservative" in raw:
+        return "defensive"
+    if "growth" in raw:
+        return "growth"
+    return "balanced"
+
+
+def _higher_is_better_verdict(value: float, thresholds: tuple[float, float, float, float]) -> str:
+    very_good, good, normal, bad = thresholds
+    if value >= very_good:
+        return "Very good"
+    if value >= good:
+        return "Good"
+    if value >= normal:
+        return "Normal"
+    if value >= bad:
+        return "Bad"
+    return "Very bad"
+
+
+def _lower_is_better_verdict(value: float, thresholds: tuple[float, float, float, float]) -> str:
+    very_good, good, normal, bad = thresholds
+    if value <= very_good:
+        return "Very good"
+    if value <= good:
+        return "Good"
+    if value <= normal:
+        return "Normal"
+    if value <= bad:
+        return "Bad"
+    return "Very bad"
+
+
+def _render_metric_verdicts_for_profile(perf: dict, philosophy: Any) -> None:
+    """Read the four headline metrics in the context of the selected risk profile."""
+    profile_label = str(philosophy or "Balanced").strip() or "Balanced"
+    profile_family = _profile_family_for_verdict(profile_label)
+
+    cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
+    vol = _safe_float(perf.get("annual_volatility", perf.get("volatility", 0.0)), 0.0)
+    maxdd_abs = abs(_safe_float(perf.get("max_drawdown", 0.0), 0.0))
+    sharpe = _safe_float(perf.get("sharpe", 0.0), 0.0)
+
+    cagr_thresholds = {
+        "defensive": (0.090, 0.060, 0.035, 0.010),
+        "balanced": (0.120, 0.080, 0.050, 0.020),
+        "growth": (0.150, 0.100, 0.060, 0.020),
+    }[profile_family]
+    vol_thresholds = {
+        "defensive": (0.080, 0.110, 0.150, 0.200),
+        "balanced": (0.100, 0.130, 0.170, 0.220),
+        "growth": (0.140, 0.180, 0.220, 0.280),
+    }[profile_family]
+    maxdd_thresholds = {
+        "defensive": (0.100, 0.150, 0.220, 0.320),
+        "balanced": (0.120, 0.180, 0.250, 0.350),
+        "growth": (0.180, 0.250, 0.350, 0.450),
+    }[profile_family]
+
+    cagr_verdict = _higher_is_better_verdict(cagr, cagr_thresholds)
+    vol_verdict = _lower_is_better_verdict(vol, vol_thresholds)
+    maxdd_verdict = _lower_is_better_verdict(maxdd_abs, maxdd_thresholds)
+    sharpe_verdict = _higher_is_better_verdict(sharpe, (1.20, 0.75, 0.40, 0.10))
+
+    st.markdown("**Metric verdict for this risk profile**")
+    st.caption(
+        f"Verdicts are read against the selected {profile_label} risk profile, "
+        "not as universal investment ratings."
+    )
+    st.markdown(
+        f"- **CAGR ({_pct(cagr)}) — {cagr_verdict}.** Annualised growth rate of the tested strategy over "
+        f"the historical period. It is not a guaranteed future return. For a {profile_label} setup, this indicates "
+        f"the strength of the long-run growth side of the trade-off.\n"
+        f"- **Volatility ({_pct(vol)}) — {vol_verdict}.** How much the strategy return path fluctuated. "
+        f"Higher volatility usually means a rougher ride. For a {profile_label} setup, lower bumpiness usually makes "
+        f"the strategy easier to hold through time.\n"
+        f"- **MaxDD (-{100.0 * maxdd_abs:.2f}%) — {maxdd_verdict}.** The largest peak-to-trough loss during "
+        f"the tested period. For a {profile_label} setup, this is the main pain-test metric to watch closely.\n"
+        f"- **Sharpe ({sharpe:.2f}) — {sharpe_verdict}.** Risk-adjusted return measure. Higher can be better, "
+        f"but it depends on the tested period and assumptions. For a {profile_label} setup, this shows whether "
+        f"the return compensated the investor for the bumpiness."
+    )
+
+
+def _plain_english_result_reading(perf: dict, philosophy: Any) -> str:
+    """Return a dynamic plain-English interpretation of the run result."""
+    profile_label = str(philosophy or "Balanced").strip() or "Balanced"
+    profile_family = _profile_family_for_verdict(profile_label)
+    cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
+    vol = _safe_float(perf.get("annual_volatility", perf.get("volatility", 0.0)), 0.0)
+    maxdd_abs = abs(_safe_float(perf.get("max_drawdown", 0.0), 0.0))
+    sharpe = _safe_float(perf.get("sharpe", 0.0), 0.0)
+
+    if profile_family == "growth":
+        if cagr >= 0.08 and sharpe >= 0.50:
+            reading = (
+                "This run is doing the main job of a Growth setup: it captures meaningful upside while keeping "
+                "risk-adjusted return in a usable range."
+            )
+        elif cagr < 0.05:
+            reading = (
+                "This run may be too muted for a Growth setup: the path may be controlled, but the growth case "
+                "is not especially strong."
+            )
+        else:
+            reading = (
+                "This run is usable for a Growth setup, but it needs comparison against the suggestions to check "
+                "whether the upside is worth the risk taken."
+            )
+        priority = "The key question is whether Sharpe and drawdown are acceptable without removing too much upside."
+    elif profile_family == "defensive":
+        if maxdd_abs <= 0.15 and vol <= 0.12:
+            reading = (
+                "This run broadly fits a Defensive/Conservative setup: the historical path looks more controlled "
+                "than a pure growth benchmark."
+            )
+        else:
+            reading = (
+                "This run may feel uncomfortable for a Defensive/Conservative setup because the historical risk "
+                "side is still visible."
+            )
+        priority = "The key question is whether drawdown and volatility are low enough for the user to stay invested."
+    else:
+        if sharpe >= 0.60 and cagr > 0.0:
+            reading = (
+                "This run is broadly balanced: it has positive long-run growth and a usable risk-adjusted profile, "
+                "but the drawdown still matters."
+            )
+        elif maxdd_abs >= 0.25:
+            reading = (
+                "This run has a return case, but the historical drawdown may be too heavy for a Balanced setup."
+            )
+        else:
+            reading = (
+                "This run is mixed rather than clearly bad or clearly excellent; the decision depends on the "
+                "CAGR, Sharpe and drawdown trade-off."
+            )
+        priority = "The key question is whether the drawdown/Sharpe/CAGR balance feels worth accepting."
+
+    return (
+        f"**Plain-English reading:** {reading} "
+        f"For this {profile_label} profile, CAGR is {_pct(cagr)}, volatility is {_pct(vol)}, "
+        f"MaxDD is -{100.0 * maxdd_abs:.2f}%, and Sharpe is {sharpe:.2f}. {priority}"
+    )
+
+
 def _benchmark_full_history_rows() -> tuple[pd.DataFrame, list[str], dict]:
     work, notes = _prepare_benchmark_panel()
     if work.empty:
@@ -1564,6 +1848,7 @@ def _benchmark_full_history_rows() -> tuple[pd.DataFrame, list[str], dict]:
 
 
 def _render_benchmark_context(perf: dict, run_map: dict, *, inline_details: bool = False) -> dict:
+    """Render optional benchmark context without duplicating the main result interpretation."""
     bench_df, notes, window_meta = _benchmark_context_rows(perf, run_map)
     panel_window = str(window_meta.get("panel_window", "—") or "—")
     eval_window = str(window_meta.get("evaluation_window", "—") or "—")
@@ -1577,50 +1862,19 @@ def _render_benchmark_context(perf: dict, run_map: dict, *, inline_details: bool
             else ""
         )
         st.caption(
-            f"Same evaluated period: {eval_window} · {target_periods} monthly OOS returns{warmup_text}. "
+            f"Evaluated period: {eval_window} · {target_periods} monthly OOS returns{warmup_text}. "
             f"Full Step 4 panel: {panel_window}."
         )
     elif panel_window != "—":
         st.caption(f"Full Step 4 panel: {panel_window}. Exact OOS return length was not found in the run payload.")
 
-    def _metric(row_name: str, col: str) -> str:
-        if not isinstance(bench_df, pd.DataFrame) or bench_df.empty:
-            return "—"
-        try:
-            rows = bench_df.loc[bench_df["Reference"].astype(str).str.contains(row_name, case=False, regex=False)]
-            if rows.empty:
-                return "—"
-            return str(rows.iloc[0].get(col, "—") or "—")
-        except Exception:
-            return "—"
-
-    if isinstance(bench_df, pd.DataFrame) and not bench_df.empty:
-        strategy_cagr = _metric("Your strategy", "CAGR")
-        strategy_vol = _metric("Your strategy", "Vol")
-        strategy_maxdd = _metric("Your strategy", "MaxDD")
-        spy_cagr = _metric("SPY", "CAGR")
-        qqq_cagr = _metric("QQQ", "CAGR")
-        spy_vol = _metric("SPY", "Vol")
-        qqq_vol = _metric("QQQ", "Vol")
-        spy_maxdd = _metric("SPY", "MaxDD")
-        qqq_maxdd = _metric("QQQ", "MaxDD")
-        st.info(
-            "**Quick read:** this strategy returned "
-            f"{strategy_cagr} CAGR with {strategy_vol} volatility and {strategy_maxdd} MaxDD over the evaluated window. "
-            f"For context, SPY was {spy_cagr} CAGR / {spy_vol} vol / {spy_maxdd} MaxDD, "
-            f"while QQQ was {qqq_cagr} CAGR / {qqq_vol} vol / {qqq_maxdd} MaxDD. "
-            "Use this as context, not as a replacement for the active strategy engine result."
-        )
-    else:
-        st.info("Benchmark context is unavailable for this run because the Step 4 panel could not be read.")
-
     def _render_benchmark_tables_and_methodology() -> None:
-        st.caption(
-            "This compares the active strategy with familiar reference assets over the same evaluated period. "
-            "The full-history table is contextual only."
-        )
         if isinstance(bench_df, pd.DataFrame) and not bench_df.empty:
-            compact_cols = [col for col in ["Reference", "Type", "CAGR", "Vol", "MaxDD", "Sharpe", "Reading"] if col in bench_df.columns]
+            compact_cols = [
+                col
+                for col in ["Reference", "Type", "CAGR", "Vol", "MaxDD", "Sharpe", "Reading"]
+                if col in bench_df.columns
+            ]
             st.markdown("**Same evaluated period**")
             st.dataframe(bench_df[compact_cols], use_container_width=True, hide_index=True)
             st.caption(
@@ -1631,35 +1885,20 @@ def _render_benchmark_context(perf: dict, run_map: dict, *, inline_details: bool
             st.info("Same-window benchmark details are unavailable for this run.")
 
         st.divider()
-        st.markdown("**Full-history benchmark context from Step 4 panel**")
-        st.caption(
-            "This table uses the full available Step 4 history for each reference asset. It is contextual only, not a direct comparison with the engine result unless the strategy is evaluated over the same full window."
-        )
-        full_df, full_notes, _ = _benchmark_full_history_rows()
-        if isinstance(full_df, pd.DataFrame) and not full_df.empty:
-            st.dataframe(full_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("Full-history benchmark context is unavailable for this run.")
-        if full_notes:
-            st.caption("Full-history panel notes")
-            for note in full_notes:
-                st.write(f"- {note}")
-
-        st.divider()
         st.markdown("**Methodology and exclusions**")
-        st.markdown("""
-- The **main benchmark table** compares like with like: your engine result and reference assets over the same walk-forward evaluated period.
-- The **full-history table** is contextual only and is not the direct scorecard for your strategy.
-- Benchmarks are recomputed from the current Step 4 panel using the same monthly-return convention.
-- This is educational context, not an investment recommendation and not a forecast.
-""")
+        st.caption(
+            "Compact method: each benchmark is recomputed from the current Step 4 monthly-return panel and aligned "
+            "to the same walk-forward evaluated period where data is available. This is a sanity check, not a "
+            "forecast, recommendation, or replacement for the active Strategy Engine result."
+        )
+
         if notes:
-            st.caption("Main benchmark panel notes")
+            st.caption("Panel notes / exclusions")
             for note in notes:
                 st.write(f"- {note}")
 
         if SHORTER_HISTORY_CONTEXT:
-            st.caption("Shorter-history references deliberately left out of the main same-window table:")
+            st.caption("Excluded from this same-period table because their histories are shorter or less comparable:")
             for item in SHORTER_HISTORY_CONTEXT:
                 st.write(f"- {item}")
 
@@ -1670,7 +1909,6 @@ def _render_benchmark_context(perf: dict, run_map: dict, *, inline_details: bool
             _render_benchmark_tables_and_methodology()
 
     return {"bench_df": bench_df, "window_meta": window_meta}
-
 
 def render_post_run(run_result: dict) -> None:
     """Render the Gold Stable post-run surface.
@@ -1720,75 +1958,27 @@ def render_post_run(run_result: dict) -> None:
     with c4:
         st.metric("Sharpe", f"{_safe_float(perf.get('sharpe', 0.0)):.2f}")
 
-    headline, body = _result_interpretation(perf)
-    fit_level, fit_message = _philosophy_fit_message(perf, philosophy)
+    st.caption(
+        "Historical backtest result for comparison only. Not a forecast, guarantee, or live fund track record."
+    )
 
-    cagr_val = _safe_float(perf.get("cagr", 0.0), 0.0)
-    vol_val = _safe_float(perf.get("annual_volatility", perf.get("volatility", 0.0)), 0.0)
-    maxdd_val = abs(_safe_float(perf.get("max_drawdown", 0.0), 0.0))
-    sharpe_val = _safe_float(perf.get("sharpe", 0.0), 0.0)
-
-    with st.expander("How to read this result and decide on suggestions", expanded=False):
-        st.markdown(
-            f"**Summary:** this run is broadly interpretable as a {_pct(cagr_val)} CAGR / "
-            f"{_pct(vol_val)} volatility strategy with a historical drawdown near "
-            f"-{100.0 * maxdd_val:.2f}% and Sharpe {sharpe_val:.2f}."
-        )
-        left, right = st.columns([1.1, 0.9])
-        with left:
-            st.info(f"**{headline}:** {body}")
-        with right:
-            if fit_level == "success":
-                st.success(f"**Philosophy fit:** {fit_message}")
-            elif fit_level == "warning":
-                st.warning(f"**Philosophy fit:** {fit_message}")
-            else:
-                st.info(f"**Philosophy fit:** {fit_message}")
-
-        st.markdown(
-            f"- **CAGR ({_pct(cagr_val)})** — historical average annual growth in this backtest. Higher is better, but it is not guaranteed.\n"
-            f"- **Volatility ({_pct(vol_val)})** — how bumpy the portfolio was historically. Lower usually feels more stable.\n"
-            f"- **MaxDD (-{100.0 * maxdd_val:.2f}%)** — worst historical peak-to-trough fall. This is the main pain-test metric.\n"
-            f"- **Sharpe ({sharpe_val:.2f})** — return per unit of risk. Higher usually means the return compensated better for volatility."
-        )
-        st.caption(f"Execution context: {template} + {style} · Cached panel: {panel_assets} assets / {panel_rows:,} rows.")
-        st.caption(
-            "If this result is acceptable, continue to the Long-Term Scenario Explorer. Benchmark, validation, and improvement checks below are optional."
-        )
-
+    with st.expander("How to read this result", expanded=False):
+        _render_metric_verdicts_for_profile(perf, philosophy)
+        st.info(_plain_english_result_reading(perf, philosophy))
         st.divider()
-        st.markdown("**About the Strategy Engine**")
-        st.write(
-            "**Purpose:** turn the selected risk profile, asset universe and market-data panel into a tested "
-            "strategy return series. This is the execution stage, not a new data-preparation step."
-        )
-        st.write(
-            "The engine uses the prepared market-data panel and the selected preset to produce one historical "
-            "walk-forward strategy series. It does not rebuild the asset universe here."
-        )
-        st.caption(
-            "This result is a historical backtest output for comparison inside the app. It is not a forecast, "
-            "a guarantee, or a live fund track record."
-        )
-
-        st.divider()
-        st.markdown("**Deciding whether to apply suggestions**")
-        st.caption("Each suggestion is rerun with the real engine before it can be applied.")
-        _render_what_to_watch(perf, philosophy, as_expander=False)
-        st.divider()
-        _render_engine_levers_to_try(perf, philosophy, run_map, as_expander=False)
+        _render_compact_same_period_context(perf, run_map)
 
     benchmark_payload = {"bench_df": pd.DataFrame(), "window_meta": {}}
     with st.expander("Benchmark sanity check", expanded=False):
         st.caption(
-            "Optional context only: compare the active strategy with familiar assets over the same evaluated period, "
-            "without letting benchmarks replace the main strategy engine result."
+            "Technical sanity check: same-period reference assets, evaluation-window details, and compact methodology. "
+            "The smaller three-row context table already appears in the interpretation expander above."
         )
         benchmark_payload = _render_benchmark_context(perf, run_map, inline_details=True)
 
-        st.divider()
-        st.markdown("**Reliability, robustness and limits**")
+    with st.expander("Reliability and robustness", expanded=False):
         render_result_reliability_assessment(run_map, benchmark_payload=benchmark_payload, inline_details=True)
+        render_start_date_robustness_timing_block(run_map)
         st.info(
             "These figures come from a historical walk-forward backtest using the selected asset panel. "
             "They are useful for comparing configurations inside the app, but they are not forecasts or guarantees. "
@@ -1803,10 +1993,18 @@ def render_post_run(run_result: dict) -> None:
     st.markdown(f'<div id="{STEP5_IMPROVEMENT_CHECKS_ANCHOR_ID}"></div>', unsafe_allow_html=True)
     _maybe_scroll_to_improvement_checks()
     st.markdown("## Optional improvement checks")
+    st.info(_decision_guide_message(perf, philosophy))
     st.caption(
         "Review optional suggestions below. Once a recommendation appears, you can apply it, "
         "keep the current setup, or continue without the remaining checks."
     )
+
+    st.info(
+        "The improvement phases below test these kinds of changes with the real engine before showing an Apply button. "
+        "Do not change knobs just because they sound better; compare the rerun-tested metrics."
+    )
+
+    _render_engine_levers_to_try(perf, philosophy, run_map, as_expander=True)
 
     _render_suggestion_depth_controls()
     _render_improvement_phase_row(run_map)
@@ -1874,7 +2072,6 @@ def render_post_run(run_result: dict) -> None:
         _render_auto_opt_suggestion_timing_block()
         _render_universe_suggestion_timing_block()
         _render_size_suggestion_timing_block()
-        render_start_date_robustness_timing_block(run_map)
         _render_feature_mu_block(run_map)
 
     st.markdown("---")

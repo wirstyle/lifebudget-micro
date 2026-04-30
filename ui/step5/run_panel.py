@@ -332,12 +332,10 @@ def render_run_panel(
     just_completed_run_banner = bool(st.session_state.get(STEP5_JUST_COMPLETED_RUN_BANNER_KEY, False))
     if current_result_is_fresh and not disabled:
         if just_completed_run_banner:
-            st.success("Run completed and stored as the current real result.")
             st.session_state[STEP5_JUST_COMPLETED_RUN_BANNER_KEY] = False
-        else:
-            st.caption(
-                "The current result is up to date. Change the strategy preset, sliders, or technical controls to enable a new run."
-            )
+        st.caption(
+            "Current setup already run. Change the preset, sliders, or technical controls to enable a new portfolio test."
+        )
 
     if not manual_run_clicked:
         return None
@@ -405,7 +403,7 @@ def render_run_panel(
         _safe_rerun()
 
         # Fallback for very old Streamlit versions where rerun is unavailable.
-        st.success("Run completed and stored as the current real result.")
+        st.caption("Current setup already run. Change the preset, sliders, or technical controls to enable a new portfolio test.")
         if not compact:
             _render_timing_summary(timing_summary)
         return run_result

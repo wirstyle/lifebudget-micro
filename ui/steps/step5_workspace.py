@@ -493,7 +493,10 @@ def _render_ready_to_run_section(
         elif gov_state == "blocked":
             st.error("This setup is blocked by governance. Open the setup controls above or return to Risk Profile and Universe to repair it.")
         elif current_result_is_fresh:
-            st.success("Result up to date: this setup has already been executed by the real engine.")
+            if bordered:
+                st.caption(
+                    "Current setup already run. Change the preset, sliders, or technical controls to enable a new portfolio test."
+                )
         else:
             setup_status_summary = str(simple_cfg.get("setup_status_summary", "") or "").strip()
             if setup_status_summary:
@@ -532,15 +535,18 @@ def _build_executed_setup_summary(
     except Exception:
         oos_months = int(_safe_int(_coerce_mapping(stored_run.get("performance_summary", {})).get("periods", 0), 0))
 
-    template = simple_cfg.get("template", "â")
-    style = simple_cfg.get("preset", "â")
-    active_line = (
-        f"{current_philosophy} Â· {universe_size}-asset universe Â· "
-        f"{template} Â· {style} Â· {panel_assets} panel assets"
-    )
+    template = str(simple_cfg.get("template", "—") or "—")
+    style = str(simple_cfg.get("preset", "—") or "—")
+    active_parts = [
+        f"Risk profile: {current_philosophy}",
+        f"Selected universe: {universe_size} assets",
+        f"Template: {template}",
+        f"Style: {style}",
+        f"Panel data: {panel_assets} assets",
+    ]
     if oos_months > 0:
-        active_line += f" Â· {oos_months} OOS months"
-    return active_line
+        active_parts.append(f"Evaluation: {oos_months} OOS months")
+    return " · ".join(active_parts)
 
 def render_step_5() -> None:
     # Gold Stable: remove legacy exploration state before rendering.
@@ -564,6 +570,9 @@ def render_step_5() -> None:
     # title immediately above the metrics.
     if has_fresh_stored_result:
         st.markdown("## Strategy Engine Results")
+        st.success(
+            "Strategy Engine run completed successfully. Results are ready for review and long-term scenario projection."
+        )
     else:
         st.markdown("## Strategy Engine")
 
@@ -585,8 +594,7 @@ def render_step_5() -> None:
             if active_setup_summary:
                 st.markdown(f"**Active result:** {active_setup_summary}.")
             st.caption(
-                "Open this only if you want to change the preset, semantic posture, technical controls, "
-                "or run a new portfolio test."
+                "Current setup already run. Change the preset, sliders, or technical controls to enable a new portfolio test."
             )
             technical_engine_overrides: dict[str, Any] = {}
 
