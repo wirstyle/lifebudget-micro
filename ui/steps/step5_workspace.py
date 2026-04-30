@@ -458,6 +458,7 @@ def _render_ready_to_run_section(
     pre_run_advanced_cfg: dict,
     governance_status: dict,
     bordered: bool = True,
+    show_detail_expanders: bool = True,
 ):
     panel_rows = int(len(asset_panel_df)) if isinstance(asset_panel_df, pd.DataFrame) else 0
     panel_assets = int(asset_panel_df["asset"].nunique()) if isinstance(asset_panel_df, pd.DataFrame) and "asset" in asset_panel_df.columns else 0
@@ -491,39 +492,40 @@ def _render_ready_to_run_section(
             compact=True,
         )
 
-        _render_engine_transparency_intro()
+        if show_detail_expanders:
+            _render_engine_transparency_intro()
 
-        with st.expander("Strategy engine inputs", expanded=False):
-            setup_line = (
-                f"**{current_philosophy}** · **{universe_size}-asset universe** · "
-                f"**{simple_cfg.get('template', '—')}** · **{simple_cfg.get('preset', '—')}**"
-            )
-            st.write(setup_line)
+            with st.expander("Strategy engine inputs", expanded=False):
+                setup_line = (
+                    f"**{current_philosophy}** · **{universe_size}-asset universe** · "
+                    f"**{simple_cfg.get('template', '—')}** · **{simple_cfg.get('preset', '—')}**"
+                )
+                st.write(setup_line)
 
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                _render_compact_value("Market data", source_label)
-            with c2:
-                _render_compact_value("Panel rows", f"{panel_rows:,}")
-            with c3:
-                _render_compact_value("Panel assets", panel_assets)
-            with c4:
-                _render_compact_value("Engine status", engine_status)
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    _render_compact_value("Market data", source_label)
+                with c2:
+                    _render_compact_value("Panel rows", f"{panel_rows:,}")
+                with c3:
+                    _render_compact_value("Panel assets", panel_assets)
+                with c4:
+                    _render_compact_value("Engine status", engine_status)
 
-            st.caption(
-                f"top_k={cfg_final.get('top_k', '—')} · "
-                f"signal_mode={cfg_final.get('signal_mode', '—')} · "
-                f"lookback_mu={cfg_final.get('lookback_mu', '—')} · "
-                f"lookback_sigma={cfg_final.get('lookback_sigma', '—')} · "
-                f"temperature={cfg_final.get('temperature', '—')} · "
-                f"weight_shrink={cfg_final.get('weight_shrink', '—')} · "
-                f"overlay={cfg_final.get('probabilistic_mode', cfg_final.get('overlay_label', '—'))}"
-            )
-            applied_tuning_signature = str(st.session_state.get("step5_auto_opt_applied_run_signature_v1", "") or "")
-            applied_tuning_label = str(st.session_state.get("step5_auto_opt_applied_label_v1", "") or "")
-            if current_result_is_fresh and current_run_signature and applied_tuning_signature == current_run_signature:
-                label_text = f": {applied_tuning_label}" if applied_tuning_label else ""
-                st.caption(f"These technical values include the applied engine tuning suggestion{label_text}.")
+                st.caption(
+                    f"top_k={cfg_final.get('top_k', '—')} · "
+                    f"signal_mode={cfg_final.get('signal_mode', '—')} · "
+                    f"lookback_mu={cfg_final.get('lookback_mu', '—')} · "
+                    f"lookback_sigma={cfg_final.get('lookback_sigma', '—')} · "
+                    f"temperature={cfg_final.get('temperature', '—')} · "
+                    f"weight_shrink={cfg_final.get('weight_shrink', '—')} · "
+                    f"overlay={cfg_final.get('probabilistic_mode', cfg_final.get('overlay_label', '—'))}"
+                )
+                applied_tuning_signature = str(st.session_state.get("step5_auto_opt_applied_run_signature_v1", "") or "")
+                applied_tuning_label = str(st.session_state.get("step5_auto_opt_applied_label_v1", "") or "")
+                if current_result_is_fresh and current_run_signature and applied_tuning_signature == current_run_signature:
+                    label_text = f": {applied_tuning_label}" if applied_tuning_label else ""
+                    st.caption(f"These technical values include the applied engine tuning suggestion{label_text}.")
 
         return run_result
 
@@ -604,10 +606,11 @@ def render_step_5() -> None:
                 "Open this only if you want to change the preset, semantic posture, technical controls, "
                 "or run a new portfolio test."
             )
-            simple_cfg = render_simple_mode()
+            simple_cfg = render_simple_mode(use_internal_expanders=False)
             cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
 
-            with st.expander("Optional advanced engine controls", expanded=False):
+            st.markdown("**Optional advanced engine controls**")
+            with st.container(border=True):
                 st.caption(
                     "Low-level parameters resolved from the preset above. Normal users can leave these unchanged; "
                     "use this only for diagnostics or controlled experimentation."
@@ -627,6 +630,7 @@ def render_step_5() -> None:
                 pre_run_advanced_cfg=pre_run_advanced_cfg,
                 governance_status=gov,
                 bordered=False,
+                show_detail_expanders=False,
             )
 
     else:

@@ -56,19 +56,22 @@ def _setup_status_summary(
 
 
 def _sync_combo_to_philosophy_space(philosophy: str) -> tuple[str, str]:
+    """Return a valid template/style pair without mutating widget-backed keys.
+
+    Streamlit warns when a widget key is assigned through session_state in the
+    same render in which the widget is created. Keep this resolver read-only and
+    sync the public Step 5 keys only after the selectboxes have rendered.
+    """
     rec_template, rec_style = recommended_strategy_combo_for_philosophy(philosophy)
     allowed_templates = allowed_strategy_templates_for_philosophy(philosophy)
     current_template = str(st.session_state.get("step5_template", rec_template) or rec_template)
     if current_template not in allowed_templates:
         current_template = rec_template
-        st.session_state["step5_template"] = current_template
 
     allowed_styles = allowed_style_presets_for_philosophy(philosophy, current_template)
     current_style = str(st.session_state.get("step5_style", rec_style) or rec_style)
     if current_style not in allowed_styles:
-        fallback_style = rec_style if rec_style in allowed_styles else allowed_styles[0]
-        current_style = fallback_style
-        st.session_state["step5_style"] = current_style
+        current_style = rec_style if rec_style in allowed_styles else allowed_styles[0]
     return current_template, current_style
 
 
@@ -152,7 +155,7 @@ def resolve_simple_mode_state() -> dict:
         "philosophy": philosophy,
     }
 
-def render_simple_mode():
+def render_simple_mode(*, use_internal_expanders: bool = True):
     philosophy = get_canonical_investment_philosophy()
     rec_template, rec_style = recommended_strategy_combo_for_philosophy(philosophy)
 
@@ -167,29 +170,30 @@ def render_simple_mode():
         current_template, current_style = _sync_combo_to_philosophy_space(philosophy)
 
     template_options = allowed_strategy_templates_for_philosophy(philosophy)
+    if current_template not in template_options:
+        current_template = rec_template if rec_template in template_options else template_options[0]
     left, right = st.columns(2)
     with left:
         template = st.selectbox(
             "Strategy template",
             template_options,
             index=template_options.index(current_template),
-            key="step5_template",
         )
+        st.session_state["step5_template"] = template
         st.caption(_template_description(template))
 
     current_style_after_template = str(st.session_state.get("step5_style", current_style) or current_style)
     style_options = allowed_style_presets_for_philosophy(philosophy, template)
     if current_style_after_template not in style_options:
         current_style_after_template = rec_style if rec_style in style_options else style_options[0]
-        st.session_state["step5_style"] = current_style_after_template
 
     with right:
         style = st.selectbox(
             "Style preset",
             style_options,
             index=style_options.index(current_style_after_template),
-            key="step5_style",
         )
+        st.session_state["step5_style"] = style
         st.caption(_style_description(style))
 
     if not freeze_after_apply:
@@ -210,7 +214,13 @@ def render_simple_mode():
         applied_preset_label=applied_preset_label,
     )
 
-    with st.expander("Fine-tune strategy posture (optional)", expanded=False):
+    if use_internal_expanders:
+        posture_ctx = st.expander("Fine-tune strategy posture (optional)", expanded=False)
+    else:
+        st.markdown("**Fine-tune strategy posture (optional)**")
+        posture_ctx = st.container(border=True)
+
+    with posture_ctx:
         r1, r2 = st.columns(2)
         with r1:
             _slider(SEMANTIC_SLIDER_KEYS["risk_appetite"], "Risk appetite", 0.50)
