@@ -14,43 +14,6 @@ from ui.step5.post_run import render_post_run
 from ui.step5.governance import resolve_governance_status
 
 
-BASIC_ENGINE_CONTROLS_TOUCHED_KEY = "step5_basic_engine_controls_touched"
-BASIC_ENGINE_CONTROLS_SOURCE_KEY = "step5_basic_engine_controls_source"
-BASIC_ENGINE_CONTROL_WIDGET_KEYS = (
-    "step5_basic_top_k",
-    "step5_basic_lookback_mu",
-    "step5_basic_lookback_sigma",
-    "step5_basic_signal_mode",
-    "step5_basic_temperature",
-    "step5_basic_weight_shrink",
-    "step5_basic_inertia",
-    "step5_basic_feature_mu_enabled",
-    "step5_basic_feature_mu_blend",
-)
-
-
-def _basic_engine_controls_are_touched() -> bool:
-    return bool(st.session_state.get(BASIC_ENGINE_CONTROLS_TOUCHED_KEY, False))
-
-
-def _mark_basic_engine_controls_touched() -> None:
-    st.session_state[BASIC_ENGINE_CONTROLS_TOUCHED_KEY] = True
-    st.session_state[BASIC_ENGINE_CONTROLS_SOURCE_KEY] = "manual"
-
-
-def _reset_basic_engine_controls_to_semantic_defaults() -> None:
-    st.session_state[BASIC_ENGINE_CONTROLS_TOUCHED_KEY] = False
-    st.session_state[BASIC_ENGINE_CONTROLS_SOURCE_KEY] = "semantic_defaults"
-    for key in BASIC_ENGINE_CONTROL_WIDGET_KEYS:
-        st.session_state.pop(key, None)
-
-
-def _clear_basic_engine_widget_state_if_semantic_driven() -> None:
-    if _basic_engine_controls_are_touched():
-        return
-    for key in BASIC_ENGINE_CONTROL_WIDGET_KEYS:
-        st.session_state.pop(key, None)
-
 
 def _resolve_overlay_label(simple_cfg: dict, advanced_cfg: dict) -> str:
     overlay_intensity = float(simple_cfg.get("overlay_intensity", 0.5) or 0.5)
@@ -158,22 +121,6 @@ def _current_result_is_fresh_for_ready_card(cfg_final: dict, asset_panel_df: Any
 
 
 def _render_basic_engine_controls(cfg_final: dict) -> dict:
-    st.markdown("### Advanced engine controls")
-    st.caption("Optional low-level parameters. Leave these unchanged unless you are deliberately testing engine behaviour.")
-
-    controls_are_overrides = _basic_engine_controls_are_touched()
-    if controls_are_overrides:
-        st.info(
-            "Technical controls are currently acting as manual overrides. "
-            "Move them only when deliberately testing engine behaviour, or reset them to follow the semantic preset/sliders again."
-        )
-    else:
-        st.caption(
-            "These fields are currently synced from the selected preset and semantic sliders. "
-            "Changing any field below turns it into a manual technical override."
-        )
-        _clear_basic_engine_widget_state_if_semantic_driven()
-
     universe_size = _safe_int(st.session_state.get("universe_size", 25), 25)
     current_top_k = _safe_int(cfg_final.get("top_k", 12), 12)
     current_top_k = max(1, min(current_top_k, max(1, universe_size)))
@@ -197,7 +144,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 step=1,
                 value=current_top_k,
                 key="step5_basic_top_k",
-                on_change=_mark_basic_engine_controls_touched,
                 help="Maximum number of active assets selected by the micro pipeline.",
             )
         )
@@ -209,7 +155,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 step=1,
                 value=current_lookback_mu,
                 key="step5_basic_lookback_mu",
-                on_change=_mark_basic_engine_controls_touched,
                 help="Lookback window used for the expected-return estimate.",
             )
         )
@@ -222,7 +167,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 step=1,
                 value=current_lookback_sigma,
                 key="step5_basic_lookback_sigma",
-                on_change=_mark_basic_engine_controls_touched,
                 help="Lookback window used for the volatility estimate.",
             )
         )
@@ -239,7 +183,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
             options=signal_mode_options,
             index=signal_mode_options.index(safe_signal_mode),
             key="step5_basic_signal_mode",
-            on_change=_mark_basic_engine_controls_touched,
             help="Minimal signal contract exposed in Fase 6.0, now including more distinct signal-model branches.",
         )
 
@@ -253,7 +196,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 step=0.01,
                 value=current_temperature,
                 key="step5_basic_temperature",
-                on_change=_mark_basic_engine_controls_touched,
                 help="Softmax temperature controlling concentration of weights.",
             )
         )
@@ -265,7 +207,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 step=0.01,
                 value=current_weight_shrink,
                 key="step5_basic_weight_shrink",
-                on_change=_mark_basic_engine_controls_touched,
                 help="Shrink weights toward equal-weight.",
             )
         )
@@ -277,7 +218,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 step=0.01,
                 value=current_feature_mu_blend,
                 key="step5_basic_feature_mu_blend",
-                on_change=_mark_basic_engine_controls_touched,
                 help="Controls the intensity of the feature-conditioned expected-return adjustment.",
             )
         )
@@ -290,7 +230,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 step=0.01,
                 value=current_inertia,
                 key="step5_basic_inertia",
-                on_change=_mark_basic_engine_controls_touched,
                 help="Portfolio inertia / turnover smoothing.",
             )
         )
@@ -299,23 +238,12 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 "feature_mu_enabled",
                 value=current_feature_mu_enabled,
                 key="step5_basic_feature_mu_enabled",
-                on_change=_mark_basic_engine_controls_touched,
                 help="Enable feature-conditioned expected-return adjustment.",
             )
         )
 
-    if controls_are_overrides:
-        if st.button(
-            "Reset technical controls to semantic defaults",
-            key="step5_reset_basic_engine_controls_to_semantic_defaults",
-            use_container_width=True,
-        ):
-            _reset_basic_engine_controls_to_semantic_defaults()
-            st.rerun()
-
-    state_label = "manual override" if controls_are_overrides else "semantic default"
     st.caption(
-        f"Effective basic controls ({state_label}) → top_k={top_k} · lookback_mu={lookback_mu} · "
+        f"Effective basic controls → top_k={top_k} · lookback_mu={lookback_mu} · "
         f"lookback_sigma={lookback_sigma} · signal_mode={signal_mode} · "
         f"temperature={temperature} · weight_shrink={weight_shrink} · inertia={inertia} · "
         f"feature_mu_enabled={feature_mu_enabled} · feature_mu_blend={feature_mu_blend}"
@@ -332,6 +260,26 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
         "feature_mu_enabled": bool(feature_mu_enabled),
         "feature_mu_blend": float(feature_mu_blend),
     }
+
+
+def _render_technical_engine_overrides(cfg_final: dict) -> dict:
+    """Render optional technical overrides inside the fine-tune settings block."""
+    show_overrides = bool(
+        st.checkbox(
+            "Show technical engine overrides",
+            key="step5_show_technical_engine_overrides",
+            help="Optional low-level engine parameters for diagnostics or controlled experimentation.",
+        )
+    )
+
+    if not show_overrides:
+        st.caption("Presets and posture sliders control the engine unless technical overrides are edited.")
+        return {}
+
+    st.caption("Optional technical overrides. Leave unchanged unless deliberately testing engine behaviour.")
+    with st.container(border=True):
+        return _render_basic_engine_controls(cfg_final)
+
 
 def _coerce_mapping(value: Any) -> dict:
     if value is None:
@@ -484,29 +432,12 @@ def _render_workspace_summary(cfg_final: dict, asset_panel_df: Any, current_phil
 
 
 def _resolve_basic_engine_state(cfg_final: dict) -> dict:
-    """Read active basic engine overrides without rendering widgets.
+    """Read basic engine override widget state without rendering the widgets.
 
-    When the advanced controls have not been touched, this follows ``cfg_final``
-    so semantic presets and sliders remain the source of truth. Once a user or
-    an applied engine-tuning suggestion marks the controls as touched, the
-    widget values become explicit technical overrides.
+    This lets the page show the Run button before the advanced controls while still
+    respecting any advanced values the user selected on a previous rerun.
     """
     universe_size = _safe_int(st.session_state.get("universe_size", 25), 25)
-
-    if not _basic_engine_controls_are_touched():
-        top_k_default = _safe_int(cfg_final.get("top_k", 12), 12)
-        top_k_default = max(1, min(int(top_k_default), max(1, universe_size)))
-        return {
-            "top_k": int(top_k_default),
-            "lookback_mu": _safe_int(cfg_final.get("lookback_mu", 12), 12),
-            "lookback_sigma": _safe_int(cfg_final.get("lookback_sigma", 12), 12),
-            "signal_mode": str(cfg_final.get("signal_mode", "mu_sigma") or "mu_sigma"),
-            "temperature": float(cfg_final.get("temperature", 1.0) or 1.0),
-            "weight_shrink": float(cfg_final.get("weight_shrink", 0.05) or 0.05),
-            "inertia": float(cfg_final.get("inertia", 0.0) or 0.0),
-            "feature_mu_enabled": bool(cfg_final.get("feature_mu_enabled", False)),
-            "feature_mu_blend": float(cfg_final.get("feature_mu_blend", 0.25) or 0.25),
-        }
 
     def _num(key: str, fallback: Any, cast=float):
         raw = st.session_state.get(key, fallback)
@@ -577,41 +508,6 @@ def _render_ready_to_run_section(
             cfg_final=cfg_final,
             compact=True,
         )
-
-        if show_detail_expanders:
-            _render_engine_transparency_intro()
-
-            with st.expander("Strategy engine inputs", expanded=False):
-                setup_line = (
-                    f"**{current_philosophy}** · **{universe_size}-asset universe** · "
-                    f"**{simple_cfg.get('template', '—')}** · **{simple_cfg.get('preset', '—')}**"
-                )
-                st.write(setup_line)
-
-                c1, c2, c3, c4 = st.columns(4)
-                with c1:
-                    _render_compact_value("Market data", source_label)
-                with c2:
-                    _render_compact_value("Panel rows", f"{panel_rows:,}")
-                with c3:
-                    _render_compact_value("Panel assets", panel_assets)
-                with c4:
-                    _render_compact_value("Engine status", engine_status)
-
-                st.caption(
-                    f"top_k={cfg_final.get('top_k', '—')} · "
-                    f"signal_mode={cfg_final.get('signal_mode', '—')} · "
-                    f"lookback_mu={cfg_final.get('lookback_mu', '—')} · "
-                    f"lookback_sigma={cfg_final.get('lookback_sigma', '—')} · "
-                    f"temperature={cfg_final.get('temperature', '—')} · "
-                    f"weight_shrink={cfg_final.get('weight_shrink', '—')} · "
-                    f"overlay={cfg_final.get('probabilistic_mode', cfg_final.get('overlay_label', '—'))}"
-                )
-                applied_tuning_signature = str(st.session_state.get("step5_auto_opt_applied_run_signature_v1", "") or "")
-                applied_tuning_label = str(st.session_state.get("step5_auto_opt_applied_label_v1", "") or "")
-                if current_result_is_fresh and current_run_signature and applied_tuning_signature == current_run_signature:
-                    label_text = f": {applied_tuning_label}" if applied_tuning_label else ""
-                    st.caption(f"These technical values include the applied engine tuning suggestion{label_text}.")
 
         return run_result
 
@@ -692,17 +588,19 @@ def render_step_5() -> None:
                 "Open this only if you want to change the preset, semantic posture, technical controls, "
                 "or run a new portfolio test."
             )
-            simple_cfg = render_simple_mode(use_internal_expanders=False)
-            cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
+            technical_engine_overrides: dict[str, Any] = {}
 
-            st.markdown("**Optional advanced engine controls**")
-            with st.container(border=True):
-                st.caption(
-                    "Low-level parameters resolved from the preset above. Normal users can leave these unchanged; "
-                    "use this only for diagnostics or controlled experimentation."
-                )
-                basic_engine_overrides = _render_basic_engine_controls(cfg_final)
-            cfg_final = {**dict(cfg_final or {}), **dict(basic_engine_overrides or {})}
+            def _post_run_technical_footer(simple_cfg_payload: dict) -> None:
+                footer_cfg, _footer_gov = _resolve_cfg_final(simple_cfg_payload, pre_run_advanced_cfg)
+                technical_engine_overrides.clear()
+                technical_engine_overrides.update(_render_technical_engine_overrides(footer_cfg))
+
+            simple_cfg = render_simple_mode(
+                use_internal_expanders=False,
+                posture_footer_renderer=_post_run_technical_footer,
+            )
+            cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
+            cfg_final = {**dict(cfg_final or {}), **dict(technical_engine_overrides or {})}
 
             current_signature = _build_step5_input_signature(cfg_final, asset_panel_df)
             st.session_state["step5_current_input_signature"] = current_signature
@@ -722,23 +620,26 @@ def render_step_5() -> None:
     else:
         st.info(
             "**Purpose:** turn the selected risk profile, asset universe and market-data panel into a tested "
-            "strategy return series. This is the execution stage, not a new data-preparation step."
+            "strategy return series. The Strategy Engine creates the portfolio first; CAGR, volatility, "
+            "Sharpe and max drawdown are calculated afterwards."
         )
         # First-run or stale-run view: keep the setup card focused on editable
         # strategy choices. Readiness, input transparency and the run action sit
         # outside the card so they read as execution controls rather than setup
         # fields.
         with st.container(border=True):
-            simple_cfg = render_simple_mode()
-            cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
+            technical_engine_overrides: dict[str, Any] = {}
 
-            with st.expander("Optional advanced engine controls", expanded=False):
-                st.caption(
-                    "Low-level parameters resolved from the preset above. Normal users can leave these unchanged; "
-                    "use this only for diagnostics or controlled experimentation."
-                )
-                basic_engine_overrides = _render_basic_engine_controls(cfg_final)
-            cfg_final = {**dict(cfg_final or {}), **dict(basic_engine_overrides or {})}
+            def _first_run_technical_footer(simple_cfg_payload: dict) -> None:
+                footer_cfg, _footer_gov = _resolve_cfg_final(simple_cfg_payload, pre_run_advanced_cfg)
+                technical_engine_overrides.clear()
+                technical_engine_overrides.update(_render_technical_engine_overrides(footer_cfg))
+
+            simple_cfg = render_simple_mode(
+                posture_footer_renderer=_first_run_technical_footer,
+            )
+            cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
+            cfg_final = {**dict(cfg_final or {}), **dict(technical_engine_overrides or {})}
 
             current_signature = _build_step5_input_signature(cfg_final, asset_panel_df)
             st.session_state["step5_current_input_signature"] = current_signature

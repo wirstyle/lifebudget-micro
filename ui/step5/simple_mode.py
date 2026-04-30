@@ -1,7 +1,8 @@
+from typing import Any, Callable
+
 import streamlit as st
 
 from ui.services.step4_universe_service import (
-    SEMANTIC_LAST_SIGNATURE,
     SEMANTIC_SLIDER_KEYS,
     SEMANTIC_TOUCHED_FLAG,
     allowed_style_presets_for_philosophy,
@@ -10,7 +11,6 @@ from ui.services.step4_universe_service import (
     get_canonical_investment_philosophy,
     mark_semantic_sliders_dirty,
     recommended_strategy_combo_for_philosophy,
-    semantic_seed_signature,
     strategy_combo_status,
 )
 
@@ -157,7 +157,7 @@ def resolve_simple_mode_state() -> dict:
         "philosophy": philosophy,
     }
 
-def render_simple_mode(*, use_internal_expanders: bool = True):
+def render_simple_mode(*, use_internal_expanders: bool = True, posture_footer_renderer: Callable[[dict], Any] | None = None):
     philosophy = get_canonical_investment_philosophy()
     rec_template, rec_style = recommended_strategy_combo_for_philosophy(philosophy)
 
@@ -172,57 +172,38 @@ def render_simple_mode(*, use_internal_expanders: bool = True):
         current_template, current_style = _sync_combo_to_philosophy_space(philosophy)
 
     template_options = allowed_strategy_templates_for_philosophy(philosophy)
-    if not template_options:
-        template_options = [rec_template]
     if current_template not in template_options:
         current_template = rec_template if rec_template in template_options else template_options[0]
-
-    # Use the durable Step 5 keys as the widget keys, but only seed/correct them
-    # before the widgets are instantiated. Do not assign these keys after the
-    # selectboxes render, otherwise Streamlit may raise the widget/session_state
-    # mutation error and the semantic sliders can lag one rerun behind.
-    if st.session_state.get("step5_template") not in template_options:
-        st.session_state["step5_template"] = current_template
-
     left, right = st.columns(2)
     with left:
         template = st.selectbox(
             "Strategy template",
             template_options,
-            index=template_options.index(str(st.session_state.get("step5_template", current_template))),
-            key="step5_template",
+            index=template_options.index(current_template),
         )
+        st.session_state["step5_template"] = template
         st.caption(_template_description(template))
 
-    style_options = allowed_style_presets_for_philosophy(philosophy, template)
-    if not style_options:
-        style_options = [rec_style]
-
     current_style_after_template = str(st.session_state.get("step5_style", current_style) or current_style)
+    style_options = allowed_style_presets_for_philosophy(philosophy, template)
     if current_style_after_template not in style_options:
         current_style_after_template = rec_style if rec_style in style_options else style_options[0]
-        # Safe because the style selectbox has not been instantiated yet in this run.
-        st.session_state["step5_style"] = current_style_after_template
 
     with right:
         style = st.selectbox(
             "Style preset",
             style_options,
-            index=style_options.index(str(st.session_state.get("step5_style", current_style_after_template))),
-            key="step5_style",
+            index=style_options.index(current_style_after_template),
         )
+        st.session_state["step5_style"] = style
         st.caption(_style_description(style))
 
     if not freeze_after_apply:
-        active_signature = semantic_seed_signature(template, style)
-        previous_signature = str(st.session_state.get(SEMANTIC_LAST_SIGNATURE, "") or "")
-        preset_changed = active_signature != previous_signature
-        # If the preset changed, reset the posture sliders immediately and clear
-        # the manual-touched state. If the preset did not change, preserve any
-        # manual slider edits exactly as before.
-        apply_semantic_slider_defaults(template, style, force=preset_changed)
+        apply_semantic_slider_defaults(template, style, force=False)
 
     combo_status = strategy_combo_status(philosophy, template, style)
+    current_combo_label = f"{template} + {style}"
+    default_combo_label = f"{rec_template} + {rec_style}"
     applied_preset_label = str(st.session_state.get("step5_preset_applied_label_v2", "") or "")
 
     setup_status_summary = _setup_status_summary(
@@ -236,9 +217,9 @@ def render_simple_mode(*, use_internal_expanders: bool = True):
     )
 
     if use_internal_expanders:
-        posture_ctx = st.expander("Fine-tune strategy posture (optional)", expanded=False)
+        posture_ctx = st.expander("Fine-tune strategy settings (optional)", expanded=False)
     else:
-        st.markdown("**Fine-tune strategy posture (optional)**")
+        st.markdown("**Fine-tune strategy settings (optional)**")
         posture_ctx = st.container(border=True)
 
     with posture_ctx:
@@ -270,36 +251,43 @@ def render_simple_mode(*, use_internal_expanders: bool = True):
                 apply_semantic_slider_defaults(template, style, force=True)
                 st.rerun()
 
-    # Read values after the expander has rendered. This keeps the same values available
-    # even when the expander is closed on screen.
-    risk = _safe_slider_state("risk_appetite", 0.50)
-    drawdown = _safe_slider_state("drawdown_protection", 0.62)
-    divers = _safe_slider_state("diversification_vs_concentration", 0.55)
-    overlay = _safe_slider_state("overlay_intensity", 0.42)
-    stability = _safe_slider_state("stability_vs_responsiveness", 0.60)
-    confidence = _safe_slider_state("confidence_in_signal", 0.56)
-    turnover_style = _safe_slider_state("low_turnover_vs_adaptive", 0.40)
-    simplicity = _safe_slider_state("simplicity_vs_sophistication", 0.56)
+        # Read values while still inside the optional settings block so callers
+        # can append related controls, such as technical overrides, in the same
+        # visual group.
+        risk = _safe_slider_state("risk_appetite", 0.50)
+        drawdown = _safe_slider_state("drawdown_protection", 0.62)
+        divers = _safe_slider_state("diversification_vs_concentration", 0.55)
+        overlay = _safe_slider_state("overlay_intensity", 0.42)
+        stability = _safe_slider_state("stability_vs_responsiveness", 0.60)
+        confidence = _safe_slider_state("confidence_in_signal", 0.56)
+        turnover_style = _safe_slider_state("low_turnover_vs_adaptive", 0.40)
+        simplicity = _safe_slider_state("simplicity_vs_sophistication", 0.56)
 
-    risk_penalty = max(0.0, min(1.0, (1.0 - risk) * 0.40 + drawdown * 0.60))
-    concentration = 5 + int(round(divers * 20))
+        risk_penalty = max(0.0, min(1.0, (1.0 - risk) * 0.40 + drawdown * 0.60))
+        concentration = 5 + int(round(divers * 20))
 
-    return {
-        "preset": style,
-        "template": template,
-        "risk_appetite": risk,
-        "drawdown_protection": drawdown,
-        "diversification_vs_concentration": divers,
-        "overlay_intensity": overlay,
-        "stability_vs_responsiveness": stability,
-        "confidence_in_signal": confidence,
-        "low_turnover_vs_adaptive": turnover_style,
-        "simplicity_vs_sophistication": simplicity,
-        "risk_penalty": risk_penalty,
-        "concentration": concentration,
-        "combo_status": combo_status,
-        "setup_status_summary": setup_status_summary,
-        "recommended_template": rec_template,
-        "recommended_style": rec_style,
-        "philosophy": philosophy,
-    }
+        simple_cfg_payload = {
+            "preset": style,
+            "template": template,
+            "risk_appetite": risk,
+            "drawdown_protection": drawdown,
+            "diversification_vs_concentration": divers,
+            "overlay_intensity": overlay,
+            "stability_vs_responsiveness": stability,
+            "confidence_in_signal": confidence,
+            "low_turnover_vs_adaptive": turnover_style,
+            "simplicity_vs_sophistication": simplicity,
+            "risk_penalty": risk_penalty,
+            "concentration": concentration,
+            "combo_status": combo_status,
+            "setup_status_summary": setup_status_summary,
+            "recommended_template": rec_template,
+            "recommended_style": rec_style,
+            "philosophy": philosophy,
+        }
+
+        if callable(posture_footer_renderer):
+            st.divider()
+            posture_footer_renderer(dict(simple_cfg_payload))
+
+    return simple_cfg_payload

@@ -1230,6 +1230,182 @@ def _render_step4_sidebar(step: int) -> None:
     _render_step4_help()
 
 
+
+# ---------------------------------------------------------------------------
+# Step 5 focused sidebar
+# ---------------------------------------------------------------------------
+
+
+def _step5_setup_summary() -> dict[str, Any]:
+    """Read Strategy Engine setup state without running the engine."""
+    philosophy = str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
+    template = str(st.session_state.get("step5_template", "Balanced Risk-Controlled") or "Balanced Risk-Controlled")
+    style = str(st.session_state.get("step5_style", "Balanced") or "Balanced")
+    panel_meta = _asset_panel_summary()
+    cfg = _coerce_mapping(st.session_state.get("last_engine_config", {}))
+    if not cfg:
+        cfg = _coerce_mapping(_latest_run_result().get("config", {}))
+    return {
+        "philosophy": philosophy,
+        "template": template,
+        "style": style,
+        "panel_assets": _safe_int(panel_meta.get("assets", 0), 0),
+        "panel_rows": _safe_int(panel_meta.get("rows", 0), 0),
+        "top_k": cfg.get("top_k", st.session_state.get("step5_basic_top_k", "—")),
+        "signal_mode": cfg.get("signal_mode", st.session_state.get("step5_basic_signal_mode", "—")),
+    }
+
+
+def _render_step5_navigation_block() -> None:
+    st.markdown("### Navigation")
+    if _native_button(
+        "Home",
+        key="global_sidebar_home_button_step5",
+        use_container_width=True,
+        disabled=False,
+        help="Return to the module selector.",
+        icon=":material/home:",
+    ):
+        _go_to_step(0)
+
+    st.markdown("**Investment Strategy Lab**")
+    st.caption("Run the selected universe through the Strategy Engine and review tested results.")
+
+    if st.button(
+        "Risk Profile & Asset Universe",
+        key="global_sidebar_step5_open_step4_top",
+        use_container_width=True,
+        help="Return to the universe and data setup.",
+    ):
+        _go_to_step(4)
+    st.info("**Strategy Engine**")
+
+
+def _render_step5_engine_setup() -> None:
+    setup = _step5_setup_summary()
+    st.markdown("### Engine setup")
+    st.caption(f"Template: **{setup['template']}**")
+    st.caption(f"Style: **{setup['style']}**")
+    st.caption(f"Risk profile: **{setup['philosophy']}**")
+    assets = _safe_int(setup.get("panel_assets", 0), 0)
+    rows = _safe_int(setup.get("panel_rows", 0), 0)
+    if assets > 0 and rows > 0:
+        st.caption(f"Universe/data: **{_format_count(assets)} panel assets · {_format_count(rows)} rows**")
+    else:
+        st.caption("Universe/data: pending market-data panel")
+
+
+
+def _render_step5_funding_bridge() -> None:
+    bridge = _step4_funding_bridge_summary()
+    st.markdown("### Funding bridge")
+    monthly = _safe_float(bridge.get("monthly", 0.0), 0.0)
+    weekly = _safe_float(bridge.get("weekly", 0.0), 0.0)
+    if monthly > 0.0 or weekly > 0.0:
+        st.caption(f"Monthly contribution: **{_money_plain(monthly)}/mo**")
+        st.caption(f"Weekly equivalent: **{_money_weekly(weekly)}**")
+        st.caption(f"Source: {bridge.get('source', 'Personal Finance Setup')}")
+    else:
+        st.caption("No contribution bridge found yet. The demo can still run, but Personal Finance gives the cleaner path.")
+
+
+def _render_step5_run_status() -> None:
+    st.markdown("### Run status")
+    run_map = _latest_run_result()
+    if not run_map:
+        st.warning("Strategy Engine not run yet.")
+        st.caption("Use the main screen button to run the portfolio test.")
+        return
+
+    perf = _coerce_mapping(run_map.get("performance_summary", {}))
+    st.success("Latest result stored.")
+    st.caption(f"Sharpe: **{_safe_float(perf.get('sharpe', 0.0), 0.0):.2f}**")
+    st.caption(f"CAGR: **{_pct(perf.get('cagr', 0.0))}**")
+    st.caption(f"Volatility: **{_pct(perf.get('annual_volatility', perf.get('volatility', 0.0)))}**")
+    st.caption(f"Max drawdown: **-{100.0 * abs(_safe_float(perf.get('max_drawdown', 0.0), 0.0)):.2f}%**")
+    periods = _safe_int(perf.get("periods", 0), 0)
+    if periods > 0:
+        st.caption(f"Test periods: **{periods}**")
+
+
+def _render_step5_next_action() -> None:
+    st.markdown("### Next")
+    if _has_step5_result():
+        step6_enabled, step6_reason = _step_access_state(6, 5)
+        if st.button(
+            "Continue to Scenario Explorer",
+            key="global_sidebar_step5_continue_to_scenario_explorer",
+            use_container_width=True,
+            disabled=not step6_enabled,
+            help=step6_reason,
+        ):
+            _go_to_step(6)
+    else:
+        st.caption("Run the portfolio on the main screen. After a successful run, the Scenario Explorer becomes available.")
+
+
+def _render_step5_q_and_a() -> None:
+    with st.expander("Strategy Engine Q&A", expanded=False):
+        st.markdown("**Does this guarantee future returns?**")
+        st.caption("No. It tests a strategy against historical data. Future markets can behave differently.")
+
+        st.markdown("**Why is the engine needed?**")
+        st.caption("The selected universe is only a list of assets. The engine creates a tested portfolio by selecting and weighting assets over time.")
+
+        st.markdown("**What can the engine improve?**")
+        st.caption("Diversification, drawdown control, dynamic asset selection, and alignment with the chosen risk profile.")
+
+        st.markdown("**What can the engine worsen?**")
+        st.caption("It may lag simple assets in strong bull markets; risk controls can reduce upside; weak signals can overfit; extra complexity can add turnover and parameter sensitivity.")
+
+        st.markdown("**Why run this before projection?**")
+        st.caption("Without a tested engine run, the long-term module can only use savings-only or educational proxy assumptions.")
+
+
+def _render_step5_terms() -> None:
+    with st.expander("Strategy Engine terms", expanded=False):
+        st.markdown("**Strategy template**")
+        st.caption("The broad engine method used to build the portfolio.")
+
+        st.markdown("**Style preset**")
+        st.caption("The risk posture applied to the selected template.")
+
+        st.markdown("**CAGR**")
+        st.caption("Annualised growth rate of the tested strategy over the historical period. It is not a guaranteed future return.")
+
+        st.markdown("**Volatility**")
+        st.caption("How much the strategy return path fluctuated. Higher volatility usually means a rougher ride.")
+
+        st.markdown("**Sharpe**")
+        st.caption("Risk-adjusted return measure. Higher can be better, but it depends on the tested period and assumptions.")
+
+        st.markdown("**Max drawdown**")
+        st.caption("The largest peak-to-trough loss during the tested period.")
+
+        st.markdown("**Out-of-sample path**")
+        st.caption("The tested return series after model decisions; closer to a backtest than an in-sample fit.")
+
+        st.caption("These metrics describe historical test behaviour; they are not predictions or investment advice.")
+
+
+def _render_step5_sidebar(step: int) -> None:
+    """Render a focused sidebar for the Strategy Engine module."""
+    _render_step5_navigation_block()
+
+    st.divider()
+    _render_step5_engine_setup()
+
+    st.divider()
+    _render_step5_funding_bridge()
+
+    st.divider()
+    _render_step5_run_status()
+
+    st.divider()
+    _render_step5_next_action()
+
+    _render_step5_q_and_a()
+    _render_step5_terms()
 def render_global_sidebar() -> None:
     """Render a persistent sidebar across the whole Streamlit app.
 
@@ -1253,6 +1429,10 @@ def render_global_sidebar() -> None:
 
         if int(step) == 4:
             _render_step4_sidebar(step)
+            return
+
+        if int(step) == 5:
+            _render_step5_sidebar(step)
             return
 
         _render_step_navigation(step)
