@@ -334,14 +334,14 @@ def _walk_forward_status(run_map: dict, benchmark_payload: dict) -> tuple[str, s
 
 def _data_basis_status(run_map: dict) -> tuple[str, str]:
     panel_df = _panel_df()
-    label = str(run_map.get("asset_panel_source_label", st.session_state.get("asset_panel_source_label", "selected market-data")) or "selected market-data")
+    label = str(run_map.get("asset_panel_source_label", st.session_state.get("asset_panel_source_label", "Step 4 panel")) or "Step 4 panel")
     rows = _safe_int(run_map.get("asset_panel_n_rows", len(panel_df) if isinstance(panel_df, pd.DataFrame) else 0), 0)
     assets = _safe_int(run_map.get("asset_panel_n_assets", panel_df["asset"].nunique() if isinstance(panel_df, pd.DataFrame) and "asset" in panel_df.columns else 0), 0)
     if rows > 0 and assets > 0:
         if "yahoo" in label.lower():
-            return "Strong", f"Uses real historical market-data snapshot returns from the selected {label} panel ({rows:,} rows, {assets} assets). In deployed mode this is a fixed Yahoo-generated cached panel, not a live market-data pull."
-        return "Available", f"Uses the selected market-data snapshot panel ({rows:,} rows, {assets} assets)."
-    return "Unavailable", "The selected market-data panel could not be read for this reliability check."
+            return "Strong", f"Uses real historical market-data snapshot returns from the Step 4 {label} panel ({rows:,} rows, {assets} assets). In deployed mode this is a fixed Yahoo-generated cached panel, not a live market-data pull."
+        return "Available", f"Uses the Step 4 market-data snapshot panel ({rows:,} rows, {assets} assets)."
+    return "Unavailable", "The Step 4 market-data panel could not be read for this reliability check."
 
 
 def _same_period_status(benchmark_payload: dict) -> tuple[str, str]:
@@ -635,7 +635,7 @@ def _run_start_date_robustness(run_map: dict) -> dict:
     rows: list[dict] = []
 
     if panel_df.empty:
-        return {"scope": scope, "rows": [], "summary": {"status": "Unavailable", "message": "The selected market-data panel is unavailable."}, "elapsed_sec": 0.0}
+        return {"scope": scope, "rows": [], "summary": {"status": "Unavailable", "message": "Step 4 panel is unavailable."}, "elapsed_sec": 0.0}
     if not cfg_payload:
         return {"scope": scope, "rows": [], "summary": {"status": "Unavailable", "message": "Engine configuration is unavailable."}, "elapsed_sec": 0.0}
 
@@ -747,7 +747,7 @@ def _render_start_date_robustness_check(run_map: dict, *, inline_details: bool =
     ctx = st.container() if inline_details else st.expander("Optional start-date robustness check", expanded=False)
     with ctx:
         st.write(
-            "This optional check reruns the same current strategy configuration using different historical start dates from the selected market-data panel. "
+            "This optional check reruns the same current strategy configuration using different historical start dates from the existing Step 4 panel. "
             "It checks whether the result depends too heavily on one specific historical window. It does not download new data and it does not predict future returns."
         )
         st.caption(
@@ -771,7 +771,7 @@ def _render_start_date_robustness_check(run_map: dict, *, inline_details: bool =
 
         if run_clicked:
             if panel_df.empty:
-                st.warning("Cannot run robustness check because the selected market-data panel is unavailable.")
+                st.warning("Cannot run robustness check because the Step 4 asset panel is unavailable.")
             elif not cfg_payload:
                 st.warning("Cannot run robustness check because the current engine configuration could not be resolved.")
             else:
@@ -912,13 +912,14 @@ def render_start_date_robustness_timing_block(run_map: dict | None = None) -> No
         st.metric("Executed reruns", int(executed_count))
 
     st.caption(
-        "This is the extra time used by the optional start-date robustness check inside the strategy engine. "
+        "This is the extra time used by the optional Step 5 start-date robustness check. "
         "It is separate from the main engine run and from the preset / engine-tuning suggestion tests. "
         "The current baseline row is reused, so it is not rerun."
     )
 
     if rows:
-        with st.expander("Start-date robustness timing breakdown", expanded=False):
+        with st.container(border=True):
+            st.caption("Start-date robustness timing breakdown")
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: dict | None = None, inline_details: bool = False) -> None:
@@ -971,9 +972,9 @@ def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: di
 
     st.markdown("**What is real here?**")
     st.markdown(
-        "- **Benchmark assets** are real historical market assets from the selected market-data panel.\n"
+        "- **Benchmark assets** are real historical market assets from the Step 4 panel.\n"
         "- **The strategy result** is a walk-forward backtest created from those real asset returns.\n"
-        "- **Long-Term Scenario Explorer** is a future uncertainty simulation based on the historical strategy return series."
+        "- **Step 6 projection** is a future uncertainty simulation based on the historical strategy return series."
     )
 
     if inline_details:
@@ -981,7 +982,7 @@ def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: di
     validation_ctx = st.container() if inline_details else st.expander("Benchmark calculation validation", expanded=False)
     with validation_ctx:
         st.write(
-            "This check compares benchmark metrics shown by the app against an independent recomputation from the same selected market-data panel and the same evaluated period. "
+            "This check compares benchmark metrics shown by the app against an independent recomputation from the same Step 4 panel and the same evaluated period. "
             "It validates the metric calculation pipeline, not future predictive accuracy and not Yahoo data correctness."
         )
         if isinstance(validation_df, pd.DataFrame) and not validation_df.empty:
