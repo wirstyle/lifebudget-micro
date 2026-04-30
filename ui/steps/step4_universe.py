@@ -79,6 +79,11 @@ DEPLOYMENT_MAX_VISIBLE_UNIVERSE_SIZE = 100
 STEP4_DEFAULT_WEEKLY_CONTRIBUTION = 48.0
 STEP4_DEFAULT_MONTHLY_CONTRIBUTION = STEP4_DEFAULT_WEEKLY_CONTRIBUTION * 52.0 / 12.0
 
+# UI-only toggle controlled from the Step 4 sidebar. It reveals audit/download
+# tools without keeping technical diagnostics in the normal setup flow.
+STEP4_SHOW_MARKET_DATA_TOOLS = "step4_show_market_data_tools"
+STEP4_PANEL_SIDEBAR_REFRESH_SIGNATURE = "step4_panel_sidebar_refresh_signature_v1"
+
 
 def _safe_float(value, default: float = 0.0) -> float:
     try:
@@ -430,8 +435,8 @@ def _panel_preview_for_display(panel_df: pd.DataFrame, rows: int = 50) -> pd.Dat
     return preview
 
 
-def _render_data_panel_preview(panel_df: pd.DataFrame) -> None:
-    st.dataframe(_panel_preview_for_display(panel_df), use_container_width=True, hide_index=True)
+def _render_data_panel_preview(panel_df: pd.DataFrame, *, height: int = 320) -> None:
+    st.dataframe(_panel_preview_for_display(panel_df), use_container_width=True, hide_index=True, height=height)
 
 
 def _render_asset_diagnostics(*, requested_assets: list[str], ready_panel: pd.DataFrame | None) -> None:
@@ -465,7 +470,7 @@ def _render_step4_intro_banners() -> None:
     """
     st.info(
         "**Purpose:** choose an investment philosophy, a matching asset universe, "
-        "and the cached market-data panel used by the strategy engine. No optimisation happens here."
+        "and the cached market-data panel used by the Strategy Engine. No optimisation happens here."
     )
 
 def _render_contribution_bridge_card(investment_context: dict) -> None:
@@ -560,7 +565,7 @@ def _render_philosophy_strategy_card(current_philosophy: str, bundle: dict, rec_
         with st.expander("Why this fits / terms explained", expanded=False):
             st.write(
                 f"The {current_philosophy} setup keeps the philosophy, universe size, strategy template "
-                "and projection tone aligned before the strategy engine run."
+                "and projection tone aligned before the Strategy Engine run."
             )
             st.write("**CAGR** is a long-term average annual growth rate; it is not a yearly guarantee.")
             st.write("**Volatility** describes how bumpy the journey may feel along the way.")
@@ -575,7 +580,7 @@ def _render_alignment_message(current_combo_status: str, current_philosophy: str
     if current_combo_status == "allowed":
         st.info("Strategy setup is allowed for this risk profile, but it is not the primary recommended combo.")
     else:
-        st.warning("Current strategy setup is outside the allowed normal-mode space for this risk profile. It will be corrected before the strategy engine runs.")
+        st.warning("Current strategy setup is outside the allowed normal-mode space for this risk profile. It will be corrected before the Strategy Engine runs.")
 
 
 def _render_universe_mix_compact(selected_assets: list[str]) -> None:
@@ -608,12 +613,41 @@ def _render_universe_mix_compact(selected_assets: list[str]) -> None:
 
 
 
+
+
+def _render_asset_universe_details(selected_assets: list[str]) -> None:
+    """Render the selected universe composition in a compact diagnostics block."""
+    mix_df, mix_summary = build_universe_mix(selected_assets)
+    detail_df = build_universe_mix_detail(selected_assets)
+
+    n_assets = int(mix_summary.get("n_assets", len(selected_assets)) or len(selected_assets)) if isinstance(mix_summary, dict) else len(selected_assets)
+    group_count = int(mix_summary.get("group_count", 0) or 0) if isinstance(mix_summary, dict) else 0
+    if group_count <= 0 and isinstance(mix_df, pd.DataFrame) and not mix_df.empty and "group" in mix_df.columns:
+        group_count = int(mix_df["group"].nunique())
+    classified_share = float(mix_summary.get("classified_share", 0.0) or 0.0) if isinstance(mix_summary, dict) else 0.0
+
+    st.markdown("**Universe mix**")
+    if selected_assets:
+        st.caption(f"{n_assets} assets across {group_count or 'multiple'} groups. Classified share: {classified_share:.0%}.")
+    show_table_if_not_empty(
+        mix_df,
+        empty_message="No universe mix available yet.",
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("**Full asset list**")
+    if isinstance(detail_df, pd.DataFrame) and not detail_df.empty:
+        st.dataframe(detail_df, use_container_width=True, hide_index=True, height=260)
+    else:
+        st.info("No detailed universe taxonomy is available yet.")
+
 def _render_investment_setup_card(current_philosophy: str, bundle: dict, rec_template: str, rec_style: str) -> tuple[int, str, list[str], list[str]]:
     """Render the main Step 4 decision as one compact card.
 
     The visual hierarchy is intentionally vertical:
     1. choose the risk posture;
-    2. choose the asset universe that should feed the strategy engine;
+    2. choose the asset universe that should feed the Strategy Engine;
     3. show one compact current-setup summary.
 
     Keep this as UI/layout only. The asset selection, state sync and panel
@@ -810,21 +844,6 @@ def _render_investment_setup_card(current_philosophy: str, bundle: dict, rec_tem
     else:
         st.warning("No valid assets found yet for the primary universe.")
 
-    with st.expander("Advanced strategy defaults, guidance and full composition", expanded=False):
-        st.markdown("**Default engine bundle**")
-        st.caption(
-            f"Template: {rec_template} · Style: {rec_style} · "
-            f"Projection: {bundle.get('projection_profile', current_philosophy)}"
-        )
-        st.caption("These defaults stay aligned with the selected risk profile before the strategy engine runs.")
-        st.divider()
-        _render_size_strategy_guidance(current_philosophy, int(selected_size), str(selected_strategy))
-        st.divider()
-        _render_strategy_setup_guidance(current_philosophy)
-        st.divider()
-        st.caption(build_universe_preview_text(selected_assets))
-        _render_universe_mix_compact(selected_assets)
-
     candidate_assets = build_strategy_candidate_pool(selected_size, selected_strategy)
     return int(selected_size), str(selected_strategy), list(selected_assets), list(candidate_assets)
 
@@ -930,7 +949,7 @@ def _render_universe_selection_card(current_philosophy: str, bundle: dict, rec_t
         else:
             st.warning("No valid assets found yet for the primary universe.")
 
-        with st.expander("Universe guidance and full composition", expanded=False):
+        with st.expander("Universe composition and engine defaults", expanded=False):
             _render_size_strategy_guidance(current_philosophy, int(selected_size), str(selected_strategy))
             st.divider()
             _render_strategy_setup_guidance(current_philosophy)
@@ -973,7 +992,10 @@ def _render_market_data_setup_card(selected_assets: list[str], candidate_assets:
     else:
         market_caption = "No valid tickers have been selected yet for market-data preparation."
 
-    with st.expander("Advanced market-data setup", expanded=False):
+    with st.expander("Universe and data details", expanded=False):
+        _render_asset_universe_details(selected_assets)
+        st.divider()
+        st.markdown("**Market-data setup**")
         if selected_assets:
             st.info(market_caption)
         else:
@@ -1013,7 +1035,10 @@ def _render_market_data_setup_card(selected_assets: list[str], candidate_assets:
 
 
 def _render_panel_status_and_diagnostics(panel_error: str, selected_strategy: str) -> None:
-    """Move panel readiness and diagnostics out of the main visual flow."""
+    """Render optional technical market-data tools when explicitly requested."""
+    if not bool(st.session_state.get(STEP4_SHOW_MARKET_DATA_TOOLS, False)):
+        return
+
     ready_panel = st.session_state.get(ASSET_PANEL_DF)
     ready_asset_count = 0
     panel_rows = 0
@@ -1038,14 +1063,21 @@ def _render_panel_status_and_diagnostics(panel_error: str, selected_strategy: st
         timings.get("total_seconds"),
     )
 
-    with st.expander("Market-data status, preview and diagnostics", expanded=False):
-        if bool(st.session_state.get(ASSET_PANEL_READY, False)):
-            st.success(
-                f"Ready for strategy engine: **{ready_asset_count or '—'} assets** · "
-                f"{panel_rows:,.0f} rows · {str(st.session_state.get(ASSET_RETURN_FREQUENCY, 'monthly') or 'monthly')} returns."
-            )
-        else:
-            st.error("Strategy engine is locked until the asset panel is ready.")
+    with st.expander("Technical market-data tools", expanded=True):
+        st.caption(
+            "Technical preview, audit details, and CSV downloads. "
+            "This section is hidden during the normal setup flow."
+        )
+        if st.button(
+            "Hide diagnostics & downloads",
+            key="step4_hide_market_data_tools_button",
+            use_container_width=True,
+        ):
+            st.session_state[STEP4_SHOW_MARKET_DATA_TOOLS] = False
+            st.rerun()
+
+        if not bool(st.session_state.get(ASSET_PANEL_READY, False)):
+            st.error("The Strategy Engine is unavailable until the market-data panel is ready.")
             if panel_error:
                 st.caption(f"Latest panel error: {panel_error}")
 
@@ -1059,70 +1091,123 @@ def _render_panel_status_and_diagnostics(panel_error: str, selected_strategy: st
         with s3:
             st.caption("Source")
             st.write("**Cached panel**")
-        st.caption(f"Panel source: {st.session_state.get(ASSET_PANEL_SOURCE_LABEL, 'cached Yahoo deployment panel')}")
 
         if isinstance(ready_panel, pd.DataFrame) and not ready_panel.empty:
             st.markdown("**Prepared panel preview**")
-            _render_data_panel_preview(ready_panel)
+            _render_data_panel_preview(ready_panel, height=300)
         else:
             st.info("No panel preview available yet.")
 
-        st.divider()
-        timing_summary = format_step4_timing_summary(timings)
-        if timing_summary:
-            st.caption("Step 4 timings · " + timing_summary)
+        timing_rows = [
+            ("Prepared panel read", timings.get("deployment_panel_read_seconds")),
+            ("Raw daily read", timings.get("deployment_raw_daily_read_seconds")),
+            ("Raw weekly read", timings.get("deployment_raw_weekly_read_seconds")),
+            ("Yahoo download", timings.get("download_yahoo_seconds")),
+            ("Return panel build", timings.get("return_panel_seconds")),
+            ("Total resolve", timings.get("resolve_total_seconds") or timings.get("deployment_panel_total_seconds")),
+        ]
+        timing_display = []
+        for label, raw_value in timing_rows:
+            try:
+                value = float(raw_value)
+            except Exception:
+                continue
+            timing_display.append({"metric": label, "value": f"{value:.2f}s"})
+
+        if "reuse_existing_panel" in timings:
+            timing_display.append({"metric": "Cache reused", "value": str(bool(timings.get("reuse_existing_panel")))})
+        if timings.get("deployment_cache_mode"):
+            timing_display.append({"metric": "Cache mode", "value": str(timings.get("deployment_cache_mode"))})
+
+        if timing_display:
+            st.markdown("**Market-data timing breakdown**")
+            st.dataframe(pd.DataFrame(timing_display), use_container_width=True, hide_index=True, height=280)
         else:
             st.caption("Timing details appear after the panel has been prepared or reused.")
 
         ready_panel_for_diag = st.session_state.get(ASSET_PANEL_DF)
-        tickers_to_download = list(st.session_state.get("_step4_yahoo_tickers_to_download", []) or [])
-        if tickers_to_download:
-            _render_asset_diagnostics(requested_assets=tickers_to_download, ready_panel=ready_panel_for_diag)
-        else:
-            latest_union_caption = str(st.session_state.get("_step4_latest_union_caption", "") or "")
-            if latest_union_caption:
-                st.caption(latest_union_caption)
-            if isinstance(ready_panel_for_diag, pd.DataFrame) and not ready_panel_for_diag.empty:
-                _render_asset_diagnostics(requested_assets=[], ready_panel=ready_panel_for_diag)
+        requested = [
+            normalize_asset_ticker(x)
+            for x in list(st.session_state.get("_step4_yahoo_tickers_to_download", []) or [])
+            if normalize_asset_ticker(x)
+        ]
+        loaded: list[str] = []
+        if isinstance(ready_panel_for_diag, pd.DataFrame) and not ready_panel_for_diag.empty and "asset" in ready_panel_for_diag.columns:
+            loaded = sorted(
+                set(
+                    normalize_asset_ticker(x)
+                    for x in ready_panel_for_diag["asset"].dropna().tolist()
+                    if normalize_asset_ticker(x)
+                )
+            )
+        missing = sorted(set(requested) - set(loaded)) if requested and loaded else []
+
+        if requested or loaded:
+            st.markdown("**Ticker audit**")
+            t1, t2, t3 = st.columns(3)
+            with t1:
+                st.caption("Requested")
+                st.write(f"**{len(requested) if requested else '—'}**")
+            with t2:
+                st.caption("Loaded in panel")
+                st.write(f"**{len(loaded) if loaded else '—'}**")
+            with t3:
+                st.caption("Missing")
+                st.write(f"**{len(missing)}**" if requested and loaded else "**—**")
+            st.caption("Full selected-universe composition is shown in Universe and data details.")
 
         current_signature = st.session_state.get(STEP4_PANEL_SIGNATURE_KEY, "")
         if current_signature:
             st.caption("Panel input signature is stored for cache/rebuild checks.")
 
-        if isinstance(ready_panel, pd.DataFrame) and not ready_panel.empty:
-            st.download_button(
-                "Download prepared market data",
-                data=panel_df_to_csv_bytes(ready_panel),
-                file_name=panel_download_filename(
-                    st.session_state.get(ASSET_PANEL_SOURCE_LABEL, "panel"),
-                    selected_strategy,
-                    str(st.session_state.get(ASSET_RETURN_FREQUENCY, "monthly") or "monthly"),
-                ),
-                mime="text/csv",
-                key="step4_download_panel_csv",
-            )
+        st.markdown("**Downloads**")
         raw_source = str(st.session_state.get(STEP4_RAW_PANEL_SOURCE_KEY, "") or "")
         raw_daily_panel = st.session_state.get(STEP4_RAW_DAILY_PANEL_KEY)
         raw_weekly_panel = st.session_state.get(STEP4_RAW_WEEKLY_PANEL_KEY)
         if raw_source:
             st.caption(f"Raw return panel source: {raw_source}")
-        if isinstance(raw_daily_panel, pd.DataFrame) and not raw_daily_panel.empty:
-            st.download_button(
-                "Download raw daily return panel",
-                data=panel_df_to_csv_bytes(raw_daily_panel),
-                file_name="yahoo_raw_daily_returns.csv",
-                mime="text/csv",
-                key="step4_download_raw_daily_panel_csv",
-            )
-        if isinstance(raw_weekly_panel, pd.DataFrame) and not raw_weekly_panel.empty:
-            st.download_button(
-                "Download raw weekly return panel",
-                data=panel_df_to_csv_bytes(raw_weekly_panel),
-                file_name="yahoo_raw_weekly_returns.csv",
-                mime="text/csv",
-                key="step4_download_raw_weekly_panel_csv",
-            )
 
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            if isinstance(ready_panel, pd.DataFrame) and not ready_panel.empty:
+                st.download_button(
+                    "Prepared panel",
+                    data=panel_df_to_csv_bytes(ready_panel),
+                    file_name=panel_download_filename(
+                        st.session_state.get(ASSET_PANEL_SOURCE_LABEL, "panel"),
+                        selected_strategy,
+                        str(st.session_state.get(ASSET_RETURN_FREQUENCY, "monthly") or "monthly"),
+                    ),
+                    mime="text/csv",
+                    key="step4_download_panel_csv",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Prepared panel unavailable")
+        with d2:
+            if isinstance(raw_daily_panel, pd.DataFrame) and not raw_daily_panel.empty:
+                st.download_button(
+                    "Raw daily panel",
+                    data=panel_df_to_csv_bytes(raw_daily_panel),
+                    file_name="yahoo_raw_daily_returns.csv",
+                    mime="text/csv",
+                    key="step4_download_raw_daily_panel_csv",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Raw daily panel unavailable")
+        with d3:
+            if isinstance(raw_weekly_panel, pd.DataFrame) and not raw_weekly_panel.empty:
+                st.download_button(
+                    "Raw weekly panel",
+                    data=panel_df_to_csv_bytes(raw_weekly_panel),
+                    file_name="yahoo_raw_weekly_returns.csv",
+                    mime="text/csv",
+                    key="step4_download_raw_weekly_panel_csv",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Raw weekly panel unavailable")
 
 def render_step_4() -> None:
     section_header("Risk Profile and Asset Universe")
@@ -1140,12 +1225,6 @@ def render_step_4() -> None:
         rec_template,
         rec_style,
     )
-    with st.expander("Funding assumption for later simulations", expanded=False):
-        _render_contribution_bridge_card(investment_context)
-        st.caption(
-            "This value is inherited from the Personal Finance Planner when available. "
-            "If no prior plan exists, the demo fallback keeps the strategy lab usable."
-        )
     _render_market_data_setup_card(selected_assets, candidate_assets)
     st.session_state[INVESTMENT_START_DATE_STABILITY_ENABLED] = False
     st.session_state[INVESTMENT_START_DATE_STABILITY_DATES] = []
@@ -1173,6 +1252,20 @@ def render_step_4() -> None:
             panel_timings = dict(st.session_state.get(STEP4_PANEL_TIMINGS_KEY, {}) or {})
             panel_timings["reuse_existing_panel"] = True
     update_asset_panel_state(panel_df, panel_source_label, panel_error, panel_signature=current_panel_signature, timings=panel_timings, build_trigger=build_trigger if should_rebuild_panel else "reuse_existing_panel")
+
+    # app.py renders the sidebar before the active step. When this screen prepares
+    # or reuses a valid market-data panel, the sidebar has already rendered with
+    # the previous readiness state. Trigger exactly one refresh per panel input
+    # signature so the sidebar can show the ready state and diagnostics/downloads
+    # button immediately, without creating a rerun loop.
+    if bool(st.session_state.get(ASSET_PANEL_READY, False)) and current_panel_signature:
+        last_sidebar_refresh_signature = str(
+            st.session_state.get(STEP4_PANEL_SIDEBAR_REFRESH_SIGNATURE, "") or ""
+        )
+        if last_sidebar_refresh_signature != str(current_panel_signature):
+            st.session_state[STEP4_PANEL_SIDEBAR_REFRESH_SIGNATURE] = str(current_panel_signature)
+            st.rerun()
+
     _render_panel_status_and_diagnostics(panel_error, selected_strategy)
     payload = build_step4_universe_payload_from_state()
     st.markdown("---")
@@ -1184,12 +1277,8 @@ def render_step_4() -> None:
             st.rerun()
     with right:
         continue_disabled = not bool(st.session_state.get(ASSET_PANEL_READY, False))
-        if st.button("Continue to Engine Workspace", key="step4_continue", disabled=continue_disabled, use_container_width=True):
+        if st.button("Continue to Strategy Engine", key="step4_continue", disabled=continue_disabled, use_container_width=True):
             st.session_state["step4_universe_payload"] = payload
             st.session_state[CURRENT_STEP] = 5
             st.session_state["current_step"] = 5
             st.rerun()
-        if continue_disabled:
-            st.caption("Finish this step by preparing a valid market-data panel first.")
-        else:
-            st.caption("Ready to continue into the Engine Workspace.")

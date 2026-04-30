@@ -1,6 +1,7 @@
 import streamlit as st
 
 from ui.services.step4_universe_service import (
+    SEMANTIC_LAST_SIGNATURE,
     SEMANTIC_SLIDER_KEYS,
     SEMANTIC_TOUCHED_FLAG,
     allowed_style_presets_for_philosophy,
@@ -9,6 +10,7 @@ from ui.services.step4_universe_service import (
     get_canonical_investment_philosophy,
     mark_semantic_sliders_dirty,
     recommended_strategy_combo_for_philosophy,
+    semantic_seed_signature,
     strategy_combo_status,
 )
 
@@ -170,38 +172,57 @@ def render_simple_mode(*, use_internal_expanders: bool = True):
         current_template, current_style = _sync_combo_to_philosophy_space(philosophy)
 
     template_options = allowed_strategy_templates_for_philosophy(philosophy)
+    if not template_options:
+        template_options = [rec_template]
     if current_template not in template_options:
         current_template = rec_template if rec_template in template_options else template_options[0]
+
+    # Use the durable Step 5 keys as the widget keys, but only seed/correct them
+    # before the widgets are instantiated. Do not assign these keys after the
+    # selectboxes render, otherwise Streamlit may raise the widget/session_state
+    # mutation error and the semantic sliders can lag one rerun behind.
+    if st.session_state.get("step5_template") not in template_options:
+        st.session_state["step5_template"] = current_template
+
     left, right = st.columns(2)
     with left:
         template = st.selectbox(
             "Strategy template",
             template_options,
-            index=template_options.index(current_template),
+            index=template_options.index(str(st.session_state.get("step5_template", current_template))),
+            key="step5_template",
         )
-        st.session_state["step5_template"] = template
         st.caption(_template_description(template))
 
-    current_style_after_template = str(st.session_state.get("step5_style", current_style) or current_style)
     style_options = allowed_style_presets_for_philosophy(philosophy, template)
+    if not style_options:
+        style_options = [rec_style]
+
+    current_style_after_template = str(st.session_state.get("step5_style", current_style) or current_style)
     if current_style_after_template not in style_options:
         current_style_after_template = rec_style if rec_style in style_options else style_options[0]
+        # Safe because the style selectbox has not been instantiated yet in this run.
+        st.session_state["step5_style"] = current_style_after_template
 
     with right:
         style = st.selectbox(
             "Style preset",
             style_options,
-            index=style_options.index(current_style_after_template),
+            index=style_options.index(str(st.session_state.get("step5_style", current_style_after_template))),
+            key="step5_style",
         )
-        st.session_state["step5_style"] = style
         st.caption(_style_description(style))
 
     if not freeze_after_apply:
-        apply_semantic_slider_defaults(template, style, force=False)
+        active_signature = semantic_seed_signature(template, style)
+        previous_signature = str(st.session_state.get(SEMANTIC_LAST_SIGNATURE, "") or "")
+        preset_changed = active_signature != previous_signature
+        # If the preset changed, reset the posture sliders immediately and clear
+        # the manual-touched state. If the preset did not change, preserve any
+        # manual slider edits exactly as before.
+        apply_semantic_slider_defaults(template, style, force=preset_changed)
 
     combo_status = strategy_combo_status(philosophy, template, style)
-    current_combo_label = f"{template} + {style}"
-    default_combo_label = f"{rec_template} + {rec_style}"
     applied_preset_label = str(st.session_state.get("step5_preset_applied_label_v2", "") or "")
 
     setup_status_summary = _setup_status_summary(

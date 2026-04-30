@@ -32,16 +32,25 @@ AUTO_OPT_SUGGESTION_TIMING_KEY = "step5_auto_opt_suggestion_timing_v1"
 UNIVERSE_SUGGESTION_TIMING_KEY = "step5_universe_suggestion_timing_v1"
 SIZE_SUGGESTION_TIMING_KEY = "step5_size_suggestion_timing_v1"
 
+# Personal Finance live-summary defaults. These mirror the first visible state
+# of the main Personal Finance Setup screen, so the sidebar is useful even on
+# the first render before the main screen has seeded widget-backed values.
+PF_DEFAULT_INCOME_WEEKLY = 460.0
+PF_DEFAULT_FIXED_WEEKLY = 185.0
+PF_DEFAULT_VARIABLE_WEEKLY = 80.0
+PF_DEFAULT_DISCRETIONARY_WEEKLY = 35.0
+PF_DEFAULT_HORIZON_WEEKS = 12
+
 
 STEP_NAV_ITEMS: tuple[dict[str, Any], ...] = (
     {"step": 0, "group": "Home", "icon": "", "title": "Home", "subtitle": "Module selector"},
-    {"step": 1, "group": "Personal Finance", "icon": "", "title": "Step 1", "subtitle": "Income & Budget"},
-    {"step": 2, "group": "Personal Finance", "icon": "", "title": "Step 2", "subtitle": "Goal Setup"},
-    {"step": 3, "group": "Personal Finance", "icon": "", "title": "Step 3", "subtitle": "Savings Feasibility"},
-    {"step": 4, "group": "Investment Setup", "icon": "", "title": "Step 4", "subtitle": "Universe & Data"},
-    {"step": 5, "group": "Investment Setup", "icon": "", "title": "Step 5", "subtitle": "Engine Workspace"},
-    {"step": 6, "group": "Scenario & Reports", "icon": "", "title": "Step 6", "subtitle": "Long-Term Scenario"},
-    {"step": 7, "group": "Scenario & Reports", "icon": "", "title": "Step 7", "subtitle": "Insights & Reports"},
+    {"step": 1, "group": "Personal Finance Planner", "icon": "", "title": "Personal Finance Setup", "subtitle": "Budget, target, feasibility"},
+    {"step": 2, "group": "Personal Finance Planner", "icon": "", "title": "Personal Finance Setup", "subtitle": "Budget, target, feasibility"},
+    {"step": 3, "group": "Personal Finance Planner", "icon": "", "title": "Personal Finance Setup", "subtitle": "Budget, target, feasibility"},
+    {"step": 4, "group": "Investment Strategy Lab", "icon": "", "title": "Risk Profile & Asset Universe", "subtitle": ""},
+    {"step": 5, "group": "Investment Strategy Lab", "icon": "", "title": "Strategy Engine", "subtitle": ""},
+    {"step": 6, "group": "Long-Term Scenario Explorer", "icon": "", "title": "Long-Term Scenario", "subtitle": ""},
+    {"step": 7, "group": "Long-Term Scenario Explorer", "icon": "", "title": "Final Report", "subtitle": ""},
 )
 
 
@@ -81,6 +90,110 @@ def _money_weekly(value: Any) -> str:
     except Exception:
         return "—"
 
+
+def _money_plain(value: Any) -> str:
+    try:
+        return f"£{float(value):,.0f}"
+    except Exception:
+        return "—"
+
+
+def _period_amount_to_weekly(amount: Any, period: Any = "Weekly") -> float:
+    raw = _safe_float(amount, 0.0)
+    label = str(period or "Weekly").strip().lower()
+    if label.startswith("month"):
+        return raw * 12.0 / 52.0
+    if label.startswith("year") or label.startswith("annual"):
+        return raw / 52.0
+    return raw
+
+
+def _first_positive_value(*values: Any) -> float:
+    for value in values:
+        candidate = _safe_float(value, 0.0)
+        if candidate > 0.0:
+            return float(candidate)
+    return 0.0
+
+
+def _personal_finance_sidebar_summary() -> dict[str, float | int | bool | str]:
+    """Read the lightweight Personal Finance state without triggering work.
+
+    app.py renders the global sidebar before the active step, so the Step 1
+    widgets may not have seeded their defaults yet on a first visit. Use this
+    order of evidence:
+    1. confirmed planning snapshot;
+    2. live preview snapshot, if the main screen produced one on a prior rerun;
+    3. current widget-backed values;
+    4. the same safe defaults shown by the Personal Finance Setup screen.
+    """
+    snapshot = _planning_snapshot()
+    preview = _coerce_mapping(st.session_state.get("planning_snapshot_preview", {}))
+    source_snapshot = snapshot or preview
+
+    income_weekly_from_snapshot = _safe_float(source_snapshot.get("monthly_income", 0.0), 0.0) * 12.0 / 52.0
+    fixed_weekly_from_snapshot = _safe_float(source_snapshot.get("fixed_essentials_monthly", 0.0), 0.0) * 12.0 / 52.0
+    variable_weekly_from_snapshot = _safe_float(source_snapshot.get("variable_essentials_monthly", 0.0), 0.0) * 12.0 / 52.0
+    discretionary_weekly_from_snapshot = _safe_float(source_snapshot.get("discretionary_spending_monthly", 0.0), 0.0) * 12.0 / 52.0
+    spending_weekly_from_snapshot = fixed_weekly_from_snapshot + variable_weekly_from_snapshot + discretionary_weekly_from_snapshot
+
+    income_weekly_from_widgets = _period_amount_to_weekly(
+        st.session_state.get("step1_income_amount", PF_DEFAULT_INCOME_WEEKLY),
+        st.session_state.get("step1_income_period", "Weekly"),
+    )
+    fixed_weekly_from_widgets = _period_amount_to_weekly(
+        st.session_state.get("step1_fixed_amount", PF_DEFAULT_FIXED_WEEKLY),
+        st.session_state.get("step1_fixed_period", "Weekly"),
+    )
+    variable_weekly_from_widgets = _period_amount_to_weekly(
+        st.session_state.get("step1_variable_amount", PF_DEFAULT_VARIABLE_WEEKLY),
+        st.session_state.get("step1_variable_period", "Weekly"),
+    )
+    discretionary_weekly_from_widgets = _period_amount_to_weekly(
+        st.session_state.get("step1_discretionary_amount", PF_DEFAULT_DISCRETIONARY_WEEKLY),
+        st.session_state.get("step1_discretionary_period", "Weekly"),
+    )
+    spending_weekly_from_widgets = (
+        fixed_weekly_from_widgets + variable_weekly_from_widgets + discretionary_weekly_from_widgets
+    )
+
+    income_weekly = _first_positive_value(income_weekly_from_snapshot, income_weekly_from_widgets)
+    spending_weekly = _first_positive_value(spending_weekly_from_snapshot, spending_weekly_from_widgets)
+    margin_weekly = _first_positive_value(
+        source_snapshot.get("baseline_savings_weekly", 0.0),
+        max(income_weekly - spending_weekly, 0.0),
+    )
+    target_weekly = _first_positive_value(
+        st.session_state.get("step1_target_weekly_savings", 0.0),
+        source_snapshot.get("target_a_weekly", 0.0),
+        source_snapshot.get("weekly_savings", 0.0),
+        round(max(margin_weekly, 0.0) * 0.30),
+    )
+    horizon_weeks = _safe_int(
+        st.session_state.get(
+            "step2_planning_horizon_weeks",
+            source_snapshot.get("planning_horizon_weeks", PF_DEFAULT_HORIZON_WEEKS),
+        ),
+        PF_DEFAULT_HORIZON_WEEKS,
+    )
+
+    if snapshot:
+        source_label = "Saved plan snapshot"
+    elif preview:
+        source_label = "Live preview from main screen"
+    else:
+        source_label = "Live estimate from visible defaults"
+
+    return {
+        "has_any_values": bool(income_weekly > 0.0 or spending_weekly > 0.0 or target_weekly > 0.0),
+        "snapshot_stored": bool(snapshot),
+        "source_label": str(source_label),
+        "income_weekly": float(income_weekly),
+        "spending_weekly": float(spending_weekly),
+        "margin_weekly": float(margin_weekly),
+        "target_weekly": float(target_weekly),
+        "horizon_weeks": int(max(1, horizon_weeks)),
+    }
 
 def _pct(value: Any) -> str:
     try:
@@ -143,11 +256,11 @@ def _module_for_step(step: int) -> tuple[str, str]:
     if step in {1, 2, 3}:
         return "Personal Finance Planner", "Budget, savings target, feasibility"
     if step in {4, 5}:
-        return "Investment Strategy Lab", "Universe setup and engine testing"
+        return "Investment Strategy Lab", "Build the asset universe, run the strategy engine, and review results"
     if step == 6:
         return "Long-Term Scenario Explorer", "Scenario simulation, not forecast"
     if step == 7:
-        return "Insights Summary", "Decision-support interpretation"
+        return "Final Report", "Decision-support interpretation"
     return "LifeBudget Micro", "Educational planning prototype"
 
 
@@ -302,13 +415,13 @@ def _step_access_state(target_step: int, current_step: int) -> tuple[bool, str]:
 
     if target_step == 4:
         if current_step >= 4 or (notice_ok and _is_investment_pathway(current_step)):
-            return True, "Open universe and market-data setup."
-        return False, "Choose an investing pathway before opening Step 4."
+            return True, "Open Risk Profile & Asset Universe."
+        return False, "Choose an investing pathway before opening Risk Profile & Asset Universe."
 
     if target_step == 5:
         if current_step >= 5 or _has_asset_panel() or _has_step5_result():
             return True, "Open the engine workspace."
-        return False, "Prepare the Step 4 asset panel first."
+        return False, "Prepare the market-data panel first."
 
     if target_step == 6:
         if current_step >= 6 or _has_step5_result() or _has_projection_bridge() or snapshot:
@@ -318,7 +431,7 @@ def _step_access_state(target_step: int, current_step: int) -> tuple[bool, str]:
     if target_step == 7:
         if current_step >= 7 or _has_projection_result():
             return True, "Open insights and reports."
-        return False, "Generate a Step 6 scenario before opening reports."
+        return False, "Generate a long-term scenarios scenario before opening reports."
 
     return False, "Step unavailable."
 
@@ -359,7 +472,7 @@ def _branch_items_for_step(step: int) -> tuple[str, tuple[int, ...], str]:
             )
         if selected_module == "investment_lab":
             return (
-                "Investment Setup",
+                "Investment Strategy Lab",
                 (4, 5),
                 "Investment branch: data universe and engine workspace.",
             )
@@ -376,7 +489,7 @@ def _branch_items_for_step(step: int) -> tuple[str, tuple[int, ...], str]:
         )
 
     # Once the user is inside a step, the current step decides the visible
-    # branch. This keeps Step 6/7 visually separate from the investment engine,
+    # branch. This keeps long-term scenarios/7 visually separate from the investment engine,
     # even if the scenario is using Step 5 results.
     if step in {1, 2, 3}:
         return (
@@ -387,7 +500,7 @@ def _branch_items_for_step(step: int) -> tuple[str, tuple[int, ...], str]:
 
     if step in {4, 5} or selected_module == "investment_lab":
         return (
-            "Investment Setup",
+            "Investment Strategy Lab",
             (4, 5),
             "Investment branch: data universe and engine workspace.",
         )
@@ -494,7 +607,7 @@ def _render_compact_status(step: int) -> None:
         panel_meta = _asset_panel_summary()
         if panel_meta:
             st.caption(
-                f"Data: {panel_meta.get('assets', 0)} assets · "
+                f"Market-data panel: {panel_meta.get('assets', 0)} assets · "
                 f"{panel_meta.get('rows', 0)} rows"
             )
 
@@ -542,14 +655,14 @@ def _render_readiness_status(step: int) -> None:
             ),
         )
         _readiness_line(
-            "Step 5 engine result",
+            "Strategy engine result",
             bool(run_map),
-            "available for diagnostics/projection" if run_map else "run portfolio from Step 5",
+            "available for diagnostics/projection" if run_map else "run the Strategy Engine",
         )
         _readiness_line(
-            "Step 6 projection input",
+            "Scenario projection input",
             projection_bridge or bool(snapshot),
-            "ready" if (projection_bridge or bool(snapshot)) else "needs planning or Step 5 result",
+            "ready" if (projection_bridge or bool(snapshot)) else "needs planning or strategy result",
         )
         _readiness_line(
             "Insights report",
@@ -580,11 +693,11 @@ def _render_current_context(step: int) -> None:
         panel_meta = _asset_panel_summary()
         if panel_meta:
             st.caption(
-                f"Data: {panel_meta.get('source', 'Step 4 panel')} · "
+                f"Market-data panel: {panel_meta.get('source', 'Step 4 panel')} · "
                 f"assets={panel_meta.get('assets', 0)} · rows={panel_meta.get('rows', 0)}"
             )
         else:
-            st.caption("Data: cached deployment panel prepared in Step 4")
+            st.caption("Market-data panel: cached deployment panel prepared in Step 4")
 
 
 def _render_available_checks(step: int) -> None:
@@ -609,7 +722,7 @@ def _render_available_checks(step: int) -> None:
 
 
 def _render_tools_and_checks(step: int) -> None:
-    with st.expander("Tools & checks", expanded=False):
+    with st.expander("Checks & shortcuts", expanded=False):
         _render_available_checks(step)
 
         st.divider()
@@ -620,7 +733,7 @@ def _render_tools_and_checks(step: int) -> None:
         if step != 4:
             step4_enabled, step4_reason = _step_access_state(4, step)
             if st.button(
-                "Open Universe & Data",
+                "Open Risk Profile & Asset Universe",
                 key="global_sidebar_tool_open_step4",
                 use_container_width=True,
                 disabled=not step4_enabled,
@@ -631,7 +744,7 @@ def _render_tools_and_checks(step: int) -> None:
         if step != 5:
             step5_enabled, step5_reason = _step_access_state(5, step)
             if st.button(
-                "Open Engine Workspace",
+                "Open Strategy Engine",
                 key="global_sidebar_tool_open_step5",
                 use_container_width=True,
                 disabled=not step5_enabled,
@@ -653,7 +766,7 @@ def _render_tools_and_checks(step: int) -> None:
         if step != 7:
             step7_enabled, step7_reason = _step_access_state(7, step)
             if st.button(
-                "Open Insights & Reports",
+                "Open Final Report",
                 key="global_sidebar_tool_open_step7",
                 use_container_width=True,
                 disabled=not step7_enabled,
@@ -665,7 +778,7 @@ def _render_tools_and_checks(step: int) -> None:
 
 
 def _render_audit_diagnostics(step: int) -> None:
-    with st.expander("Audit / diagnostics", expanded=False):
+    with st.expander("Technical diagnostics", expanded=False):
         snapshot = _planning_snapshot()
         if snapshot:
             st.markdown("**Personal finance snapshot**")
@@ -692,7 +805,7 @@ def _render_audit_diagnostics(step: int) -> None:
         run_map = _latest_run_result()
         if run_map:
             st.divider()
-            st.markdown("**Last Step 5 run**")
+            st.markdown("**Last Strategy Engine run**")
             perf = _coerce_mapping(run_map.get("performance_summary", {}))
             engine_timing = _coerce_mapping(run_map.get("engine_timing", {}))
             total_engine = _safe_float(engine_timing.get("total_engine", 0.0), 0.0)
@@ -728,7 +841,7 @@ def _render_audit_diagnostics(step: int) -> None:
         if isinstance(oos_returns, list) and oos_returns:
             st.divider()
             st.markdown("**Projection bridge**")
-            st.caption(f"{len(oos_returns)} monthly OOS returns available for Step 6.")
+            st.caption(f"{len(oos_returns)} monthly OOS returns available for long-term scenarios.")
 
         if not snapshot and not panel_meta and not run_map:
             st.caption("Diagnostics will populate after the planner, investment panel, or engine run has data.")
@@ -757,6 +870,366 @@ def _render_help(step: int) -> None:
             st.caption("**Feasibility:** short-term stress check, not a guarantee that real spending will match the scenario.")
 
 
+def _render_home_sidebar_minimal() -> None:
+    """Render a quiet Home sidebar before the user enters a module."""
+    st.markdown("### Navigation")
+    _native_button(
+        "Home",
+        key="global_sidebar_home_button_step0",
+        use_container_width=True,
+        disabled=True,
+        help="You are already on Home.",
+        icon=":material/home:",
+    )
+
+    st.markdown("**Start here**")
+    st.caption("Choose a module from the main page. The sidebar becomes more detailed once a module is open.")
+
+    st.markdown("**Modules**")
+    st.caption("Personal Finance Planner")
+    st.caption("Investment Strategy Lab")
+    st.caption("Long-Term Scenario Explorer")
+
+    with st.expander("About this prototype", expanded=False):
+        st.caption(
+            "LifeBudget Micro is an educational planning and scenario-exploration prototype. "
+            "It is not financial advice and does not predict future returns."
+        )
+
+
+def _render_personal_finance_terms() -> None:
+    with st.expander("Personal finance terms", expanded=False):
+        st.markdown("**Free margin**")
+        st.caption("Estimated money left after essential and discretionary weekly spending.")
+        st.markdown("**Savings target**")
+        st.caption("Weekly amount tested against the current cash-flow estimate.")
+        st.markdown("**Feasibility**")
+        st.caption("Short-term stress check, not a guarantee that real spending will match the scenario.")
+
+
+def _render_personal_finance_q_and_a() -> None:
+    """Render a tiny onboarding Q&A for the Personal Finance module.
+
+    Keep this lightweight. The main screen owns the controls; the sidebar only
+    explains how to use them and why the values matter downstream.
+    """
+    with st.expander("Personal finance Q&A", expanded=False):
+        st.markdown("**Do these numbers need to be exact?**")
+        st.caption(
+            "No. This is a planning baseline for the prototype. Rough weekly estimates "
+            "are enough for testing the flow; exact editing remains optional."
+        )
+        st.markdown("**Why does this screen use weekly values?**")
+        st.caption(
+            "Weekly numbers make income, spending, free margin, and savings target easier "
+            "to compare on the same scale."
+        )
+        st.markdown("**Why does this affect investing later?**")
+        st.caption(
+            "The savings target becomes the contribution bridge used by the investment "
+            "and long-term scenario modules."
+        )
+
+
+def _render_personal_finance_plan_snapshot() -> None:
+    summary = _personal_finance_sidebar_summary()
+    st.markdown("### Current plan")
+
+    if not bool(summary.get("has_any_values", False)):
+        st.caption("Adjust the budget and savings target on the main screen to populate this summary.")
+        return
+
+    st.caption(str(summary.get("source_label", "Live estimate")))
+    st.caption(f"Income: **{_money_weekly(summary.get('income_weekly', 0.0))}**")
+    st.caption(f"Spending: **{_money_weekly(summary.get('spending_weekly', 0.0))}**")
+    st.caption(f"Free margin: **{_money_weekly(summary.get('margin_weekly', 0.0))}**")
+
+    target = _safe_float(summary.get("target_weekly", 0.0), 0.0)
+    margin = _safe_float(summary.get("margin_weekly", 0.0), 0.0)
+    if target > 0.0:
+        st.caption(f"Savings target: **{_money_weekly(target)}**")
+        if margin > 0.0:
+            st.caption(f"Target uses: **{100.0 * target / margin:.0f}% of free margin**")
+    else:
+        st.caption("Savings target: not set yet")
+
+    st.caption(f"Horizon: **{_safe_int(summary.get('horizon_weeks', PF_DEFAULT_HORIZON_WEEKS), PF_DEFAULT_HORIZON_WEEKS)} weeks**")
+
+def _render_personal_finance_next_action() -> None:
+    st.markdown("### Next")
+    st.caption("Use the main screen button to build the comparison branch, or open the investment setup when ready.")
+
+    step4_enabled, step4_reason = _step_access_state(4, _current_step())
+    if st.button(
+        "Open Investment Strategy Lab",
+        key="global_sidebar_personal_finance_open_investment_lab",
+        use_container_width=True,
+        disabled=not step4_enabled,
+        help=step4_reason,
+    ):
+        _go_to_step(4)
+
+
+def _render_personal_finance_sidebar(step: int) -> None:
+    """Render a focused sidebar for the combined Personal Finance Setup module."""
+    st.markdown("### Navigation")
+    if _native_button(
+        "Home",
+        key="global_sidebar_home_button_personal_finance",
+        use_container_width=True,
+        disabled=False,
+        help="Return to the module selector.",
+        icon=":material/home:",
+    ):
+        _go_to_step(0)
+
+    st.markdown("**Personal Finance Planner**")
+    st.caption("Set a weekly budget baseline, choose a savings target, and check short-term feasibility.")
+    st.info("**Personal Finance Setup**  \nBudget estimate, savings target, and feasibility check.")
+
+    st.divider()
+    _render_personal_finance_plan_snapshot()
+
+    st.divider()
+    _render_personal_finance_next_action()
+
+    _render_personal_finance_q_and_a()
+    _render_personal_finance_terms()
+
+
+def _format_count(value: Any) -> str:
+    try:
+        return f"{int(float(value)):,.0f}"
+    except Exception:
+        return "0"
+
+
+def _step4_selected_assets_count() -> int:
+    """Best-effort count of the currently selected Step 4 primary universe."""
+    for key in (
+        "last_used_universe_assets",
+        "recommended_universe_assets",
+        "selected_assets",
+        "last_recommendation_candidate_assets",
+    ):
+        raw = st.session_state.get(key)
+        if isinstance(raw, (list, tuple, set)) and len(raw) > 0:
+            return int(len(raw))
+    return _safe_int(st.session_state.get("universe_size", 0), 0)
+
+
+def _step4_current_universe_summary() -> dict[str, Any]:
+    """Read the Step 4 universe state without importing Step 4 modules."""
+    philosophy = str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
+    strategy = str(st.session_state.get("universe_strategy", "Core multi-asset") or "Core multi-asset")
+    size = _safe_int(st.session_state.get("universe_size", 25), 25)
+    selected_count = _step4_selected_assets_count()
+    custom_enabled = bool(st.session_state.get("universe_custom_enabled", False))
+
+    if custom_enabled:
+        mode = "custom basket"
+    elif selected_count and selected_count > size:
+        mode = "expanded basket"
+    else:
+        # Keep this simple: Risk & Universe owns the detailed composition note.
+        mode = "recommended basket"
+
+    return {
+        "philosophy": philosophy,
+        "strategy": strategy,
+        "size": int(size),
+        "selected_count": int(selected_count or size),
+        "mode": mode,
+        "custom_enabled": custom_enabled,
+    }
+
+
+def _step4_funding_bridge_summary() -> dict[str, Any]:
+    """Return the contribution bridge used later by investment/scenario modules."""
+    ctx = _investment_context()
+    pf = _personal_finance_sidebar_summary()
+
+    monthly = _safe_float(ctx.get("monthly_contribution", 0.0), 0.0)
+    weekly = _safe_float(ctx.get("weekly_equivalent", 0.0), 0.0)
+
+    if monthly <= 0.0 and weekly <= 0.0:
+        weekly = _safe_float(pf.get("target_weekly", 0.0), 0.0)
+        monthly = weekly * 52.0 / 12.0 if weekly > 0.0 else 0.0
+
+    if ctx:
+        source = "Personal Finance Setup"
+    elif bool(pf.get("has_any_values", False)):
+        source = str(pf.get("source_label", "Personal Finance estimate"))
+    else:
+        source = "Demo fallback"
+
+    return {
+        "monthly": float(monthly),
+        "weekly": float(weekly),
+        "source": source,
+    }
+
+
+def _render_step4_navigation_block() -> None:
+    st.markdown("### Navigation")
+    if _native_button(
+        "Home",
+        key="global_sidebar_home_button_step4",
+        use_container_width=True,
+        disabled=False,
+        help="Return to the module selector.",
+        icon=":material/home:",
+    ):
+        _go_to_step(0)
+
+    st.markdown("**Investment Strategy Lab**")
+    st.caption("Choose the risk profile and asset universe that will feed the Strategy Engine.")
+    st.info("**Risk Profile & Asset Universe**")
+
+    if _has_asset_panel() or _has_step5_result():
+        if st.button(
+            "Open Strategy Engine",
+            key="global_sidebar_step4_open_strategy_engine_top",
+            use_container_width=True,
+            help="Continue to the Strategy Engine workspace.",
+        ):
+            _go_to_step(5)
+    else:
+        st.caption("Strategy Engine becomes available once the market-data panel is ready.")
+
+
+def _render_step4_current_universe() -> None:
+    summary = _step4_current_universe_summary()
+    st.markdown("### Current universe")
+    st.caption(f"Risk profile: **{summary['philosophy']}**")
+    st.caption(f"Basket: **{summary['strategy']}**")
+    st.caption(f"Selected size: **{summary['size']} assets**")
+    if int(summary.get("selected_count", 0)) != int(summary.get("size", 0)):
+        st.caption(f"Prepared basket: **{summary['selected_count']} assets**")
+    st.caption(f"Mode: **{summary['mode']}**")
+
+
+def _render_step4_funding_bridge() -> None:
+    bridge = _step4_funding_bridge_summary()
+    st.markdown("### Funding bridge")
+    monthly = _safe_float(bridge.get("monthly", 0.0), 0.0)
+    weekly = _safe_float(bridge.get("weekly", 0.0), 0.0)
+    if monthly > 0.0 or weekly > 0.0:
+        st.caption(f"Monthly contribution: **{_money_plain(monthly)}/mo**")
+        st.caption(f"Weekly equivalent: **{_money_weekly(weekly)}**")
+        st.caption(f"Source: {bridge.get('source', 'Personal Finance Setup')}")
+    else:
+        st.caption("No contribution bridge found yet. The demo can still use a fallback, but Personal Finance gives the cleaner path.")
+
+
+def _render_step4_market_panel_status() -> None:
+    st.markdown("### Market-data panel")
+    panel_meta = _asset_panel_summary()
+    frequency = str(st.session_state.get("asset_return_frequency", "monthly") or "monthly").lower()
+    tools_visible = bool(st.session_state.get("step4_show_market_data_tools", False))
+
+    if panel_meta:
+        assets = _safe_int(panel_meta.get("assets", 0), 0)
+        rows = _safe_int(panel_meta.get("rows", 0), 0)
+        source = str(panel_meta.get("source", "Cached panel") or "Cached panel")
+        if assets > 0 and rows > 0:
+            st.success("Market-data ready for Strategy Engine.")
+            st.caption(f"**{_format_count(assets)} assets · {_format_count(rows)} rows**")
+            st.caption(f"Returns: **{frequency}**")
+            st.caption(f"Source: {source}")
+
+            button_label = "Hide diagnostics & downloads" if tools_visible else "Show diagnostics & downloads"
+            if st.button(
+                button_label,
+                key="global_sidebar_step4_toggle_market_data_tools",
+                use_container_width=True,
+                help="Show or hide the technical market-data preview, audit details, and CSV exports.",
+            ):
+                st.session_state["step4_show_market_data_tools"] = not tools_visible
+                st.rerun()
+            st.caption("For audit, preview, and CSV exports.")
+            return
+
+    st.warning("Market-data panel not ready yet.")
+    st.caption("Use the main Risk Profile and Asset Universe screen to prepare or refresh the panel before running the Strategy Engine.")
+
+
+def _render_step4_next_action() -> None:
+    st.markdown("### Next")
+    if _has_asset_panel() or _has_step5_result():
+        if st.button(
+            "Continue to Strategy Engine",
+            key="global_sidebar_step4_continue_to_strategy_engine",
+            use_container_width=True,
+            help="Open the Strategy Engine workspace.",
+        ):
+            _go_to_step(5)
+    else:
+        st.caption("Prepare a valid market-data panel on the main screen, then continue to the Strategy Engine.")
+
+
+def _render_step4_q_and_a() -> None:
+    with st.expander("Risk & Universe Q&A", expanded=False):
+        st.markdown("**Does this screen optimise the portfolio?**")
+        st.caption("No. It prepares the asset universe and market-data panel. Optimisation happens in the Strategy Engine.")
+        st.markdown("**Why can the panel asset count differ from the selected basket?**")
+        st.caption("The selected basket is the intended universe; the prepared panel reflects the cached/demo market data available for the engine.")
+        st.markdown("**Why use cached market data?**")
+        st.caption("It keeps the deployed demo reliable and avoids live Yahoo/rate-limit issues.")
+
+
+def _render_step4_help() -> None:
+    with st.expander("Risk & Universe terms", expanded=False):
+        st.markdown("**Risk profile**")
+        st.caption("Broad investment posture: Growth, Balanced, or Defensive.")
+
+        st.markdown("**Universe basket**")
+        st.caption("The asset list available to the Strategy Engine. This screen chooses the assets; it does not optimise weights.")
+
+        st.markdown("**Equity**")
+        st.caption("Shares or equity-market funds; higher growth potential, higher market volatility.")
+
+        st.markdown("**Fixed Income**")
+        st.caption("Bond-like funds; often used for stability or income.")
+
+        st.markdown("**Commodity**")
+        st.caption("Gold or broad commodity exposure; may behave differently from stocks and bonds.")
+
+        st.markdown("**Real Estate**")
+        st.caption("Property/REIT exposure; can diversify the basket, but still has market risk.")
+
+        st.markdown("**Subgroups**")
+        st.caption("More specific labels such as US equities, Treasury bonds, gold, or sector equity.")
+
+        st.markdown("**Market-data panel**")
+        st.caption("Prepared historical returns and features used by the Strategy Engine.")
+
+        st.markdown("**Funding bridge**")
+        st.caption("The contribution inherited from Personal Finance Setup for later simulations.")
+
+        st.caption("These labels describe the basket composition; they are not investment recommendations.")
+
+
+def _render_step4_sidebar(step: int) -> None:
+    """Render a focused sidebar for Risk Profile & Asset Universe."""
+    _render_step4_navigation_block()
+
+    st.divider()
+    _render_step4_current_universe()
+
+    st.divider()
+    _render_step4_funding_bridge()
+
+    st.divider()
+    _render_step4_market_panel_status()
+
+    st.divider()
+    _render_step4_next_action()
+
+    _render_step4_q_and_a()
+    _render_step4_help()
+
+
 def render_global_sidebar() -> None:
     """Render a persistent sidebar across the whole Streamlit app.
 
@@ -769,6 +1242,18 @@ def render_global_sidebar() -> None:
     with st.sidebar:
         st.markdown("## LifeBudget Micro")
         st.caption("Educational prototype · Plan. Test. Explore.")
+
+        if int(step) == 0:
+            _render_home_sidebar_minimal()
+            return
+
+        if int(step) in {1, 2, 3}:
+            _render_personal_finance_sidebar(step)
+            return
+
+        if int(step) == 4:
+            _render_step4_sidebar(step)
+            return
 
         _render_step_navigation(step)
         st.divider()

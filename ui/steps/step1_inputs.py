@@ -394,6 +394,109 @@ STEP1_QUICK_MARGIN_MIGRATED_KEY = "step1_quick_margin_migrated_v2"
 STEP1_SHOW_EXACT_EDITING_KEY = "step1_show_exact_budget_editing_v1"
 
 _STRESS_PRESET_OPTIONS = ["None", "Minor unexpected expense", "Major monthly shock", "Severe emergency shock"]
+_STRESS_PRESET_EVENTS = {
+    "None": {"amount": 0.0, "label": "No one-off cost is applied."},
+    "Minor unexpected expense": {
+        "amount": 250.0,
+        "label": "Applies a one-off £250 cost around the middle of the selected horizon.",
+    },
+    "Major monthly shock": {
+        "amount": 600.0,
+        "label": "Applies a one-off £600 cost around the middle of the selected horizon.",
+    },
+    "Severe emergency shock": {
+        "amount": 1000.0,
+        "label": "Applies a one-off £1,000 cost around the middle of the selected horizon.",
+    },
+}
+_LEGACY_STRESS_PRESET_ALIASES = {
+    "Typical bump": "Minor unexpected expense",
+    "Tough month": "Major monthly shock",
+    "Heavy shock": "Severe emergency shock",
+}
+
+
+def _normalize_life_event_stress_preset(value: object) -> str:
+    preset = str(value or "None").strip()
+    preset = _LEGACY_STRESS_PRESET_ALIASES.get(preset, preset)
+    return preset if preset in _STRESS_PRESET_OPTIONS else "None"
+
+
+def _life_event_stress_payload(*, horizon_weeks: int | None = None) -> dict[str, object]:
+    """Build the compact Step 3 one-off life-event shock payload.
+
+    This mirrors the legacy Step 3 assumption control: the selected life-event
+    stress preset is a single one-off cost applied around the middle of the
+    selected short-term horizon, not an averaged weekly drag.
+    """
+    raw_horizon = horizon_weeks
+    if raw_horizon is None:
+        raw_horizon = st.session_state.get(STEP2_PLANNING_HORIZON_WEEKS, 12)
+    try:
+        horizon = max(1, min(52, int(raw_horizon or 12)))
+    except Exception:
+        horizon = 12
+
+    selected = _normalize_life_event_stress_preset(st.session_state.get("step3_stress_preset", "None"))
+
+    event_meta = dict(_STRESS_PRESET_EVENTS.get(selected, _STRESS_PRESET_EVENTS["None"]))
+    amount = safe_float(event_meta.get("amount", 0.0), 0.0)
+    shock_week = max(1, min(horizon, int(round(float(horizon) / 2.0))))
+    enabled = bool(amount > 0.0)
+
+    return {
+        "stress_preset": selected,
+        "stress_label": str(event_meta.get("label", "")),
+        "shock_enabled": enabled,
+        "shock_amount": float(amount),
+        "shock_week": int(shock_week),
+        "enable_one_off_events": enabled,
+        "one_off_events": ([{"name": selected, "amount": float(amount), "week": int(shock_week)}] if enabled else []),
+        "shock_map": ({int(shock_week): -float(amount)} if enabled else {}),
+    }
+
+
+def _apply_dashboard_life_event_stress_to_snapshot(snapshot: dict, *, persist: bool = True) -> dict:
+    """Attach the compact life-event stress preset to the planning snapshot.
+
+    The Personal Finance Planner renders Step 3 in compact form, so it must
+    explicitly persist the same compatibility fields that the legacy Step 3
+    page creates: enable_one_off_events, one_off_events and shock_map.
+    """
+    updated = dict(snapshot or {}) if isinstance(snapshot, dict) else {}
+
+    raw_horizon = st.session_state.get(
+        STEP2_PLANNING_HORIZON_WEEKS,
+        updated.get("planning_horizon_weeks", 12),
+    )
+    try:
+        horizon = max(1, min(52, int(raw_horizon or 12)))
+    except Exception:
+        horizon = 12
+
+    payload = _life_event_stress_payload(horizon_weeks=horizon)
+    updated["planning_horizon_weeks"] = int(horizon)
+    updated["stress_preset"] = str(payload["stress_preset"])
+    updated["enable_one_off_events"] = bool(payload["enable_one_off_events"])
+    updated["shock_enabled"] = bool(payload["shock_enabled"])
+    updated["shock_amount"] = float(payload["shock_amount"])
+    updated["shock_week"] = int(payload["shock_week"])
+    updated["one_off_events"] = list(payload["one_off_events"])
+    updated["shock_map"] = dict(payload["shock_map"])
+
+    if persist:
+        st.session_state[PLANNING_SNAPSHOT] = updated
+    return updated
+
+
+def _life_event_stress_caption(snapshot: dict | None = None) -> str:
+    source = dict(snapshot or {}) if isinstance(snapshot, dict) else {}
+    preset = _normalize_life_event_stress_preset(source.get("stress_preset", st.session_state.get("step3_stress_preset", "None")))
+    amount = safe_float(source.get("shock_amount", _STRESS_PRESET_EVENTS.get(preset, {}).get("amount", 0.0)), 0.0)
+    week = int(source.get("shock_week", _life_event_stress_payload().get("shock_week", 1)) or 1)
+    if amount <= 0.0:
+        return "No one-off life-event cost is applied."
+    return f"Applies a one-off £{amount:,.0f} cost around week {week}."
 
 
 def _period_to_weekly(amount: float, period: str) -> float:
@@ -1061,15 +1164,28 @@ def _target_service_payload(snapshot: dict, target_weekly: float | None = None) 
         random_run_nonce=random_run_nonce,
         feasibility=feasibility,
     )
+    updated_snapshot = _apply_dashboard_life_event_stress_to_snapshot(updated_snapshot, persist=False)
     persist_step2_snapshot(updated_snapshot)
+    st.session_state[PLANNING_SNAPSHOT] = updated_snapshot
     return updated_snapshot, target_context, feasibility, intent, int(planning_horizon)
 
 
 def _apply_target_preset_and_rerun(value: float, label: str) -> None:
-    st.session_state[STEP1_TARGET_WEEKLY_SAVINGS] = float(round(max(float(value), 0.0), 2))
-    st.session_state[STEP2_SELECTED_PRESET] = str(label)
-    st.session_state[STEP2_TARGET_USER_TOUCHED_INTERNAL] = True
-    st.rerun()
+    """Apply a target preset without mutating an instantiated widget key.
+
+    The compact dashboard renders STEP1_TARGET_WEEKLY_SAVINGS as a
+    number_input before the preset buttons. Streamlit forbids assigning to that
+    widget key later in the same render, so presets must use the existing
+    pending-patch + rerun pattern.
+    """
+    queue_step_patch(
+        STEP1_PENDING_WIDGET_PATCH,
+        {
+            STEP1_TARGET_WEEKLY_SAVINGS: float(round(max(float(value), 0.0), 2)),
+            STEP2_SELECTED_PRESET: str(label),
+            STEP2_TARGET_USER_TOUCHED_INTERNAL: True,
+        },
+    )
 
 
 def _render_savings_target_card(snapshot: dict) -> tuple[dict, dict, dict, float, int]:
@@ -1177,7 +1293,14 @@ def _short_money(value: float) -> str:
 
 
 
-def _render_dashboard_projection_chart(baseline_df, plan_a_df, *, target_weekly: float = 0.0) -> None:
+def _render_dashboard_projection_chart(
+    baseline_df,
+    plan_a_df,
+    *,
+    target_weekly: float = 0.0,
+    shock_week: int | None = None,
+    shock_amount: float = 0.0,
+) -> None:
     """Render the short-term feasibility path inside the compact dashboard."""
     if baseline_df is None or plan_a_df is None:
         st.info("Short-term path chart is not available yet.")
@@ -1210,6 +1333,24 @@ def _render_dashboard_projection_chart(baseline_df, plan_a_df, *, target_weekly:
             ax.scatter([final_week], [final_target], s=55, marker="o", label="Savings target", zorder=5)
             ax.annotate("target", xy=(final_week, final_target), xytext=(6, 6), textcoords="offset points", fontsize=9)
 
+        try:
+            marker_week = int(shock_week or 0)
+            marker_amount = float(shock_amount or 0.0)
+        except Exception:
+            marker_week = 0
+            marker_amount = 0.0
+        if marker_week > 0 and marker_amount > 0.0:
+            ax.axvline(marker_week, linestyle=":", linewidth=1.3, label="Life event stress")
+            ax.annotate(
+                f"one-off -£{marker_amount:,.0f}",
+                xy=(marker_week, 0),
+                xytext=(6, 18),
+                textcoords="offset points",
+                rotation=90,
+                fontsize=8,
+                va="bottom",
+            )
+
         ax.axhline(0.0, linestyle="--", linewidth=1.0)
         ax.set_title("Short-term cash-flow path")
         ax.set_xlabel("Week")
@@ -1228,7 +1369,8 @@ def _build_dashboard_feasibility_view_model(snapshot: dict) -> dict:
     try:
         from ui.services.step3_results_service import build_step3_view_model
 
-        view_model = build_step3_view_model(snapshot)
+        scenario_snapshot = _apply_dashboard_life_event_stress_to_snapshot(snapshot, persist=True)
+        view_model = build_step3_view_model(scenario_snapshot)
         return view_model if isinstance(view_model, dict) else {}
     except Exception:
         return {}
@@ -1271,7 +1413,7 @@ def _render_feasibility_card(snapshot: dict, *, target_weekly: float) -> None:
     elif expected_delta >= 0:
         st.info("This target is feasible, but the cautious case leaves less room for surprises.")
     else:
-        st.error("This target looks stretched under the current assumptions.")
+        st.error("This target is fragile under the stress-test assumptions. It still builds savings, but the expected result no longer clearly improves on your baseline.")
 
 
 def _render_feasibility_chart_card(snapshot: dict, *, target_weekly: float) -> None:
@@ -1287,13 +1429,25 @@ def _render_feasibility_chart_card(snapshot: dict, *, target_weekly: float) -> N
 
     baseline_df = view_model.get("baseline_df")
     plan_a_df = view_model.get("plan_a_df")
+    payload = view_model.get("payload", {}) if isinstance(view_model, dict) else {}
+    scenario_snapshot = _apply_dashboard_life_event_stress_to_snapshot(snapshot, persist=False)
+    shock_amount = float(scenario_snapshot.get("shock_amount", payload.get("shock_amount", 0.0)) or 0.0)
+    shock_week = int(scenario_snapshot.get("shock_week", payload.get("shock_week", 0)) or 0)
     with st.container(border=True):
         st.markdown("### Short-term path chart")
         st.caption(
             "Baseline vs target plan over the selected short-term horizon. "
             "The shaded band shows the 10–90% uncertainty range."
         )
-        _render_dashboard_projection_chart(baseline_df, plan_a_df, target_weekly=float(target_weekly))
+        if shock_amount > 0.0 and shock_week > 0:
+            st.caption(f"Life-event stress is modelled as a one-off £{shock_amount:,.0f} cost around week {shock_week}.")
+        _render_dashboard_projection_chart(
+            baseline_df,
+            plan_a_df,
+            target_weekly=float(target_weekly),
+            shock_week=shock_week,
+            shock_amount=shock_amount,
+        )
 
 
 def _render_advanced_assumptions_and_diagnostics(snapshot: dict, values: dict[str, float]) -> None:
@@ -1323,15 +1477,16 @@ def _render_advanced_assumptions_and_diagnostics(snapshot: dict, values: dict[st
                 key=STEP2_UNCERTAINTY_PRESET,
             )
         with c3:
-            current_stress = str(st.session_state.get("step3_stress_preset", "None") or "None")
-            if current_stress not in _STRESS_PRESET_OPTIONS:
-                current_stress = "None"
+            current_stress = _normalize_life_event_stress_preset(st.session_state.get("step3_stress_preset", "None"))
+            st.session_state["step3_stress_preset"] = current_stress
             st.selectbox(
                 "Life event stress test",
                 _STRESS_PRESET_OPTIONS,
                 index=_STRESS_PRESET_OPTIONS.index(current_stress),
                 key="step3_stress_preset",
+                help="Applies a one-off cost around the middle of the selected horizon. It is not averaged across all weeks.",
             )
+            st.caption(_life_event_stress_caption(snapshot))
 
         if st.button("Redraw uncertainty sample", key="step1_dashboard_redraw_uncertainty", use_container_width=True):
             st.session_state[STEP2_RANDOM_RUN_NONCE] = int(st.session_state.get(STEP2_RANDOM_RUN_NONCE, 0) or 0) + 1
@@ -1360,6 +1515,13 @@ def render_personal_finance_planner() -> None:
     user decisions, and optional details tucked away. It avoids rendering the
     full Step 1/2/3 legacy pages vertically.
     """
+    _, success_message = apply_pending_step_patch(
+        STEP1_PENDING_WIDGET_PATCH,
+        STEP1_PENDING_SUCCESS_MESSAGE,
+    )
+    if success_message:
+        show_toast_or_success(success_message, icon="✅", fallback_level="success")
+
     st.markdown("# Personal Finance Setup")
     st.caption("Set a quick weekly baseline, choose a savings target, and check short-term feasibility.")
 
@@ -1376,6 +1538,7 @@ def render_personal_finance_planner() -> None:
     snapshot = st.session_state.get(PLANNING_SNAPSHOT, {}) or {}
     if not isinstance(snapshot, dict):
         snapshot = {}
+    snapshot = _apply_dashboard_life_event_stress_to_snapshot(snapshot, persist=True)
 
     existing_target = _personal_finance_target_value(snapshot)
     _render_cashflow_summary(values, existing_target)

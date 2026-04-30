@@ -227,7 +227,6 @@ STRATEGY_TEMPLATE_OPTIONS = [
 ]
 
 STYLE_PRESET_OPTIONS = [
-    "Conservative",
     "Balanced",
     "Growth",
     "Defensive",
@@ -241,30 +240,38 @@ PHILOSOPHY_STRATEGY_COMBOS = {
             ("Core Ranking", "Growth"),
             ("Core Ranking", "Balanced"),
             ("Balanced Risk-Controlled", "Growth"),
+            ("Balanced Risk-Controlled", "Balanced"),
             ("Hybrid Research", "Growth"),
             ("Hybrid Research", "Research"),
+            ("Hybrid Research", "Balanced"),
         ],
     },
     "Balanced": {
         "recommended": ("Balanced Risk-Controlled", "Balanced"),
         "allowed": [
-            ("Balanced Risk-Controlled", "Conservative"),
+            ("Balanced Risk-Controlled", "Defensive"),
             ("Balanced Risk-Controlled", "Balanced"),
             ("Balanced Risk-Controlled", "Growth"),
             ("Core Ranking", "Balanced"),
+            ("Core Ranking", "Growth"),
             ("Hybrid Research", "Balanced"),
+            ("Hybrid Research", "Growth"),
+            ("Hybrid Research", "Research"),
         ],
     },
     "Defensive": {
         "recommended": ("Balanced Risk-Controlled", "Defensive"),
         "allowed": [
             ("Balanced Risk-Controlled", "Defensive"),
-            ("Balanced Risk-Controlled", "Conservative"),
             ("Balanced Risk-Controlled", "Balanced"),
             ("Core Ranking", "Defensive"),
+            ("Core Ranking", "Balanced"),
+            ("Hybrid Research", "Defensive"),
+            ("Hybrid Research", "Research"),
         ],
     },
 }
+
 
 SEMANTIC_SLIDER_KEYS = {
     "risk_appetite": "step5_sem_risk_appetite",
@@ -789,11 +796,119 @@ def parse_custom_assets(raw_text: Any) -> List[str]:
     parts = str(raw_text or "").replace("\n", ",").split(",")
     return _unique_preserve_order([normalize_asset_ticker(x) for x in parts if normalize_asset_ticker(x)])
 
+def _strategy_expansion_order(strategy_value: str) -> List[str]:
+    """Return strategy-compatible fallback order for filling larger target baskets.
+
+    Some focused strategy seeds are smaller than the public target sizes. The
+    UI should not show a target such as 50 or 100 and then silently return a
+    partial basket, so larger baskets are filled with compatible strategies in
+    a deterministic order.
+    """
+    strategy = str(strategy_value or UNIVERSE_STRATEGY_CORE)
+    expansion_map: Dict[str, List[str]] = {
+        UNIVERSE_STRATEGY_CORE: [
+            UNIVERSE_STRATEGY_DIVERSIFIED,
+            UNIVERSE_STRATEGY_QUALITY,
+            UNIVERSE_STRATEGY_LONG_HISTORY,
+            UNIVERSE_STRATEGY_DEFENSIVE,
+            UNIVERSE_STRATEGY_EQUITY,
+            UNIVERSE_STRATEGY_REAL_ASSETS,
+            UNIVERSE_STRATEGY_LOW_VOL,
+        ],
+        UNIVERSE_STRATEGY_DIVERSIFIED: [
+            UNIVERSE_STRATEGY_CORE,
+            UNIVERSE_STRATEGY_EQUITY,
+            UNIVERSE_STRATEGY_QUALITY,
+            UNIVERSE_STRATEGY_DEFENSIVE,
+            UNIVERSE_STRATEGY_REAL_ASSETS,
+            UNIVERSE_STRATEGY_LONG_HISTORY,
+            UNIVERSE_STRATEGY_LOW_VOL,
+        ],
+        UNIVERSE_STRATEGY_EQUITY: [
+            UNIVERSE_STRATEGY_QUALITY,
+            UNIVERSE_STRATEGY_DIVERSIFIED,
+            UNIVERSE_STRATEGY_CORE,
+            UNIVERSE_STRATEGY_REAL_ASSETS,
+            UNIVERSE_STRATEGY_LONG_HISTORY,
+        ],
+        UNIVERSE_STRATEGY_DEFENSIVE: [
+            UNIVERSE_STRATEGY_LOW_VOL,
+            UNIVERSE_STRATEGY_QUALITY,
+            UNIVERSE_STRATEGY_LONG_HISTORY,
+            UNIVERSE_STRATEGY_CORE,
+            UNIVERSE_STRATEGY_DIVERSIFIED,
+        ],
+        UNIVERSE_STRATEGY_REAL_ASSETS: [
+            UNIVERSE_STRATEGY_CORE,
+            UNIVERSE_STRATEGY_DIVERSIFIED,
+            UNIVERSE_STRATEGY_EQUITY,
+            UNIVERSE_STRATEGY_QUALITY,
+            UNIVERSE_STRATEGY_LONG_HISTORY,
+        ],
+        UNIVERSE_STRATEGY_QUALITY: [
+            UNIVERSE_STRATEGY_DEFENSIVE,
+            UNIVERSE_STRATEGY_LOW_VOL,
+            UNIVERSE_STRATEGY_LONG_HISTORY,
+            UNIVERSE_STRATEGY_CORE,
+            UNIVERSE_STRATEGY_EQUITY,
+            UNIVERSE_STRATEGY_DIVERSIFIED,
+        ],
+        UNIVERSE_STRATEGY_LOW_VOL: [
+            UNIVERSE_STRATEGY_DEFENSIVE,
+            UNIVERSE_STRATEGY_LONG_HISTORY,
+            UNIVERSE_STRATEGY_QUALITY,
+            UNIVERSE_STRATEGY_CORE,
+            UNIVERSE_STRATEGY_DIVERSIFIED,
+        ],
+        UNIVERSE_STRATEGY_LONG_HISTORY: [
+            UNIVERSE_STRATEGY_CORE,
+            UNIVERSE_STRATEGY_DEFENSIVE,
+            UNIVERSE_STRATEGY_QUALITY,
+            UNIVERSE_STRATEGY_LOW_VOL,
+            UNIVERSE_STRATEGY_DIVERSIFIED,
+            UNIVERSE_STRATEGY_EQUITY,
+        ],
+    }
+    fallbacks = list(expansion_map.get(strategy, []))
+    for name in STRATEGIES:
+        if name != strategy and name not in fallbacks:
+            fallbacks.append(name)
+    return fallbacks
+
+
+def _expanded_universe_source(universe_size: Any, strategy_name: Any) -> Tuple[List[str], int, str]:
+    size_value, strategy_value = validate_universe_inputs(universe_size, strategy_name)
+    primary_seed = _unique_preserve_order(
+        list(STRATEGY_SEEDS.get(strategy_value, STRATEGY_SEEDS[UNIVERSE_STRATEGY_CORE]))
+    )
+    source: List[str] = list(primary_seed)
+    for fallback_strategy in _strategy_expansion_order(strategy_value):
+        source.extend(list(STRATEGY_SEEDS.get(fallback_strategy, []) or []))
+    source = _unique_preserve_order(source)
+    return source, min(len(primary_seed), int(size_value)), strategy_value
+
+
 def build_generated_universe(universe_size: Any, strategy_name: Any) -> List[str]:
     size_value, strategy_value = validate_universe_inputs(universe_size, strategy_name)
-    seed = list(STRATEGY_SEEDS.get(strategy_value, STRATEGY_SEEDS[UNIVERSE_STRATEGY_CORE]))
-    return _unique_preserve_order(seed)[:size_value]
+    source, _primary_count, _strategy_value = _expanded_universe_source(size_value, strategy_value)
+    return list(source[: int(size_value)])
 
+
+def build_universe_generation_summary(universe_size: Any, strategy_name: Any) -> Dict[str, Any]:
+    size_value, strategy_value = validate_universe_inputs(universe_size, strategy_name)
+    generated = build_generated_universe(size_value, strategy_value)
+    _source, primary_count, _strategy_value = _expanded_universe_source(size_value, strategy_value)
+    prepared_count = len(generated)
+    filler_count = max(0, prepared_count - primary_count)
+    return {
+        "requested_size": int(size_value),
+        "strategy": str(strategy_value),
+        "prepared_count": int(prepared_count),
+        "primary_count": int(min(primary_count, prepared_count)),
+        "filler_count": int(filler_count),
+        "expanded": bool(filler_count > 0),
+        "complete": bool(prepared_count >= int(size_value)),
+    }
 
 def build_strategy_candidate_pool(universe_size: Any, strategy_name: Any) -> List[str]:
     """

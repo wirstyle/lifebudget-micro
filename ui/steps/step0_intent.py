@@ -192,14 +192,17 @@ def _navigate_to_module(module: dict) -> None:
 
 
 def _module_button_label(module: dict) -> str:
-    """Return a compact native Streamlit button label for a clickable module card."""
+    """Return a native Streamlit button label for a clickable module card.
+
+    Native Streamlit buttons do not support true card layouts or custom
+    per-card padding. Keep the whole tile clickable, but use markdown spacing
+    and a short divider so each module title has more presence and is clearly
+    separated from the description.
+    """
     title = str(module.get("title", "Module")).strip()
     description = str(module.get("description", "")).strip()
-
-    # Native Streamlit only gives us a button label here. Keep the card fully
-    # clickable, and use a simple unicode separator plus an empty line below it.
-    divider = "────────────────────────"
-    return f"**{title}**\n\n{divider}\n\n\n{description}"
+    divider = "────────────"
+    return f"\n**{title}**\n\n{divider}\n\n{description}"
 
 
 def _render_module_card(module: dict, *, can_open: bool) -> None:
@@ -273,6 +276,31 @@ Investment/projection outputs are **not**:
         )
 
 
+
+def _render_app_overview() -> None:
+    """Explain the product scope before the user chooses a module.
+
+    Keep this block focused on what the product does. Educational caveats and
+    real-world limitations live in the notice below so the landing page does
+    not repeat the same disclaimer three times.
+    """
+    st.info(
+        "Estimate your personal cash flow, test a savings target, build an educational "
+        "investment strategy, and compare long-term savings-only vs savings-plus-investing scenarios."
+    )
+
+
+def _render_important_limitations() -> None:
+    """Render compact real-world limitations inside the educational notice area."""
+    with st.expander("Important limitations", expanded=False):
+        st.markdown(
+            """
+Real-world decisions would also need to consider tax, platform fees, fund charges, bid–ask spreads, inflation, currency effects, emergency savings, debt, pension/ISA rules, liquidity needs, asset availability, and personal risk tolerance.
+
+The prototype does not check whether a strategy is suitable for a specific person. Backtests are useful for understanding behaviour over a historical period, but future markets can behave very differently.
+"""
+        )
+
 def _render_educational_notice() -> bool:
     """Render the lightweight Step 0 gate before the module cards.
 
@@ -282,23 +310,27 @@ def _render_educational_notice() -> bool:
     """
     st.markdown("### Educational assumptions")
 
+    notice_text = (
+        "LifeBudget Micro is an educational planning and scenario-comparison prototype. "
+        "Investment outputs are backtests or educational proxies: they show how a selected "
+        "strategy would have behaved over the available past data, not what it will do in the future. "
+        "It is not financial advice, investment advice, or a guarantee of future outcomes."
+    )
+
     if _educational_notice_accepted():
         _mark_educational_notice_accepted()
-        st.success("Educational notice accepted for this session.")
-        with st.expander("Review educational notice", expanded=False):
+        st.caption("✅ Educational notice accepted.")
+        with st.expander("Review educational assumptions", expanded=False):
+            st.markdown(notice_text)
             st.markdown(
-                "LifeBudget Micro is an educational planning and scenario-exploration tool. "
-                "It is not financial advice, investment advice, or a guarantee of future outcomes. "
-                "Projections are scenario estimates based on assumptions and historical data, not predictions. "
-                "Investing involves risk, including possible loss of capital. Past performance refers to the past "
-                "and is not a reliable indicator of future results."
+                "Real-world decisions would also need to consider tax, platform fees, fund charges, "
+                "bid–ask spreads, inflation, currency effects, emergency savings, debt, pension/ISA rules, "
+                "liquidity needs, asset availability, and personal risk tolerance."
             )
         return True
 
-    st.warning(
-        "LifeBudget Micro is an educational planning and scenario-exploration tool. "
-        "It is not financial advice, investment advice, or a guarantee of future outcomes."
-    )
+    st.warning(notice_text)
+    _render_important_limitations()
 
     accepted = bool(
         st.checkbox(
@@ -323,10 +355,8 @@ def render_step_0() -> dict:
     st.session_state.pop(STEP0_PENDING_MODULE_OPEN, None)
 
     st.markdown("# LifeBudget Micro")
-    st.caption(
-        "Plan your budget, test an investment strategy, and explore long-term scenarios. "
-        "Accept the educational notice, then choose a module to open."
-    )
+
+    _render_app_overview()
 
     # Place the notice before the cards so the disabled/enabled state is visually
     # connected to the three module entry buttons.

@@ -2466,7 +2466,7 @@ def render_step_6() -> None:
     shown, and no underlying content is deleted; the old branch renderers are
     reused in sequence.
     """
-    section_header("Step 6 — Long-horizon scenario simulator")
+    section_header("Long-Term Scenario Explorer")
     st.info(
         "Educational scenario simulator, not financial advice or a forecast. "
         "It turns your contribution plan into possible long-term wealth ranges; past performance is not a reliable indicator of future results."

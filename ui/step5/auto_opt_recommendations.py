@@ -738,6 +738,8 @@ def _apply_candidate(candidate: dict) -> None:
                 AUTO_OPT_SUGGESTION_SCOPE_KEY: "",
                 AUTO_OPT_APPLIED_SIGNATURE_KEY: run_signature,
                 AUTO_OPT_APPLIED_LABEL_KEY: str(candidate_map.get("label", "Technical tuning candidate") or "Technical tuning candidate"),
+                "step5_basic_engine_controls_touched": True,
+                "step5_basic_engine_controls_source": "auto_opt_suggestion",
                 "step5_auto_opt_apply_message_v1": (
                     f"Engine tuning suggestion applied using the rerun-tested candidate result: "
                     f"{candidate_map.get('label', 'Technical tuning candidate')}."
@@ -753,6 +755,8 @@ def _apply_candidate(candidate: dict) -> None:
                 "step5_run_result": None,
                 AUTO_OPT_APPLIED_SIGNATURE_KEY: "",
                 AUTO_OPT_APPLIED_LABEL_KEY: "",
+                "step5_basic_engine_controls_touched": True,
+                "step5_basic_engine_controls_source": "auto_opt_suggestion",
                 "step5_auto_opt_apply_message_v1": (
                     f"Engine tuning suggestion applied: {candidate_map.get('label', 'Technical tuning candidate')}. "
                     "Run the engine again to confirm the updated result."
