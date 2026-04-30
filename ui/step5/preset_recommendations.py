@@ -49,6 +49,34 @@ PRESET_SKIPPED_LABEL_KEY = "step5_preset_skipped_label_v1"
 PRESET_SUGGESTION_TIMING_KEY = "step5_preset_suggestion_timing_v1"
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
 STEP5_DEMO_SPEED_MODE_KEY = "step5_demo_speed_mode_v1"
+PRESET_SUGGESTION_COUNT_KEY = "step5_suggestion_count_preset_v1"
+PRESET_SECONDS_PER_TEST = 30.0
+
+
+def _suggestion_candidate_count(default: int = 1) -> int:
+    try:
+        raw = int(st.session_state.get(PRESET_SUGGESTION_COUNT_KEY, default))
+    except Exception:
+        raw = int(default)
+    return int(max(1, min(4, raw)))
+
+
+def _format_runtime_estimate(seconds: float) -> str:
+    try:
+        seconds = float(seconds)
+    except Exception:
+        seconds = 30.0
+    if seconds <= 40:
+        return "~30s"
+    if seconds <= 70:
+        return "~1 min"
+    if seconds <= 105:
+        return "~90s"
+    if seconds <= 150:
+        return "~2 min"
+    minutes = seconds / 60.0
+    rounded = round(minutes * 2.0) / 2.0
+    return f"~{rounded:g} min"
 
 
 # Keep these as string constants instead of importing auto_opt_recommendations here.
@@ -132,6 +160,54 @@ def _normalise_perf(perf: Any) -> dict:
         "volatility": _safe_float(p.get("volatility", p.get("annual_volatility", 0.0)), 0.0),
         "max_drawdown": abs(_safe_float(p.get("max_drawdown", 0.0), 0.0)),
     }
+
+
+def _extract_oos_returns_for_projection(run_map: dict) -> list[float]:
+    candidates = [
+        _coerce_mapping(run_map).get("oos_returns_monthly"),
+        _coerce_mapping(run_map).get("oos_returns_simple"),
+        _coerce_mapping(run_map).get("portfolio_returns"),
+        _coerce_mapping(run_map).get("oos_returns"),
+        _coerce_mapping(run_map).get("returns"),
+    ]
+    for raw in candidates:
+        if raw is None:
+            continue
+        try:
+            if hasattr(raw, "tolist"):
+                raw = raw.tolist()
+        except Exception:
+            raw = []
+        if not isinstance(raw, list):
+            continue
+        out: list[float] = []
+        for item in raw:
+            try:
+                out.append(float(item))
+            except Exception:
+                continue
+        if out:
+            return out
+    return []
+
+
+def _store_projection_bridge_context_for_current_result(run_map: dict) -> None:
+    run_map = _coerce_mapping(run_map)
+    ctx = st.session_state.get("investment_context", {})
+    if not isinstance(ctx, dict):
+        ctx = {}
+    ctx["oos_returns_monthly"] = list(_extract_oos_returns_for_projection(run_map))
+    ctx.setdefault("run_signature", str(run_map.get("run_signature", "") or ""))
+    st.session_state["investment_context"] = ctx
+
+
+def _render_continue_with_current_result_button(run_map: dict, *, key: str) -> None:
+    _, continue_col, _ = st.columns([0.29, 0.42, 0.29])
+    with continue_col:
+        if st.button("Continue with current result", key=key, use_container_width=True):
+            _store_projection_bridge_context_for_current_result(run_map)
+            st.session_state["current_step"] = 6
+            st.rerun()
 
 
 def _coerce_cfg_payload(cfg_payload: Any) -> dict:
@@ -406,6 +482,7 @@ def _build_scope(run_result: dict) -> str:
         "philosophy": simple.get("philosophy"),
         "template": simple.get("template"),
         "preset": simple.get("preset"),
+        "suggestion_candidates": _suggestion_candidate_count(1),
         "assets": assets,
         "rows": rows,
     })
@@ -781,20 +858,22 @@ def _candidate_context_caption(item: dict) -> str:
 
 
 def _render_recommended_candidate(candidate: dict, current_perf: dict) -> None:
-    """Render only the best accepted preset as the actionable recommendation."""
+    """Render the actionable preset candidate as a compact card.
+
+    Keep the visible surface to: candidate label + four outcome metrics.
+    Rationale and diagnostics are shown below in closed expanders.
+    """
     item = _coerce_mapping(candidate)
     perf = _normalise_perf(item.get("performance_summary", {}))
     current = _normalise_perf(current_perf)
 
-    st.markdown("### Recommended preset improvement")
-    st.markdown(f"**{item.get('label', 'Preset candidate')}**")
-    st.caption(_candidate_context_caption(item))
+    candidate_label = str(item.get("label", "Preset candidate") or "Preset candidate")
+    st.markdown(f"**Recommended preset: {candidate_label}**")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("CAGR", _format_pct(perf["cagr"]), delta=_format_delta_pct(perf["cagr"] - current["cagr"]))
     with c2:
-        # Lower volatility is better, so use inverse colour semantics.
         st.metric(
             "Vol",
             _format_pct(perf["annual_volatility"]),
@@ -802,24 +881,10 @@ def _render_recommended_candidate(candidate: dict, current_perf: dict) -> None:
             delta_color="inverse",
         )
     with c3:
-        # MaxDD is stored as absolute drawdown. Positive display delta means drawdown improved.
         dd_improvement = current["max_drawdown"] - perf["max_drawdown"]
         st.metric("MaxDD", f"-{100.0 * perf['max_drawdown']:.2f}%", delta=_format_delta_pct(dd_improvement))
     with c4:
         st.metric("Sharpe", f"{perf['sharpe']:.2f}", delta=f"{perf['sharpe'] - current['sharpe']:+.2f}")
-
-    st.success("This candidate passed the preset acceptance gate.")
-    gate_reason = str(item.get("gate_reason", "") or "")
-    if gate_reason:
-        st.caption(gate_reason)
-    if item.get("error"):
-        st.warning(str(item.get("error")))
-
-    with st.expander("Recommended setup details", expanded=False):
-        st.caption(
-            f"template={item.get('strategy_template', '—')} · style={item.get('style_preset', '—')} · "
-            f"governance={item.get('governance_state', '—')} · score_delta={_safe_float(item.get('score_delta'), 0.0):+.3f}"
-        )
 
 
 def render_preset_improvement(run_result: dict) -> dict:
@@ -840,11 +905,8 @@ def render_preset_improvement(run_result: dict) -> dict:
     if not perf:
         return flow_state
 
-    st.markdown("### Preset suggestion")
-    st.caption(
-        "Optional phase 1: tests nearby strategy presets after the real engine run. "
-        "This does not change the Step 4 universe, assets, size, or market-data panel."
-    )
+    # The Step 5 phase rail already labels the active phase.
+    # Keep this body action-first: timing note + Run/Skip buttons.
 
     # After applying an accepted preset we keep this section intentionally quiet:
     # one green confirmation is enough. Showing both the transient apply message
@@ -857,7 +919,7 @@ def render_preset_improvement(run_result: dict) -> dict:
     if applied_signature and current_run_signature and applied_signature == current_run_signature:
         label = applied_label or "the accepted preset suggestion"
         st.success(
-            f"Preset improvement applied: {label}. The rerun-tested candidate is now the current Step 5 result."
+            f"Preset improvement applied: {label}. The rerun-tested candidate is now the current strategy engine result."
         )
         st.caption(
             "Preset testing is hidden for this run to avoid suggesting the same loop again. "
@@ -878,7 +940,7 @@ def render_preset_improvement(run_result: dict) -> dict:
     skipped_scope = str(st.session_state.get(PRESET_SKIPPED_SCOPE_KEY, "") or "")
     skipped_label = str(st.session_state.get(PRESET_SKIPPED_LABEL_KEY, "") or "")
     if skipped_scope and skipped_scope == scope and not evaluations:
-        st.info("Preset check skipped for this run. Engine tuning can now be reviewed or skipped.")
+        st.warning("Preset skipped: current preset kept for this run. Engine tuning can now be reviewed or skipped.")
         if skipped_label:
             st.caption(f"Skipped preset check: {skipped_label}.")
         flow_state.update({"status": "skipped", "has_recommendation": False, "blocks_auto_opt": False})
@@ -889,29 +951,10 @@ def render_preset_improvement(run_result: dict) -> dict:
     # current run scope, cache them in session_state, and then show the Apply
     # choice directly.
     if saved_scope != scope or not evaluations:
-        quick_mode = _demo_speed_mode_enabled()
-        max_candidates = 1 if quick_mode else 2
-        estimate = "~30s" if quick_mode else "~60s+"
-        st.info(
-            f"Preset suggestion is optional and reruns {max_candidates} candidate"
-            f"{'s' if max_candidates != 1 else ''} with the real engine. Estimated time: {estimate}."
-        )
-        left, right = st.columns(2)
-        should_run = False
-        with left:
-            should_run = st.button(
-                "Run quick preset check" if quick_mode else "Run full preset check",
-                key="step5_run_preset_suggestion_check_v1",
-                use_container_width=True,
-            )
-        with right:
-            if st.button("Skip preset check and continue", key="step5_skip_preset_check_not_run_v1", use_container_width=True):
-                _skip_current_preset_candidate(scope, "preset check skipped")
-        if not should_run:
-            flow_state.update({"status": "waiting_for_user", "has_recommendation": False, "blocks_auto_opt": True})
-            return flow_state
-
-        with st.spinner("Testing nearby preset alternatives with the real engine..."):
+        max_candidates = _suggestion_candidate_count(1)
+        estimate = _format_runtime_estimate(PRESET_SECONDS_PER_TEST * max_candidates)
+        label = f"{max_candidates} preset alternative" if max_candidates == 1 else f"{max_candidates} preset alternatives"
+        with st.spinner(f"Testing {label} ({estimate})..."):
             payload = _run_preset_search(run_map, max_candidates=max_candidates)
         st.session_state[PRESET_SUGGESTION_STATE_KEY] = payload
         st.session_state[PRESET_SUGGESTION_SCOPE_KEY] = str(payload.get("scope", scope))
@@ -937,8 +980,8 @@ def render_preset_improvement(run_result: dict) -> dict:
         )
         flow_state.update({"status": "converged", "has_recommendation": False})
     elif preset_was_skipped:
-        st.info(
-            "Current preset kept for this run. Engine tuning can now test small technical variations on the existing strategy setup."
+        st.warning(
+            "Preset skipped: current preset kept for this run. Engine tuning can now test small technical variations on the existing strategy setup."
         )
         if skipped_label:
             st.caption(f"Skipped preset recommendation: {skipped_label}.")
@@ -946,12 +989,32 @@ def render_preset_improvement(run_result: dict) -> dict:
     else:
         best_candidate = accepted_items[0]
         flow_state.update({"status": "pending_action", "has_recommendation": True, "blocks_auto_opt": True})
-        st.success("Recommended preset improvement found. The best accepted candidate is shown below.")
         _render_recommended_candidate(best_candidate, perf)
-        st.caption(
-            "The table below shows every preset candidate tested by the engine. Only the best accepted candidate "
-            "is offered as the main action; rejected candidates are shown for transparency, not as recommendations."
-        )
+
+        left, right = st.columns(2)
+        with left:
+            if st.button("Apply recommended preset", key="step5_apply_best_preset_candidate_v3", use_container_width=True):
+                _apply_candidate(best_candidate)
+        with right:
+            if st.button("Keep current preset and continue", key="step5_skip_best_preset_candidate_v1", use_container_width=True):
+                _skip_current_preset_candidate(scope, str(best_candidate.get("label", "recommended preset") or "recommended preset"))
+
+        _render_continue_with_current_result_button(run_map, key="step5_preset_continue_current_result_v1")
+
+        with st.expander("Why this candidate passed", expanded=False):
+            st.success("This candidate passed the preset acceptance gate.")
+            st.caption(_candidate_context_caption(best_candidate))
+            gate_reason = str(best_candidate.get("gate_reason", "") or "")
+            if gate_reason:
+                st.caption(gate_reason)
+            if best_candidate.get("error"):
+                st.warning(str(best_candidate.get("error")))
+            st.caption(
+                f"template={best_candidate.get('strategy_template', '—')} · "
+                f"style={best_candidate.get('style_preset', '—')} · "
+                f"governance={best_candidate.get('governance_state', '—')} · "
+                f"score_delta={_safe_float(best_candidate.get('score_delta'), 0.0):+.3f}"
+            )
 
     with st.expander("Preset test diagnostics", expanded=False):
         st.caption(
@@ -960,16 +1023,6 @@ def render_preset_improvement(run_result: dict) -> dict:
         )
         if not table.empty:
             st.dataframe(table, use_container_width=True, hide_index=True)
-
-    if accepted_items and not preset_was_skipped:
-        best_candidate = accepted_items[0]
-        left, right = st.columns(2)
-        with left:
-            if st.button("Apply recommended preset", key="step5_apply_best_preset_candidate_v3", use_container_width=True):
-                _apply_candidate(best_candidate)
-        with right:
-            if st.button("Keep current preset and continue", key="step5_skip_best_preset_candidate_v1", use_container_width=True):
-                _skip_current_preset_candidate(scope, str(best_candidate.get("label", "recommended preset") or "recommended preset"))
 
     return flow_state
 

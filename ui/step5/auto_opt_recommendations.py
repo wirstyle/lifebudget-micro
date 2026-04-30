@@ -3,7 +3,7 @@ from __future__ import annotations
 """Step 5 technical engine-tuning assistant.
 
 Scope of this second restored suggestion phase:
-- keep the current Step 4 universe, asset list, and universe size unchanged;
+- keep the current selected universe, asset list, and universe size unchanged;
 - keep the current strategy template and style preset unchanged;
 - test only a small whitelist of technical engine knobs;
 - apply changes by promoting an already rerun-tested candidate result.
@@ -36,8 +36,34 @@ AUTO_OPT_SKIPPED_LABEL_KEY = "step5_auto_opt_skipped_label_v1"
 AUTO_OPT_SKIPPED_RUN_SIGNATURE_KEY = "step5_auto_opt_skipped_run_signature_v1"
 AUTO_OPT_SUGGESTION_TIMING_KEY = "step5_auto_opt_suggestion_timing_v1"
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
-STEP5_DEMO_SPEED_MODE_KEY = "step5_demo_speed_mode_v1"
+AUTO_OPT_SUGGESTION_COUNT_KEY = "step5_suggestion_count_auto_opt_v1"
+AUTO_OPT_SECONDS_PER_TEST = 30.0
 
+
+def _suggestion_candidate_count(default: int = 2) -> int:
+    try:
+        raw = int(st.session_state.get(AUTO_OPT_SUGGESTION_COUNT_KEY, default))
+    except Exception:
+        raw = int(default)
+    return int(max(1, min(6, raw)))
+
+
+def _format_runtime_estimate(seconds: float) -> str:
+    try:
+        seconds = float(seconds)
+    except Exception:
+        seconds = 60.0
+    if seconds <= 40:
+        return "~30s"
+    if seconds <= 70:
+        return "~1 min"
+    if seconds <= 105:
+        return "~90s"
+    if seconds <= 150:
+        return "~2 min"
+    minutes = seconds / 60.0
+    rounded = round(minutes * 2.0) / 2.0
+    return f"~{rounded:g} min"
 
 SAFE_TUNING_FIELDS: tuple[str, ...] = (
     "top_k",
@@ -56,13 +82,6 @@ FIELD_TO_WIDGET_KEY: dict[str, str] = {
     "weight_shrink": "step5_basic_weight_shrink",
     "inertia": "step5_basic_inertia",
 }
-
-
-def _demo_speed_mode_enabled() -> bool:
-    """Use smaller candidate budgets by default in hosted/demo mode."""
-    if STEP5_DEMO_SPEED_MODE_KEY not in st.session_state:
-        st.session_state[STEP5_DEMO_SPEED_MODE_KEY] = True
-    return bool(st.session_state.get(STEP5_DEMO_SPEED_MODE_KEY, True))
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +147,54 @@ def _normalise_perf(perf: Any) -> dict:
         "max_drawdown": abs(_safe_float(p.get("max_drawdown", 0.0), 0.0)),
         "periods": _safe_int(p.get("periods", 0), 0),
     }
+
+
+def _extract_oos_returns_for_projection(run_map: dict) -> list[float]:
+    candidates = [
+        _coerce_mapping(run_map).get("oos_returns_monthly"),
+        _coerce_mapping(run_map).get("oos_returns_simple"),
+        _coerce_mapping(run_map).get("portfolio_returns"),
+        _coerce_mapping(run_map).get("oos_returns"),
+        _coerce_mapping(run_map).get("returns"),
+    ]
+    for raw in candidates:
+        if raw is None:
+            continue
+        try:
+            if hasattr(raw, "tolist"):
+                raw = raw.tolist()
+        except Exception:
+            raw = []
+        if not isinstance(raw, list):
+            continue
+        out: list[float] = []
+        for item in raw:
+            try:
+                out.append(float(item))
+            except Exception:
+                continue
+        if out:
+            return out
+    return []
+
+
+def _store_projection_bridge_context_for_current_result(run_map: dict) -> None:
+    run_map = _coerce_mapping(run_map)
+    ctx = st.session_state.get("investment_context", {})
+    if not isinstance(ctx, dict):
+        ctx = {}
+    ctx["oos_returns_monthly"] = list(_extract_oos_returns_for_projection(run_map))
+    ctx.setdefault("run_signature", str(run_map.get("run_signature", "") or ""))
+    st.session_state["investment_context"] = ctx
+
+
+def _render_continue_with_current_result_button(run_map: dict, *, key: str) -> None:
+    _, continue_col, _ = st.columns([0.29, 0.42, 0.29])
+    with continue_col:
+        if st.button("Continue with current result", key=key, use_container_width=True):
+            _store_projection_bridge_context_for_current_result(run_map)
+            st.session_state["current_step"] = 6
+            st.rerun()
 
 
 def _coerce_cfg_payload(cfg_payload: Any) -> dict:
@@ -469,6 +536,7 @@ def _build_scope(run_result: dict) -> str:
         "template": template,
         "style": style,
         "technical": _technical_summary(base_cfg),
+        "suggestion_candidates": _suggestion_candidate_count(2),
         "assets": _panel_assets(panel_df),
         "rows": int(len(panel_df)) if isinstance(panel_df, pd.DataFrame) else 0,
         "panel_fp": _stable_panel_fingerprint(panel_df),
@@ -757,16 +825,13 @@ def _candidate_table(evaluations: list[dict], current_perf: dict) -> pd.DataFram
 
 
 def _render_recommended_candidate(candidate: dict, current_perf: dict) -> None:
+    """Render the actionable engine-tuning candidate as a compact card."""
     item = _coerce_mapping(candidate)
     perf = _normalise_perf(item.get("performance_summary", {}))
     current = _normalise_perf(current_perf)
-    technical_patch = _coerce_mapping(item.get("technical_patch", {}))
 
     st.markdown("### Recommended engine tuning")
     st.markdown(f"**{item.get('label', 'Technical tuning candidate')}**")
-    caption = str(item.get("caption", "") or "")
-    if caption:
-        st.caption(caption)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -784,30 +849,12 @@ def _render_recommended_candidate(candidate: dict, current_perf: dict) -> None:
     with c4:
         st.metric("Sharpe", f"{perf['sharpe']:.2f}", delta=f"{perf['sharpe'] - current['sharpe']:+.2f}")
 
-    st.success("This candidate passed the engine-tuning acceptance gate.")
-    gate_reason = str(item.get("gate_reason", "") or "")
-    if gate_reason:
-        st.caption(gate_reason)
-    if item.get("error"):
-        st.warning(str(item.get("error")))
-
-    with st.expander("Recommended tuning details", expanded=False):
-        if technical_patch:
-            rows = [{"knob": key, "recommended value": value} for key, value in technical_patch.items()]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        else:
-            st.caption("No technical patch exposed.")
-        st.caption(
-            f"template={item.get('strategy_template', '—')} · style={item.get('style_preset', '—')} · "
-            f"score_delta={_safe_float(item.get('score_delta'), 0.0):+.3f}"
-        )
-
 
 def render_auto_opt_improvement(run_result: dict) -> None:
     """Render the second Step 5 improvement phase: technical engine tuning.
 
     The tested candidates change only SAFE_TUNING_FIELDS. They keep the current
-    Step 4 universe, asset list, universe size, strategy template, and style
+    selected universe, asset list, universe size, strategy template, and style
     preset unchanged.
     """
     run_map = _coerce_mapping(run_result)
@@ -815,10 +862,7 @@ def render_auto_opt_improvement(run_result: dict) -> None:
     if not perf:
         return
 
-    st.markdown("### Engine tuning suggestion")
-    st.caption(
-        "This keeps the same Step 4 universe and the same strategy preset, but tests small technical variations around the current engine configuration."
-    )
+    # The phase rail already labels this as Engine tuning. Keep this panel action-first.
 
     msg = st.session_state.pop("step5_auto_opt_apply_message_v1", "")
 
@@ -828,7 +872,7 @@ def render_auto_opt_improvement(run_result: dict) -> None:
     if applied_signature and current_run_signature and applied_signature == current_run_signature:
         label = applied_label or "the accepted engine tuning suggestion"
         st.success(
-            f"Engine tuning applied: {label}. The rerun-tested candidate is now the current Step 5 result."
+            f"Engine tuning applied: {label}. The rerun-tested candidate is now the current strategy engine result."
         )
         st.caption(
             "Engine tuning is hidden for this run to avoid suggesting the same loop again. "
@@ -847,40 +891,22 @@ def render_auto_opt_improvement(run_result: dict) -> None:
     skipped_scope = str(st.session_state.get(AUTO_OPT_SKIPPED_SCOPE_KEY, "") or "")
     skipped_label = str(st.session_state.get(AUTO_OPT_SKIPPED_LABEL_KEY, "") or "")
     skipped_run_signature = str(st.session_state.get(AUTO_OPT_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
-    if (
+    tuning_was_skipped = bool(
         skipped_scope
         and skipped_scope == scope
         and (not skipped_run_signature or skipped_run_signature == current_run_signature)
-        and not evaluations
-    ):
-        st.info("Engine-tuning check skipped for this run. Universe composition can now be reviewed or skipped.")
+    )
+    if tuning_was_skipped and not evaluations:
+        st.warning("Engine tuning skipped: current technical setup kept for this run. Universe composition can now be tested on the existing setup.")
         if skipped_label:
-            st.caption(f"Skipped engine-tuning check: {skipped_label}.")
+            st.caption(f"Skipped engine tuning check: {skipped_label}.")
         return
 
     if saved_scope != scope or not evaluations:
-        quick_mode = _demo_speed_mode_enabled()
-        max_candidates = 1 if quick_mode else 3
-        estimate = "~30s" if quick_mode else "~90s+"
-        st.info(
-            f"Engine tuning is optional and reruns {max_candidates} technical candidate"
-            f"{'s' if max_candidates != 1 else ''} with the real engine. Estimated time: {estimate}."
-        )
-        left, right = st.columns(2)
-        should_run = False
-        with left:
-            should_run = st.button(
-                "Run quick engine-tuning check" if quick_mode else "Run full engine-tuning check",
-                key="step5_run_auto_opt_suggestion_check_v1",
-                use_container_width=True,
-            )
-        with right:
-            if st.button("Skip engine-tuning check", key="step5_skip_auto_opt_check_not_run_v1", use_container_width=True):
-                _skip_current_auto_opt_candidate(scope, "engine-tuning check skipped", current_run_signature)
-        if not should_run:
-            return
-
-        with st.spinner("Testing small technical engine variations with the real engine..."):
+        max_candidates = _suggestion_candidate_count(2)
+        estimate = _format_runtime_estimate(AUTO_OPT_SECONDS_PER_TEST * max_candidates)
+        label = f"{max_candidates} engine-tuning alternative" if max_candidates == 1 else f"{max_candidates} engine-tuning alternatives"
+        with st.spinner(f"Testing {label} ({estimate})..."):
             payload = _run_auto_opt_search(run_map, max_candidates=max_candidates)
         st.session_state[AUTO_OPT_SUGGESTION_STATE_KEY] = payload
         st.session_state[AUTO_OPT_SUGGESTION_SCOPE_KEY] = str(payload.get("scope", scope))
@@ -889,6 +915,8 @@ def render_auto_opt_improvement(run_result: dict) -> None:
 
     if not evaluations:
         st.info("No safe technical tuning candidates were available to test for this run.")
+        if st.button("Continue with current tuning", key="step5_continue_auto_opt_no_candidates_v1", use_container_width=True):
+            _skip_current_auto_opt_candidate(scope, "no safe tuning candidates", current_run_signature)
         return
 
     accepted_items = [dict(x) for x in evaluations if bool(_coerce_mapping(x).get("accepted", False))]
@@ -909,29 +937,13 @@ def render_auto_opt_improvement(run_result: dict) -> None:
             "the acceptance gate did not find a better trade-off."
         )
     elif tuning_was_skipped:
-        st.info("Current engine tuning kept for this run. Universe composition can now be tested on the existing technical setup.")
+        st.warning("Engine tuning skipped: current technical setup kept for this run. Universe composition can now be tested on the existing setup.")
         if skipped_label:
             st.caption(f"Skipped engine tuning recommendation: {skipped_label}.")
     else:
         best_candidate = accepted_items[0]
-        st.success("Recommended engine tuning found. The best accepted candidate is shown below.")
         _render_recommended_candidate(best_candidate, perf)
-        st.caption(
-            "The diagnostics table shows every technical candidate tested by the engine. Only the best accepted candidate "
-            "is offered as the main action; rejected candidates are shown for transparency, not as recommendations."
-        )
 
-    with st.expander("Engine tuning diagnostics", expanded=False):
-        st.caption(
-            f"tested_candidates={len(evaluations)} · elapsed={_safe_float(payload.get('elapsed_sec', 0.0), 0.0):.2f}s · "
-            f"scope={str(payload.get('scope', scope))}"
-        )
-        st.caption("Safe tuning whitelist: " + ", ".join(SAFE_TUNING_FIELDS))
-        if not table.empty:
-            st.dataframe(table, use_container_width=True, hide_index=True)
-
-    if accepted_items and not tuning_was_skipped:
-        best_candidate = accepted_items[0]
         left, right = st.columns(2)
         with left:
             if st.button("Apply recommended tuning", key="step5_apply_best_auto_opt_candidate_v1", use_container_width=True):
@@ -943,6 +955,41 @@ def render_auto_opt_improvement(run_result: dict) -> None:
                     str(best_candidate.get("label", "recommended tuning") or "recommended tuning"),
                     current_run_signature,
                 )
+
+        _render_continue_with_current_result_button(run_map, key="step5_auto_opt_continue_current_result_v1")
+
+        with st.expander("Why this candidate passed", expanded=False):
+            st.success("This candidate passed the engine-tuning acceptance gate.")
+            caption = str(best_candidate.get("caption", "") or "")
+            if caption:
+                st.caption(caption)
+            gate_reason = str(best_candidate.get("gate_reason", "") or "")
+            if gate_reason:
+                st.caption(gate_reason)
+            if best_candidate.get("error"):
+                st.warning(str(best_candidate.get("error")))
+            technical_patch = _coerce_mapping(best_candidate.get("technical_patch", {}))
+            if technical_patch:
+                rows = [{"knob": key, "recommended value": value} for key, value in technical_patch.items()]
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.caption(
+                f"template={best_candidate.get('strategy_template', '—')} · "
+                f"style={best_candidate.get('style_preset', '—')} · "
+                f"score_delta={_safe_float(best_candidate.get('score_delta'), 0.0):+.3f}"
+            )
+
+    with st.expander("Engine tuning diagnostics", expanded=False):
+        st.caption(
+            f"tested_candidates={len(evaluations)} · elapsed={_safe_float(payload.get('elapsed_sec', 0.0), 0.0):.2f}s · "
+            f"scope={str(payload.get('scope', scope))}"
+        )
+        st.caption("Safe tuning whitelist: " + ", ".join(SAFE_TUNING_FIELDS))
+        if not table.empty:
+            st.dataframe(table, use_container_width=True, hide_index=True)
+
+    if not accepted_items and not tuning_was_skipped:
+        if st.button("Continue with current tuning", key="step5_continue_current_auto_opt_v1", use_container_width=True):
+            _skip_current_auto_opt_candidate(scope, "no accepted tuning candidate", current_run_signature)
 
 
 # Compatibility wrapper for older imports.

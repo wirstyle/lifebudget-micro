@@ -175,7 +175,7 @@ def _evidence_label() -> str:
 
 def _render_missing_step6_result(message: str, *, button_key: str) -> None:
     st.info(message)
-    if st.button("Back to Step 6", key=button_key):
+    if st.button("← Back to Scenario Explorer", key=button_key):
         st.session_state[CURRENT_STEP] = 6
         st.session_state["current_step"] = 6
         st.rerun()
@@ -539,14 +539,18 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> None:
 
 def _render_footer(*, complete_text: str) -> None:
     st.markdown("---")
+    st.success(complete_text)
     left, right = st.columns(2)
     with left:
-        if st.button("Back to Step 6", key=f"step7_back_to_step6_{complete_text.lower().replace(' ', '_')}"):
+        if st.button("← Back to Scenario Explorer", key=f"step7_back_to_step6_{complete_text.lower().replace(' ', '_')}"):
             st.session_state[CURRENT_STEP] = 6
             st.session_state["current_step"] = 6
             st.rerun()
     with right:
-        st.success(complete_text)
+        if st.button("Return to Home", key=f"step7_return_home_{complete_text.lower().replace(' ', '_')}", use_container_width=True):
+            st.session_state[CURRENT_STEP] = 0
+            st.session_state["current_step"] = 0
+            st.rerun()
 
 
 def render_step_7() -> None:

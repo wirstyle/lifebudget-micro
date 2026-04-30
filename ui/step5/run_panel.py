@@ -134,7 +134,7 @@ def _normalise_run_result(
     out.update(
         {
             "source": "micro_pipeline_real",
-            "asset_panel_source_label": str(st.session_state.get("asset_panel_source_label", "Step 4 asset panel") or "Step 4 asset panel"),
+            "asset_panel_source_label": str(st.session_state.get("asset_panel_source_label", "Selected market-data panel") or "Selected market-data panel"),
             "asset_panel_n_rows": int(len(asset_panel_df)) if isinstance(asset_panel_df, pd.DataFrame) else 0,
             "asset_panel_n_assets": int(asset_panel_df["asset"].nunique()) if isinstance(asset_panel_df, pd.DataFrame) and "asset" in asset_panel_df.columns else 0,
             "performance_summary": {
@@ -218,14 +218,14 @@ def _safe_rerun() -> None:
 def _render_timing_summary(timing_summary: dict) -> None:
     if not timing_summary:
         return
-    with st.expander("Step 5 timing", expanded=False):
+    with st.expander("Strategy engine timing", expanded=False):
         c1, c2, c3 = st.columns(3)
         with c1:
             st.metric("Engine run", f"{_safe_float(timing_summary.get('base_run_sec', 0.0)):.2f}s")
         with c2:
             st.metric("Cache", "hit" if timing_summary.get("base_from_cache") else "miss")
         with c3:
-            st.metric("Total Step 5", f"{_safe_float(timing_summary.get('total_step5_sec', 0.0)):.2f}s")
+            st.metric("Total strategy engine", f"{_safe_float(timing_summary.get('total_step5_sec', 0.0)):.2f}s")
 
 
 def clear_retired_step5_state() -> None:
@@ -301,12 +301,12 @@ def render_run_panel(
             st.metric("Engine status", "Ready" if not disabled and not asset_panel_df.empty else "Blocked")
 
     if inputs_changed_after_run:
-        st.info("The current Step 5 inputs differ from the last executed run. Run the updated setup to refresh the metrics.")
+        st.info("The current strategy engine inputs differ from the last executed run. Run the updated setup to refresh the metrics.")
 
     if disabled:
         st.error("Execution is blocked until the governance issues are resolved.")
     elif not compact:
-        st.info("Using the Step 4 asset panel for real execution.")
+        st.info("Using the selected market-data panel for real execution.")
 
     if not compact:
         with st.expander("Run reproducibility details", expanded=False):
@@ -326,6 +326,7 @@ def render_run_panel(
         key="step5_run_portfolio_view_results",
         use_container_width=True,
         disabled=run_button_disabled,
+        type="primary" if not run_button_disabled else "secondary",
     )
 
     just_completed_run_banner = bool(st.session_state.get(STEP5_JUST_COMPLETED_RUN_BANNER_KEY, False))
@@ -344,7 +345,7 @@ def render_run_panel(
     step5_t0 = time.perf_counter()
 
     if asset_panel_df.empty:
-        st.error("Step 4 asset panel is missing or empty. Load a valid panel before running the engine.")
+        st.error("The selected market-data panel is missing or empty. Load a valid panel before running the engine.")
         return None
 
     try:
@@ -357,7 +358,7 @@ def render_run_panel(
         st.session_state["step5_last_config_fingerprint"] = current_config_fingerprint
         st.session_state["step5_last_run_timestamp"] = run_timestamp
 
-        with st.spinner("Running real micro investment pipeline..."):
+        with st.spinner("Running strategy (~30s)..."):
             raw_result, base_run_sec, base_from_cache = _run_pipeline_cached(asset_panel_df, cfg_payload)
 
         run_result = _normalise_run_result(

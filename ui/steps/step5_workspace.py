@@ -121,8 +121,8 @@ def _current_result_is_fresh_for_ready_card(cfg_final: dict, asset_panel_df: Any
 
 
 def _render_basic_engine_controls(cfg_final: dict) -> dict:
-    st.markdown("### Basic engine controls")
-    st.caption("Advanced controls. Defaults are already resolved from the Step 4 philosophy and strategy setup; change these only for diagnostics or experimentation.")
+    st.markdown("### Advanced engine controls")
+    st.caption("Optional low-level parameters. Leave these unchanged unless you are deliberately testing engine behaviour.")
 
     universe_size = _safe_int(st.session_state.get("universe_size", 25), 25)
     current_top_k = _safe_int(cfg_final.get("top_k", 12), 12)
@@ -320,41 +320,53 @@ def _render_compact_value(label: str, value: Any) -> None:
     st.markdown(f"**{str(value or '—')}**")
 
 
+def _render_engine_transparency_body() -> None:
+    """Shared copy explaining the strategy engine without adding another top-level banner."""
+    st.write(
+        "The Risk Profile and Asset Universe screen prepares a market-data panel for individual assets such as "
+        "SPY, QQQ or GLD. Your strategy does not exist as a single ticker in Yahoo Finance. The strategy engine "
+        "creates it by selecting and weighting assets over time. Once that monthly portfolio return series exists, "
+        "CAGR, volatility, Sharpe and max drawdown can be calculated from it."
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**What the engine can improve**")
+        st.markdown(
+            "- diversification across the selected universe\n"
+            "- risk and drawdown control\n"
+            "- dynamic asset selection and weighting\n"
+            "- alignment with the chosen risk profile"
+        )
+    with c2:
+        st.markdown("**What the engine can worsen**")
+        st.markdown(
+            "- it may lag simple assets in strong bull markets\n"
+            "- risk controls can reduce upside\n"
+            "- signals can overfit if assumptions are weak\n"
+            "- extra complexity can add turnover and parameter sensitivity"
+        )
+
+    st.info(
+        "You do not pass the portfolio through the engine to calculate CAGR. "
+        "You pass it through the engine to create the portfolio. The metrics come afterwards."
+    )
+
+
 def _render_engine_transparency_intro() -> None:
-    """Explain why Step 5 needs an engine before portfolio metrics exist."""
-    with st.container(border=True):
-        st.markdown("### Why this portfolio has to run through the engine")
+    """Keep the detailed engine explanation available without making the page top-heavy."""
+    with st.expander("Why the engine is needed", expanded=False):
+        _render_engine_transparency_body()
+
+
+def _render_strategy_engine_about_expander() -> None:
+    """Collapsed post-run purpose note. Keeps the result surface clean after execution."""
+    with st.expander("About the Strategy Engine", expanded=False):
         st.write(
-            "The Step 4 market panel contains returns for individual assets such as SPY, QQQ or GLD. "
-            "Your strategy does not exist as a single ticker in Yahoo Finance. The engine creates it by "
-            "selecting and weighting assets over time. Once that monthly portfolio return series exists, "
-            "CAGR, volatility, Sharpe and max drawdown can be calculated from it using the same metric logic "
-            "used for the benchmark assets."
+            "**Purpose:** turn the selected risk profile, asset universe and market-data panel into a tested "
+            "strategy return series. This is the execution stage, not a new data-preparation step."
         )
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**What the engine can improve**")
-            st.markdown(
-                "- diversification across the selected universe\n"
-                "- risk and drawdown control\n"
-                "- dynamic asset selection and weighting\n"
-                "- alignment with the chosen investment philosophy"
-            )
-        with c2:
-            st.markdown("**What the engine can worsen**")
-            st.markdown(
-                "- it may lag simple assets in strong bull markets\n"
-                "- risk controls can reduce upside\n"
-                "- signals can overfit if assumptions are weak\n"
-                "- extra complexity can add turnover and parameter sensitivity"
-            )
-
-        st.info(
-            "You do not pass the portfolio through the engine to calculate CAGR. "
-            "You pass it through the engine to create the portfolio. The metrics come afterwards."
-        )
-
+        _render_engine_transparency_body()
 
 def _render_workspace_summary(cfg_final: dict, asset_panel_df: Any, current_philosophy: str, simple_cfg: dict) -> None:
     panel_rows = int(len(asset_panel_df)) if isinstance(asset_panel_df, pd.DataFrame) else 0
@@ -363,8 +375,8 @@ def _render_workspace_summary(cfg_final: dict, asset_panel_df: Any, current_phil
     panel_ready = bool(st.session_state.get("asset_panel_ready", False)) and panel_rows > 0
 
     with st.container(border=True):
-        st.markdown("### 1. Current setup")
-        st.caption("The engine will use the Step 4 universe and market-data panel with the current strategy preset.")
+        st.markdown("### Current setup")
+        st.caption("The strategy engine will use the selected universe and market-data panel with the current strategy preset.")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             _render_compact_value("Philosophy", current_philosophy)
@@ -386,9 +398,9 @@ def _render_workspace_summary(cfg_final: dict, asset_panel_df: Any, current_phil
             _render_compact_value("Signal", cfg_final.get("signal_mode", "—"))
 
         if panel_ready:
-            st.success("Ready to run: Step 4 market data is loaded and the current setup is coherent enough for execution.")
+            st.success("Ready to run: the selected market-data panel is loaded and the current setup is coherent enough for execution.")
         else:
-            st.warning("Step 4 market data is missing or not ready. Go back to Step 4 before running the engine.")
+            st.warning("Market data is missing or not ready. Return to Risk Profile and Universe before running the engine.")
         with st.expander("Show technical setup details", expanded=False):
             st.caption(
                 f"lookback_mu={cfg_final.get('lookback_mu', '—')} · "
@@ -445,50 +457,59 @@ def _render_ready_to_run_section(
     simple_cfg: dict,
     pre_run_advanced_cfg: dict,
     governance_status: dict,
+    bordered: bool = True,
 ):
     panel_rows = int(len(asset_panel_df)) if isinstance(asset_panel_df, pd.DataFrame) else 0
     panel_assets = int(asset_panel_df["asset"].nunique()) if isinstance(asset_panel_df, pd.DataFrame) and "asset" in asset_panel_df.columns else 0
     universe_size = int(st.session_state.get("universe_size", 25) or 25)
-    source_label = str(st.session_state.get("asset_panel_source_label", "Yahoo Finance monthly panel") or "Yahoo Finance monthly panel")
+    source_label = str(st.session_state.get("asset_panel_source_label", "Selected market-data panel") or "Selected market-data panel")
     panel_ready = bool(st.session_state.get("asset_panel_ready", False)) and panel_rows > 0
     gov_state = str((governance_status or {}).get("state", "coherent") or "coherent")
     engine_status = "Blocked" if gov_state == "blocked" or not panel_ready else "Ready"
     current_result_is_fresh, current_run_signature = _current_result_is_fresh_for_ready_card(cfg_final, asset_panel_df)
 
-    with st.container(border=True):
-        st.markdown("### 2. Ready to run")
-        st.caption(
-            "This is the final execution summary after the strategy preset and any optional technical controls. "
-            "Press Run only when the setup below matches what you want to test."
-        )
-
-        setup_line = (
-            f"**{current_philosophy}** · **{universe_size}-asset universe** · "
-            f"**{simple_cfg.get('template', '—')}** · **{simple_cfg.get('preset', '—')}**"
-        )
-        st.write(setup_line)
-
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            _render_compact_value("Market data", source_label)
-        with c2:
-            _render_compact_value("Panel rows", f"{panel_rows:,}")
-        with c3:
-            _render_compact_value("Panel assets", panel_assets)
-        with c4:
-            _render_compact_value("Engine status", engine_status)
-
+    ctx = st.container(border=True) if bordered else st.container()
+    with ctx:
         if not panel_ready:
-            st.warning("Step 4 market data is missing or not ready. Go back to Step 4 before running the engine.")
+            st.warning("Market data is missing or not ready. Go back to Risk Profile and Universe before running the engine.")
         elif gov_state == "blocked":
-            st.error("This setup is blocked by governance. Open the setup controls above or return to Step 4 to repair it.")
+            st.error("This setup is blocked by governance. Open the setup controls above or return to Risk Profile and Universe to repair it.")
+        elif current_result_is_fresh:
+            st.success("Result up to date: this setup has already been executed by the real engine.")
         else:
-            if current_result_is_fresh:
-                st.success("Result up to date: this setup has already been executed by the real engine.")
+            setup_status_summary = str(simple_cfg.get("setup_status_summary", "") or "").strip()
+            if setup_status_summary:
+                st.success(f"Ready to run: {setup_status_summary}, and the selected universe plus market-data panel are loaded.")
             else:
-                st.success("Ready to run: this setup can now be executed by the real engine.")
+                st.success("Ready to run: the selected universe plus market-data panel are loaded.")
 
-        with st.expander("Technical execution details", expanded=False):
+        run_result = render_run_panel(
+            simple_cfg,
+            pre_run_advanced_cfg,
+            governance_status=governance_status,
+            cfg_final=cfg_final,
+            compact=True,
+        )
+
+        _render_engine_transparency_intro()
+
+        with st.expander("Strategy engine inputs", expanded=False):
+            setup_line = (
+                f"**{current_philosophy}** · **{universe_size}-asset universe** · "
+                f"**{simple_cfg.get('template', '—')}** · **{simple_cfg.get('preset', '—')}**"
+            )
+            st.write(setup_line)
+
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                _render_compact_value("Market data", source_label)
+            with c2:
+                _render_compact_value("Panel rows", f"{panel_rows:,}")
+            with c3:
+                _render_compact_value("Panel assets", panel_assets)
+            with c4:
+                _render_compact_value("Engine status", engine_status)
+
             st.caption(
                 f"top_k={cfg_final.get('top_k', '—')} · "
                 f"signal_mode={cfg_final.get('signal_mode', '—')} · "
@@ -504,71 +525,146 @@ def _render_ready_to_run_section(
                 label_text = f": {applied_tuning_label}" if applied_tuning_label else ""
                 st.caption(f"These technical values include the applied engine tuning suggestion{label_text}.")
 
-        st.caption("This button runs the real micro pipeline and stores the result for metrics, Step 6 projection, and Step 7 insights.")
-        return render_run_panel(
-            simple_cfg,
-            pre_run_advanced_cfg,
-            governance_status=governance_status,
-            cfg_final=cfg_final,
-            compact=True,
-        )
+        return run_result
+
+def _build_executed_setup_summary(
+    *,
+    cfg_final: dict,
+    asset_panel_df: Any,
+    current_philosophy: str,
+    simple_cfg: dict,
+) -> str:
+    """Return a compact description of the active executed setup.
+
+    Post-run, keep this detail inside the collapsed setup/rerun area so the
+    result metrics appear immediately after the main title.
+    """
+    panel_assets = int(asset_panel_df["asset"].nunique()) if isinstance(asset_panel_df, pd.DataFrame) and "asset" in asset_panel_df.columns else 0
+    universe_size = int(st.session_state.get("universe_size", 25) or 25)
+    stored_run = _coerce_mapping(st.session_state.get("step5_last_run_result", {}))
+    oos_raw = stored_run.get("oos_returns_monthly", stored_run.get("oos_returns_simple", []))
+    try:
+        oos_months = len(oos_raw.tolist() if hasattr(oos_raw, "tolist") else list(oos_raw or []))
+    except Exception:
+        oos_months = int(_safe_int(_coerce_mapping(stored_run.get("performance_summary", {})).get("periods", 0), 0))
+
+    template = simple_cfg.get("template", "â")
+    style = simple_cfg.get("preset", "â")
+    active_line = (
+        f"{current_philosophy} Â· {universe_size}-asset universe Â· "
+        f"{template} Â· {style} Â· {panel_assets} panel assets"
+    )
+    if oos_months > 0:
+        active_line += f" Â· {oos_months} OOS months"
+    return active_line
 
 def render_step_5() -> None:
     # Gold Stable: remove legacy exploration state before rendering.
     clear_retired_step5_state()
 
-    st.markdown("## Step 5 — Engine workspace")
-    st.caption(
-        "This step converts the Step 4 universe and market-data panel into a real investment-engine run. "
-        "Start with the strategy preset, optionally review technical controls, then run the engine and interpret the result before moving to projection."
-    )
-
-    _render_engine_transparency_intro()
-
     current_philosophy = str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
-
-    # 1) Main user-facing setup layer. This is intentionally visible because it is the
-    # product-friendly alternative to exposing dozens of low-level engine knobs first.
-    with st.container(border=True):
-        simple_cfg = render_simple_mode()
-
-    # Gold Stable: advanced/global-search controls are intentionally not mounted.
-    # Keep the argument as an empty dict so downstream function signatures stay stable.
     pre_run_advanced_cfg: dict[str, Any] = {}
-
-    cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
-
-    # 2) Optional low-level controls. They are closed by default, but because they can
-    # affect the execution they must appear before the final Ready-to-run confirmation.
-    with st.expander("Optional technical engine controls (diagnostics)", expanded=False):
-        st.caption(
-            "These are low-level engine parameters resolved from the strategy preset above. "
-            "Normal users do not need to change them; use this only for diagnostics or experimentation."
-        )
-        basic_engine_overrides = _render_basic_engine_controls(cfg_final)
-    cfg_final = {**dict(cfg_final or {}), **dict(basic_engine_overrides or {})}
-
     asset_panel_df = st.session_state.get("asset_panel_df")
-    current_signature = _build_step5_input_signature(cfg_final, asset_panel_df)
-    st.session_state["step5_current_input_signature"] = current_signature
 
-    clear_retired_step5_state()
+    # Resolve without rendering the full setup first. If the latest run is still
+    # fresh, keep setup/rerun controls collapsed so the result becomes primary.
+    simple_cfg_state = resolve_simple_mode_state()
+    cfg_state, gov_state = _resolve_cfg_final(simple_cfg_state, pre_run_advanced_cfg)
+    cfg_state = {**dict(cfg_state or {}), **_resolve_basic_engine_state(cfg_state)}
+    current_result_is_fresh, current_run_signature = _current_result_is_fresh_for_ready_card(cfg_state, asset_panel_df)
+    stored_run_result = st.session_state.get("step5_last_run_result")
+    has_fresh_stored_result = bool(stored_run_result is not None and current_result_is_fresh)
 
-    new_run_result = _render_ready_to_run_section(
-        cfg_final=cfg_final,
-        asset_panel_df=asset_panel_df,
-        current_philosophy=current_philosophy,
-        simple_cfg=simple_cfg,
-        pre_run_advanced_cfg=pre_run_advanced_cfg,
-        governance_status=gov,
-    )
+    # Before a run, this screen is the Strategy Engine setup. After a fresh run,
+    # make the result state explicit and avoid a second large "result overview"
+    # title immediately above the metrics.
+    if has_fresh_stored_result:
+        st.markdown("## Strategy Engine Results")
+    else:
+        st.markdown("## Strategy Engine")
 
-    # IMPORTANT: render_run_panel() owns the canonical Step 5 run signature.
-    # The local workspace signature is only a pre-run helper. If we compare the
-    # stored run against the helper hash, any harmless rerun button below
-    # post-run (for example "Test preset improvement") can make the page think
-    # the run is stale and hide the result. After the Ready-to-run block has
-    # rendered, use the canonical signature published by run_panel instead.
+    new_run_result = None
+    current_signature = current_run_signature
+    simple_cfg = simple_cfg_state
+    cfg_final = dict(cfg_state or {})
+    gov = dict(gov_state or {})
+
+    if has_fresh_stored_result:
+        active_setup_summary = _build_executed_setup_summary(
+            cfg_final=cfg_final,
+            asset_panel_df=asset_panel_df,
+            current_philosophy=current_philosophy,
+            simple_cfg=simple_cfg,
+        )
+
+        with st.expander("Change or rerun setup", expanded=False):
+            if active_setup_summary:
+                st.markdown(f"**Active result:** {active_setup_summary}.")
+            st.caption(
+                "Open this only if you want to change the preset, semantic posture, technical controls, "
+                "or run a new portfolio test."
+            )
+            simple_cfg = render_simple_mode()
+            cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
+
+            with st.expander("Optional advanced engine controls", expanded=False):
+                st.caption(
+                    "Low-level parameters resolved from the preset above. Normal users can leave these unchanged; "
+                    "use this only for diagnostics or controlled experimentation."
+                )
+                basic_engine_overrides = _render_basic_engine_controls(cfg_final)
+            cfg_final = {**dict(cfg_final or {}), **dict(basic_engine_overrides or {})}
+
+            current_signature = _build_step5_input_signature(cfg_final, asset_panel_df)
+            st.session_state["step5_current_input_signature"] = current_signature
+            clear_retired_step5_state()
+
+            new_run_result = _render_ready_to_run_section(
+                cfg_final=cfg_final,
+                asset_panel_df=asset_panel_df,
+                current_philosophy=current_philosophy,
+                simple_cfg=simple_cfg,
+                pre_run_advanced_cfg=pre_run_advanced_cfg,
+                governance_status=gov,
+                bordered=False,
+            )
+
+    else:
+        st.info(
+            "**Purpose:** turn the selected risk profile, asset universe and market-data panel into a tested "
+            "strategy return series. This is the execution stage, not a new data-preparation step."
+        )
+        # First-run or stale-run view: keep the setup card focused on editable
+        # strategy choices. Readiness, input transparency and the run action sit
+        # outside the card so they read as execution controls rather than setup
+        # fields.
+        with st.container(border=True):
+            simple_cfg = render_simple_mode()
+            cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
+
+            with st.expander("Optional advanced engine controls", expanded=False):
+                st.caption(
+                    "Low-level parameters resolved from the preset above. Normal users can leave these unchanged; "
+                    "use this only for diagnostics or controlled experimentation."
+                )
+                basic_engine_overrides = _render_basic_engine_controls(cfg_final)
+            cfg_final = {**dict(cfg_final or {}), **dict(basic_engine_overrides or {})}
+
+            current_signature = _build_step5_input_signature(cfg_final, asset_panel_df)
+            st.session_state["step5_current_input_signature"] = current_signature
+            clear_retired_step5_state()
+
+        new_run_result = _render_ready_to_run_section(
+            cfg_final=cfg_final,
+            asset_panel_df=asset_panel_df,
+            current_philosophy=current_philosophy,
+            simple_cfg=simple_cfg,
+            pre_run_advanced_cfg=pre_run_advanced_cfg,
+            governance_status=gov,
+            bordered=False,
+        )
+
+    # render_run_panel publishes the canonical signature when it is mounted.
     current_signature = str(
         st.session_state.get("step5_current_run_signature", current_signature)
         or current_signature
@@ -577,37 +673,39 @@ def render_step_5() -> None:
 
     last_run_signature = str(st.session_state.get("step5_last_run_signature", "") or "")
     stored_run_result = st.session_state.get("step5_last_run_result")
-    can_reuse_stored_post_run = stored_run_result is not None and last_run_signature == current_signature
+    can_reuse_stored_post_run = bool(
+        stored_run_result is not None
+        and (last_run_signature == current_signature or has_fresh_stored_result)
+    )
     run_result = new_run_result if new_run_result is not None else (
         stored_run_result if can_reuse_stored_post_run else None
     )
 
-    execution_changed = bool(last_run_signature and last_run_signature != current_signature)
+    execution_changed = bool(last_run_signature and last_run_signature != current_signature and not has_fresh_stored_result)
     post_run_is_stale = bool(new_run_result is None and stored_run_result is not None and execution_changed)
     st.session_state["step5_post_run_is_stale"] = False
 
     if post_run_is_stale:
         st.info(
-            "The current Step 5 inputs differ from the last executed run. "
-            "Press 'Run portfolio & view results' to refresh the metrics."
+            "The current strategy engine inputs differ from the last executed run. "
+            "Run the updated setup to refresh the metrics."
         )
 
     if run_result:
         render_post_run(run_result)
 
-    # Gold Stable: render fallback navigation only before a run exists.
-    # Once render_post_run() is visible, it owns the Step 5 navigation buttons,
-    # avoiding duplicate Streamlit widget keys.
+    # Render fallback navigation only before a run exists. Once render_post_run()
+    # is visible, it owns the strategy engine navigation buttons.
     if not run_result:
         st.markdown("---")
         nav_left, nav_right = st.columns(2)
         with nav_left:
-            if st.button("← Back to Step 4", key="step5_back_to_step4", use_container_width=True):
+            if st.button("← Back to Risk Profile and Universe", key="step5_back_to_step4", use_container_width=True):
                 st.session_state["current_step"] = 4
                 st.rerun()
         with nav_right:
             if st.button(
-                "Continue to Step 6 →",
+                "Continue to Long-Term Scenario Explorer →",
                 key="step5_continue_to_step6",
                 use_container_width=True,
                 disabled=not bool(st.session_state.get("engine_has_run", False)),

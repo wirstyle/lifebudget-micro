@@ -13,6 +13,48 @@ from ui.services.step4_universe_service import (
 )
 
 
+TEMPLATE_DESCRIPTIONS = {
+    "Balanced Risk-Controlled": "Risk-aware engine with drawdown control.",
+    "Core Ranking": "Ranks assets mainly by expected return and risk.",
+    "Hybrid Research": "More experimental blend of signals and overlays.",
+}
+
+STYLE_DESCRIPTIONS = {
+    "Conservative": "Lower-risk posture with more protection.",
+    "Balanced": "Middle-ground posture between growth and stability.",
+    "Growth": "Higher-upside posture with more volatility.",
+    "Defensive": "More cautious posture focused on stability.",
+    "Research": "Experimental setup for testing signal behaviour.",
+}
+
+
+def _template_description(template: str) -> str:
+    return TEMPLATE_DESCRIPTIONS.get(str(template or ""), "Strategy behaviour used by the engine run.")
+
+
+def _style_description(style: str) -> str:
+    return STYLE_DESCRIPTIONS.get(str(style or ""), "Risk posture applied to the selected template.")
+
+
+def _setup_status_summary(
+    *,
+    combo_status: str,
+    philosophy: str,
+    template: str,
+    style: str,
+    rec_template: str,
+    rec_style: str,
+    applied_preset_label: str,
+) -> str:
+    current_combo_label = f"{template} + {style}"
+    default_combo_label = f"{rec_template} + {rec_style}"
+    if combo_status == "recommended":
+        return f"recommended {philosophy} setup selected"
+    if applied_preset_label == current_combo_label:
+        return f"rerun-tested preset selected ({current_combo_label}); original {philosophy} default is {default_combo_label}"
+    return f"allowed {philosophy} setup selected ({current_combo_label}); default is {default_combo_label}"
+
+
 def _sync_combo_to_philosophy_space(philosophy: str) -> tuple[str, str]:
     rec_template, rec_style = recommended_strategy_combo_for_philosophy(philosophy)
     allowed_templates = allowed_strategy_templates_for_philosophy(philosophy)
@@ -77,6 +119,16 @@ def resolve_simple_mode_state() -> dict:
     turnover_style = _safe_slider_state("low_turnover_vs_adaptive", 0.40)
     simplicity = _safe_slider_state("simplicity_vs_sophistication", 0.56)
     combo_status = strategy_combo_status(philosophy, current_template, current_style)
+    applied_preset_label = str(st.session_state.get("step5_preset_applied_label_v2", "") or "")
+    setup_status_summary = _setup_status_summary(
+        combo_status=combo_status,
+        philosophy=philosophy,
+        template=current_template,
+        style=current_style,
+        rec_template=rec_template,
+        rec_style=rec_style,
+        applied_preset_label=applied_preset_label,
+    )
     risk_penalty = max(0.0, min(1.0, (1.0 - risk) * 0.40 + drawdown * 0.60))
     concentration = 5 + int(round(divers * 20))
 
@@ -94,6 +146,7 @@ def resolve_simple_mode_state() -> dict:
         "risk_penalty": risk_penalty,
         "concentration": concentration,
         "combo_status": combo_status,
+        "setup_status_summary": setup_status_summary,
         "recommended_template": rec_template,
         "recommended_style": rec_style,
         "philosophy": philosophy,
@@ -102,6 +155,7 @@ def resolve_simple_mode_state() -> dict:
 def render_simple_mode():
     philosophy = get_canonical_investment_philosophy()
     rec_template, rec_style = recommended_strategy_combo_for_philosophy(philosophy)
+
     # Gold Stable: keep semantic defaults stable during a forced rerun,
     # then return to normal user-controlled interactions.
     freeze_after_apply = bool(st.session_state.get("step5_force_run_once", False))
@@ -112,51 +166,16 @@ def render_simple_mode():
     else:
         current_template, current_style = _sync_combo_to_philosophy_space(philosophy)
 
-    st.markdown("### 1. Strategy preset setup")
-    st.caption(
-        "This is the user-friendly control layer for the engine. Template and style define the main behaviour, "
-        "while the semantic sliders fine-tune the posture without exposing every technical knob."
-    )
-
-    combo_status = strategy_combo_status(philosophy, current_template, current_style)
-    current_combo_label = f"{current_template} + {current_style}"
-    default_combo_label = f"{rec_template} + {rec_style}"
-    applied_preset_label = str(st.session_state.get("step5_preset_applied_label_v2", "") or "")
-
-    if combo_status == "recommended":
-        st.caption(f"Current combo is the recommended default for the {philosophy} philosophy: {current_combo_label}.")
-    elif applied_preset_label == current_combo_label:
-        st.caption(
-            f"Current setup: {current_combo_label}. This setup was selected by the improvement flow after testing nearby preset alternatives. "
-            f"The original {philosophy} philosophy default is {default_combo_label}."
-        )
-    else:
-        st.caption(
-            f"Current combo is allowed for the {philosophy} philosophy. The original philosophy default is {default_combo_label}; "
-            "the current setup may differ because it was manually selected or carried forward from a previous run."
-        )
-
-    c_action1, c_action2 = st.columns([1.2, 2.8])
-    with c_action1:
-        if st.button("Reset sliders to preset defaults", key="step5_reset_sliders_to_preset_defaults"):
-            apply_semantic_slider_defaults(current_template, current_style, force=True)
-            st.rerun()
-    with c_action2:
-        touched = bool(st.session_state.get(SEMANTIC_TOUCHED_FLAG, False))
-        if touched:
-            st.caption("Semantic sliders are manually customised and no longer strictly match the current preset defaults.")
-        else:
-            st.caption("Semantic sliders are currently aligned with the current preset defaults.")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        template_options = allowed_strategy_templates_for_philosophy(philosophy)
+    template_options = allowed_strategy_templates_for_philosophy(philosophy)
+    left, right = st.columns(2)
+    with left:
         template = st.selectbox(
             "Strategy template",
             template_options,
             index=template_options.index(current_template),
             key="step5_template",
         )
+        st.caption(_template_description(template))
 
     current_style_after_template = str(st.session_state.get("step5_style", current_style) or current_style)
     style_options = allowed_style_presets_for_philosophy(philosophy, template)
@@ -164,33 +183,72 @@ def render_simple_mode():
         current_style_after_template = rec_style if rec_style in style_options else style_options[0]
         st.session_state["step5_style"] = current_style_after_template
 
-    with col2:
+    with right:
         style = st.selectbox(
             "Style preset",
             style_options,
             index=style_options.index(current_style_after_template),
             key="step5_style",
         )
+        st.caption(_style_description(style))
 
     if not freeze_after_apply:
         apply_semantic_slider_defaults(template, style, force=False)
 
-    st.caption(
-        "These sliders translate investment intent into the detailed engine configuration. "
-        "Leave them unchanged for the Step 4 recommended preset behaviour."
+    combo_status = strategy_combo_status(philosophy, template, style)
+    current_combo_label = f"{template} + {style}"
+    default_combo_label = f"{rec_template} + {rec_style}"
+    applied_preset_label = str(st.session_state.get("step5_preset_applied_label_v2", "") or "")
+
+    setup_status_summary = _setup_status_summary(
+        combo_status=combo_status,
+        philosophy=philosophy,
+        template=template,
+        style=style,
+        rec_template=rec_template,
+        rec_style=rec_style,
+        applied_preset_label=applied_preset_label,
     )
 
-    r1, r2 = st.columns(2)
-    with r1:
-        risk = _slider(SEMANTIC_SLIDER_KEYS["risk_appetite"], "Risk appetite", 0.50)
-        divers = _slider(SEMANTIC_SLIDER_KEYS["diversification_vs_concentration"], "Diversification ↔ concentration", 0.55)
-        stability = _slider(SEMANTIC_SLIDER_KEYS["stability_vs_responsiveness"], "Stability ↔ responsiveness", 0.60)
-        turnover_style = _slider(SEMANTIC_SLIDER_KEYS["low_turnover_vs_adaptive"], "Low turnover ↔ adaptive", 0.40)
-    with r2:
-        drawdown = _slider(SEMANTIC_SLIDER_KEYS["drawdown_protection"], "Drawdown protection", 0.62)
-        overlay = _slider(SEMANTIC_SLIDER_KEYS["overlay_intensity"], "Overlay intensity", 0.42)
-        confidence = _slider(SEMANTIC_SLIDER_KEYS["confidence_in_signal"], "Confidence in signal", 0.56)
-        simplicity = _slider(SEMANTIC_SLIDER_KEYS["simplicity_vs_sophistication"], "Simplicity ↔ sophistication", 0.56)
+    with st.expander("Fine-tune strategy posture (optional)", expanded=False):
+        r1, r2 = st.columns(2)
+        with r1:
+            _slider(SEMANTIC_SLIDER_KEYS["risk_appetite"], "Risk appetite", 0.50)
+            _slider(SEMANTIC_SLIDER_KEYS["diversification_vs_concentration"], "Diversification ↔ concentration", 0.55)
+            _slider(SEMANTIC_SLIDER_KEYS["stability_vs_responsiveness"], "Stability ↔ responsiveness", 0.60)
+            _slider(SEMANTIC_SLIDER_KEYS["low_turnover_vs_adaptive"], "Low turnover ↔ adaptive", 0.40)
+        with r2:
+            _slider(SEMANTIC_SLIDER_KEYS["drawdown_protection"], "Drawdown protection", 0.62)
+            _slider(SEMANTIC_SLIDER_KEYS["overlay_intensity"], "Overlay intensity", 0.42)
+            _slider(SEMANTIC_SLIDER_KEYS["confidence_in_signal"], "Confidence in signal", 0.56)
+            _slider(SEMANTIC_SLIDER_KEYS["simplicity_vs_sophistication"], "Simplicity ↔ sophistication", 0.56)
+
+        touched = bool(st.session_state.get(SEMANTIC_TOUCHED_FLAG, False))
+        if touched:
+            st.caption(
+                "These sliders have been manually customised. Resetting returns them to the current preset defaults."
+            )
+        else:
+            st.caption(
+                "These sliders currently match the selected preset defaults. Use reset after experimenting to return to the preset baseline."
+            )
+
+        reset_col, _ = st.columns([1.25, 2.75])
+        with reset_col:
+            if st.button("Reset preset sliders", key="step5_reset_sliders_to_preset_defaults", use_container_width=True):
+                apply_semantic_slider_defaults(template, style, force=True)
+                st.rerun()
+
+    # Read values after the expander has rendered. This keeps the same values available
+    # even when the expander is closed on screen.
+    risk = _safe_slider_state("risk_appetite", 0.50)
+    drawdown = _safe_slider_state("drawdown_protection", 0.62)
+    divers = _safe_slider_state("diversification_vs_concentration", 0.55)
+    overlay = _safe_slider_state("overlay_intensity", 0.42)
+    stability = _safe_slider_state("stability_vs_responsiveness", 0.60)
+    confidence = _safe_slider_state("confidence_in_signal", 0.56)
+    turnover_style = _safe_slider_state("low_turnover_vs_adaptive", 0.40)
+    simplicity = _safe_slider_state("simplicity_vs_sophistication", 0.56)
 
     risk_penalty = max(0.0, min(1.0, (1.0 - risk) * 0.40 + drawdown * 0.60))
     concentration = 5 + int(round(divers * 20))
@@ -209,6 +267,7 @@ def render_simple_mode():
         "risk_penalty": risk_penalty,
         "concentration": concentration,
         "combo_status": combo_status,
+        "setup_status_summary": setup_status_summary,
         "recommended_template": rec_template,
         "recommended_style": rec_style,
         "philosophy": philosophy,

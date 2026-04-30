@@ -29,6 +29,7 @@ STEP0_NOTICE_ALIASES = (
 )
 STEP0_PATHWAY = "step0_planning_pathway"
 STEP0_SELECTED_MODULE = "step0_selected_module"
+STEP0_PENDING_MODULE_OPEN = "step0_pending_module_open_v1"
 
 # Keep these original pathway values because later steps still use them as
 # compatibility signals. Step 0 now exposes broader modules to the user, then
@@ -66,8 +67,8 @@ MODULE_OPTIONS: List[Tuple[str, str, str, str, str, int, str, str]] = [
         "personal_finance",
         "Personal Finance Planner",
         "Steps 1-3",
-        "Build income, expenses, savings capacity, and short-term goals before moving into investment or projection decisions.",
-        "Select finance planner",
+        "Build your budget baseline, savings capacity, and short-term feasibility before moving into scenarios.",
+        "Open finance planner",
         1,
         "compare_both",
         "not_sure_yet",
@@ -76,8 +77,8 @@ MODULE_OPTIONS: List[Tuple[str, str, str, str, str, int, str, str]] = [
         "investment_lab",
         "Investment Strategy Lab",
         "Steps 4-5",
-        "Prepare a cached investment universe, run the strategy engine, and review historical risk/return diagnostics and suggestions.",
-        "Select investment lab",
+        "Prepare an investment universe, run the engine, and review risk/return diagnostics.",
+        "Open investment lab",
         4,
         "savings_plus_investing",
         "save_more_each_week",
@@ -86,8 +87,8 @@ MODULE_OPTIONS: List[Tuple[str, str, str, str, str, int, str, str]] = [
         "scenario_explorer",
         "Long-Term Scenario Explorer",
         "Steps 6-7",
-        "Explore long-term savings outcomes first, then compare them with either a labelled educational investment proxy or tested strategy returns from the Investment Lab.",
-        "Select scenario explorer",
+        "Explore savings-only, educational proxy, and tested-strategy long-term scenarios.",
+        "Open scenario explorer",
         6,
         "compare_both",
         "not_sure_yet",
@@ -176,46 +177,58 @@ def _persist_module_choice(module_id: str) -> dict:
     return module
 
 
+def _navigate_to_module(module: dict) -> None:
+    """Open the selected user-facing module.
 
-def _render_module_card(module: dict, *, selected: bool) -> None:
-    border_color = "#2E7D32" if selected else "rgba(49, 51, 63, 0.18)"
-    badge_text = "Selected" if selected else "Module"
-    badge_bg = "rgba(46, 125, 50, 0.10)" if selected else "rgba(49, 51, 63, 0.06)"
-
-    title = html.escape(str(module.get("title", "Module")))
-    steps = html.escape(str(module.get("steps", "")))
-    description = html.escape(str(module.get("description", "")))
-    badge = html.escape(badge_text)
-
-    st.markdown(
-        f"""
-        <div style="
-            border: 1.5px solid {border_color};
-            border-radius: 18px;
-            padding: 1.2rem 1.15rem;
-            min-height: 250px;
-            background: rgba(255, 255, 255, 0.72);
-            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
-            margin-bottom: 0.75rem;
-        ">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:0.75rem;">
-                <p style="font-size: 0.82rem; color: #6b7280; margin: 0;">{steps}</p>
-                <span style="font-size: 0.72rem; padding: 0.18rem 0.48rem; border-radius: 999px; background: {badge_bg}; color: #374151;">{badge}</span>
-            </div>
-            <h3 style="margin-top: 0.7rem; margin-bottom: 0.8rem; line-height:1.2;">{title}</h3>
-            <p style="color: #4b5563; line-height: 1.45; margin-bottom: 0;">{description}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if st.button(str(module.get("button_label", "Select")), key=f"step0_select_{module['id']}", use_container_width=True):
-        _persist_module_choice(str(module["id"]))
-        st.rerun()
+    This keeps Step 0 as a hub: the card buttons are the real entry points,
+    while the educational notice remains the required gate before navigation.
+    """
+    target_step = int(module.get("target_step", 1))
+    st.session_state[CURRENT_STEP] = target_step
+    st.session_state["current_step"] = target_step
+    st.rerun()
 
 
-def _render_module_selector() -> dict:
-    st.markdown("### Choose where to start")
+
+
+def _module_button_label(module: dict) -> str:
+    """Return a compact native Streamlit button label for a clickable module card."""
+    title = str(module.get("title", "Module")).strip()
+    description = str(module.get("description", "")).strip()
+
+    # Native Streamlit only gives us a button label here. Keep the card fully
+    # clickable, and use a simple unicode separator plus an empty line below it.
+    divider = "────────────────────────"
+    return f"**{title}**\n\n{divider}\n\n\n{description}"
+
+
+def _render_module_card(module: dict, *, can_open: bool) -> None:
+    """Render one clickable module card using a native Streamlit button.
+
+    Streamlit does not provide a true clickable-card component without custom
+    HTML/JS. The clean native compromise is to make the entire module tile a
+    full-width button and remove the separate Open button underneath.
+    """
+    button_label = _module_button_label(module)
+    module_title = str(module.get("title", "module"))
+
+    if st.button(
+        button_label,
+        key=f"step0_open_module_card_{module['id']}",
+        use_container_width=True,
+        disabled=not bool(can_open),
+        help=(
+            f"Open {module_title}."
+            if can_open
+            else "Accept the educational notice above to enable module navigation."
+        ),
+    ):
+        selected_module = _persist_module_choice(str(module["id"]))
+        _mark_educational_notice_accepted()
+        _navigate_to_module(selected_module)
+
+def _render_module_selector(*, can_open: bool) -> dict:
+    st.markdown("### Choose a module to open")
     st.caption(
         "The app is organised into three modules. You can start with personal finance, jump into the investment lab, "
         "or explore long-term scenarios using savings-only, educational proxy, or tested engine results."
@@ -230,15 +243,14 @@ def _render_module_selector() -> dict:
         module_id = raw[0]
         module = modules[module_id]
         with cols[idx]:
-            _render_module_card(module, selected=(module_id == selected_id))
+            _render_module_card(module, can_open=can_open)
 
     selected_module = _persist_module_choice(str(st.session_state.get(STEP0_SELECTED_MODULE, selected_module["id"])))
 
     st.info(
-        "**Recommended full flow:** Personal Finance Planner -> Investment Strategy Lab -> "
-        "Long-Term Scenario Explorer -> Insights Summary."
+        "**Recommended full flow:** Finance Planner → Investment Lab → "
+        "Scenario Explorer → Insights Summary."
     )
-    st.success(f"Selected start: **{selected_module['title']}** ({selected_module['steps']}).")
 
     return selected_module
 
@@ -262,11 +274,17 @@ Investment/projection outputs are **not**:
 
 
 def _render_educational_notice() -> bool:
-    st.markdown("## Educational assumptions")
+    """Render the lightweight Step 0 gate before the module cards.
+
+    The module buttons are intentionally disabled until this notice is accepted.
+    This keeps the relationship between the notice and the entry buttons visible
+    on the same screen, without needing a separate Start button.
+    """
+    st.markdown("### Educational assumptions")
 
     if _educational_notice_accepted():
         _mark_educational_notice_accepted()
-        st.success("Educational notice already accepted for this session.")
+        st.success("Educational notice accepted for this session.")
         with st.expander("Review educational notice", expanded=False):
             st.markdown(
                 "LifeBudget Micro is an educational planning and scenario-exploration tool. "
@@ -277,16 +295,9 @@ def _render_educational_notice() -> bool:
             )
         return True
 
-    st.markdown("### Educational use notice")
     st.warning(
         "LifeBudget Micro is an educational planning and scenario-exploration tool. "
         "It is not financial advice, investment advice, or a guarantee of future outcomes."
-    )
-
-    st.markdown(
-        "Projections are scenario estimates based on assumptions and historical data, "
-        "not predictions. Investing involves risk, including possible loss of capital. "
-        "Past performance refers to the past and is not a reliable indicator of future results."
     )
 
     accepted = bool(
@@ -302,34 +313,27 @@ def _render_educational_notice() -> bool:
         _mark_educational_notice_accepted()
         return True
 
-    st.info("Please acknowledge the educational notice to continue.")
+    st.caption("Accept the educational notice above to enable the module buttons.")
     return False
 
 def render_step_0() -> dict:
-    # Ensure legacy state exists even before the user presses a module button.
+    # Ensure legacy state exists even before the user opens a module.
     _resolve_pathway()
     selected_module = _persist_module_choice(_resolve_module_id())
+    st.session_state.pop(STEP0_PENDING_MODULE_OPEN, None)
 
     st.markdown("# LifeBudget Micro")
     st.caption(
         "Plan your budget, test an investment strategy, and explore long-term scenarios. "
-        "Choose a starting module to begin."
+        "Accept the educational notice, then choose a module to open."
     )
 
-    selected_module = _render_module_selector()
-
-    st.markdown("---")
+    # Place the notice before the cards so the disabled/enabled state is visually
+    # connected to the three module entry buttons.
     notice_ok = _render_educational_notice()
-    st.markdown("---")
 
-    start_label = f"Start: {selected_module['title']}"
-    if st.button(start_label, use_container_width=True, key="step0_continue_to_selected_module", disabled=not notice_ok):
-        _mark_educational_notice_accepted()
-        selected_module = _persist_module_choice(str(selected_module["id"]))
-        target_step = int(selected_module.get("target_step", 1))
-        st.session_state[CURRENT_STEP] = target_step
-        st.session_state["current_step"] = target_step
-        st.rerun()
+    st.markdown("---")
+    selected_module = _render_module_selector(can_open=notice_ok)
 
     selected_pathway = str(selected_module.get("pathway", DEFAULT_PATHWAY))
     selected_intent = str(selected_module.get("intent", PATHWAY_TO_USER_INTENT.get(selected_pathway, "not_sure_yet")))

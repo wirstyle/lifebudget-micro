@@ -69,8 +69,6 @@ SIZE_SKIPPED_LABEL_KEY = "step5_size_skipped_label_v1"
 SIZE_SKIPPED_RUN_SIGNATURE_KEY = "step5_size_skipped_run_signature_v1"
 SIZE_SUGGESTION_TIMING_KEY = "step5_size_suggestion_timing_v1"
 SIZE_RECOMMENDATION_CONTEXT_KEY = "step5_recommended_size_context_v1"
-STEP5_DEMO_SPEED_MODE_KEY = "step5_demo_speed_mode_v1"
-
 
 # Cached deployment panel currently contains 106 assets. Keep Phase 4 honest: never
 # engine-test sizes above the public/demo supported cap. Larger research sizes
@@ -79,6 +77,34 @@ DEPLOYMENT_MAX_TESTABLE_UNIVERSE_SIZE = 100
 DEPLOYMENT_SUPPORTED_UNIVERSE_SIZES = (12, 25, 50, 75, 100)
 UNIVERSE_RECOMMENDATION_CONTEXT_KEY = "step5_recommended_universe_context_v1"
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
+SIZE_SUGGESTION_COUNT_KEY = "step5_suggestion_count_size_v1"
+SIZE_SECONDS_PER_TEST = 30.0
+
+
+def _suggestion_candidate_count(default: int = 1) -> int:
+    try:
+        raw = int(st.session_state.get(SIZE_SUGGESTION_COUNT_KEY, default))
+    except Exception:
+        raw = int(default)
+    return int(max(1, min(8, raw)))
+
+
+def _format_runtime_estimate(seconds: float) -> str:
+    try:
+        seconds = float(seconds)
+    except Exception:
+        seconds = 30.0
+    if seconds <= 40:
+        return "~30s"
+    if seconds <= 70:
+        return "~1 min"
+    if seconds <= 105:
+        return "~90s"
+    if seconds <= 150:
+        return "~2 min"
+    minutes = seconds / 60.0
+    rounded = round(minutes * 2.0) / 2.0
+    return f"~{rounded:g} min"
 
 TECHNICAL_WIDGET_KEYS: dict[str, str] = {
     "top_k": "step5_basic_top_k",
@@ -91,13 +117,6 @@ TECHNICAL_WIDGET_KEYS: dict[str, str] = {
     "feature_mu_enabled": "step5_basic_feature_mu_enabled",
     "feature_mu_blend": "step5_basic_feature_mu_blend",
 }
-
-
-def _demo_speed_mode_enabled() -> bool:
-    """Use smaller candidate budgets by default in hosted/demo mode."""
-    if STEP5_DEMO_SPEED_MODE_KEY not in st.session_state:
-        st.session_state[STEP5_DEMO_SPEED_MODE_KEY] = True
-    return bool(st.session_state.get(STEP5_DEMO_SPEED_MODE_KEY, True))
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +182,54 @@ def _normalise_perf(perf: Any) -> dict:
         "max_drawdown": abs(_safe_float(p.get("max_drawdown", 0.0), 0.0)),
         "periods": _safe_int(p.get("periods", 0), 0),
     }
+
+
+def _extract_oos_returns_for_projection(run_map: dict) -> list[float]:
+    candidates = [
+        _coerce_mapping(run_map).get("oos_returns_monthly"),
+        _coerce_mapping(run_map).get("oos_returns_simple"),
+        _coerce_mapping(run_map).get("portfolio_returns"),
+        _coerce_mapping(run_map).get("oos_returns"),
+        _coerce_mapping(run_map).get("returns"),
+    ]
+    for raw in candidates:
+        if raw is None:
+            continue
+        try:
+            if hasattr(raw, "tolist"):
+                raw = raw.tolist()
+        except Exception:
+            raw = []
+        if not isinstance(raw, list):
+            continue
+        out: list[float] = []
+        for item in raw:
+            try:
+                out.append(float(item))
+            except Exception:
+                continue
+        if out:
+            return out
+    return []
+
+
+def _store_projection_bridge_context_for_current_result(run_map: dict) -> None:
+    run_map = _coerce_mapping(run_map)
+    ctx = st.session_state.get("investment_context", {})
+    if not isinstance(ctx, dict):
+        ctx = {}
+    ctx["oos_returns_monthly"] = list(_extract_oos_returns_for_projection(run_map))
+    ctx.setdefault("run_signature", str(run_map.get("run_signature", "") or ""))
+    st.session_state["investment_context"] = ctx
+
+
+def _render_continue_with_current_result_button(run_map: dict, *, key: str) -> None:
+    _, continue_col, _ = st.columns([0.29, 0.42, 0.29])
+    with continue_col:
+        if st.button("Continue with current result", key=key, use_container_width=True):
+            _store_projection_bridge_context_for_current_result(run_map)
+            st.session_state["current_step"] = 6
+            st.rerun()
 
 
 def _coerce_cfg_payload(cfg_payload: Any) -> dict:
@@ -618,7 +685,7 @@ def _resolve_temporary_search_panel(search_assets: list[str], current_panel: pd.
     current_panel = current_panel.copy() if isinstance(current_panel, pd.DataFrame) else pd.DataFrame()
     available = set(_panel_assets(current_panel))
     if available and set(clean_assets).issubset(available):
-        return current_panel, "Reused the current Step 4 asset panel."
+        return current_panel, "Reused the current selected market-data panel."
 
     source_mode = str(step4_payload.get("asset_source_mode", st.session_state.get(ASSET_SOURCE_MODE, "yahoo")) or "yahoo").lower()
     if source_mode != "yahoo":
@@ -723,6 +790,7 @@ def _build_scope(run_result: dict) -> str:
             "style": style,
             "technical_cfg": base_cfg,
             "baseline_size": int(baseline_size),
+            "suggestion_candidates": _suggestion_candidate_count(1),
             "philosophy_guidance_cap": int(_size_cap_for_philosophy(philosophy)),
             "deployment_max_testable_size": int(DEPLOYMENT_MAX_TESTABLE_UNIVERSE_SIZE),
             "deployment_supported_sizes": list(DEPLOYMENT_SUPPORTED_UNIVERSE_SIZES),
@@ -827,7 +895,7 @@ def _run_size_search(run_result: dict, *, max_engine_tests: int = 4) -> dict:
     panel = st.session_state.get(ASSET_PANEL_DF, st.session_state.get("asset_panel_df"))
     current_panel = panel.copy() if isinstance(panel, pd.DataFrame) else pd.DataFrame()
     if current_panel.empty:
-        return {"scope": _build_scope(run_result), "evaluations": [], "error": "Step 4 asset panel is missing."}
+        return {"scope": _build_scope(run_result), "evaluations": [], "error": "The selected market-data panel is missing."}
 
     step4_payload = _coerce_mapping(build_step4_universe_payload_from_state())
     current_assets = _asset_list(
@@ -1048,7 +1116,7 @@ def _normalise_promoted_candidate_result(candidate: dict, cfg_payload: dict) -> 
             "source": "micro_pipeline_real",
             "promoted_from_size_candidate": True,
             "size_candidate_label": str(candidate_map.get("label", "Universe size candidate") or "Universe size candidate"),
-            "asset_panel_source_label": "Step 5 optimised universe size",
+            "asset_panel_source_label": "Strategy engine optimised universe size",
             "asset_panel_n_rows": int(len(candidate_panel)),
             "asset_panel_n_assets": int(candidate_panel["asset"].nunique()) if "asset" in candidate_panel.columns else 0,
             "performance_summary": dict(perf),
@@ -1137,7 +1205,7 @@ def _apply_candidate(candidate: dict) -> None:
         ASSET_PANEL_DF: candidate_panel if isinstance(candidate_panel, pd.DataFrame) and not candidate_panel.empty else st.session_state.get(ASSET_PANEL_DF),
         "asset_panel_df": candidate_panel if isinstance(candidate_panel, pd.DataFrame) and not candidate_panel.empty else st.session_state.get("asset_panel_df"),
         ASSET_PANEL_READY: bool(isinstance(candidate_panel, pd.DataFrame) and not candidate_panel.empty),
-        ASSET_PANEL_SOURCE_LABEL: "Step 5 optimised universe size",
+        ASSET_PANEL_SOURCE_LABEL: "Strategy engine optimised universe size",
     }
     patch.update(_technical_widget_patch(cfg_payload))
 
@@ -1253,6 +1321,7 @@ def _candidate_table(evaluations: list[dict], current_perf: dict, baseline_size:
 
 
 def _render_recommended_candidate(candidate: dict, current_perf: dict, baseline_size: int) -> None:
+    """Render the actionable universe-size candidate as a compact card."""
     item = _coerce_mapping(candidate)
     perf = _normalise_perf(item.get("performance_summary", {}))
     current = _normalise_perf(current_perf)
@@ -1261,10 +1330,6 @@ def _render_recommended_candidate(candidate: dict, current_perf: dict, baseline_
 
     st.markdown("### Recommended universe size")
     st.markdown(f"**Optimised size {target_size}**")
-    st.caption(
-        f"This keeps the current preset and technical engine config, starts from the current {baseline_size}-asset universe, "
-        f"and only changes the tested universe size."
-    )
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -1282,25 +1347,6 @@ def _render_recommended_candidate(candidate: dict, current_perf: dict, baseline_
     with c4:
         st.metric("Sharpe", f"{perf['sharpe']:.2f}", delta=f"{perf['sharpe'] - current['sharpe']:+.2f}")
 
-    st.success("This candidate passed the universe-size acceptance gate.")
-    gate_reason = str(item.get("gate_reason", "") or "")
-    if gate_reason:
-        st.caption(gate_reason)
-
-    with st.expander("Optimised universe assets", expanded=False):
-        if assets:
-            preview = ", ".join(asset_display_label(x) for x in assets[:50])
-            if len(assets) > 50:
-                preview += f" ... +{len(assets) - 50} more"
-            st.write(preview)
-        st.caption(
-            f"baseline_size={int(baseline_size)} · tested_size={int(target_size)} · "
-            f"score_delta={_safe_float(item.get('score_delta'), 0.0):+.3f}"
-        )
-        detail = build_universe_mix_detail(assets)
-        if isinstance(detail, pd.DataFrame) and not detail.empty:
-            st.dataframe(detail, use_container_width=True, hide_index=True)
-
 
 def render_size_improvement(run_result: dict) -> None:
     """Render the fourth Step 5 improvement phase: universe size."""
@@ -1309,11 +1355,7 @@ def render_size_improvement(run_result: dict) -> None:
     if not perf:
         return
 
-    st.markdown("### Universe size suggestion")
-    st.caption(
-        "This keeps the current strategy preset, technical engine configuration, and current universe-composition baseline, "
-        "then tests whether a different universe size improves the result."
-    )
+    # The phase rail already labels this as Universe size. Keep this panel action-first.
 
     msg = st.session_state.pop("step5_size_apply_message_v1", "")
 
@@ -1322,10 +1364,10 @@ def render_size_improvement(run_result: dict) -> None:
     applied_label = str(st.session_state.get(SIZE_APPLIED_LABEL_KEY, "") or "")
     if applied_signature and current_run_signature and applied_signature == current_run_signature:
         label = applied_label or "the accepted universe size suggestion"
-        st.success(f"Universe size applied: {label}. The rerun-tested candidate is now the current Step 5 result.")
+        st.success(f"Universe size applied: {label}. The rerun-tested candidate is now the current strategy engine result.")
         st.caption(
             "Size testing is hidden for this run to avoid suggesting the same loop again. "
-            "Change Step 4 or run a new baseline if you want to test a different size."
+            "Change the selected universe or run a new baseline if you want to test a different size."
         )
         return
 
@@ -1340,41 +1382,23 @@ def render_size_improvement(run_result: dict) -> None:
     skipped_scope = str(st.session_state.get(SIZE_SKIPPED_SCOPE_KEY, "") or "")
     skipped_label = str(st.session_state.get(SIZE_SKIPPED_LABEL_KEY, "") or "")
     skipped_run_signature = str(st.session_state.get(SIZE_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
-    if (
+    size_was_skipped = bool(
         skipped_scope
         and skipped_scope == scope
         and (not skipped_run_signature or skipped_run_signature == current_run_signature)
-        and not evaluations
-    ):
-        st.success("Universe-size check skipped for this run. The optional improvement flow is complete.")
+    )
+    if size_was_skipped and not evaluations:
+        st.warning("Universe size skipped: current universe size kept for this run. The improvement flow is complete.")
         if skipped_label:
-            st.caption(f"Skipped size check: {skipped_label}.")
+            st.caption(f"Skipped universe size check: {skipped_label}.")
         return
 
     if saved_scope != scope or not evaluations:
-        quick_mode = _demo_speed_mode_enabled()
-        max_engine_tests = 2 if quick_mode else 4
-        estimate = "~45–75s" if quick_mode else "~2 min+"
-        st.info(
-            f"Universe size is the slowest optional check. It will rerun up to {max_engine_tests} size candidate"
-            f"{'s' if max_engine_tests != 1 else ''} with the real engine. Estimated time: {estimate}."
-        )
-        left, right = st.columns(2)
-        should_run = False
-        with left:
-            should_run = st.button(
-                "Run quick size check" if quick_mode else "Run full size check",
-                key="step5_run_size_suggestion_check_v1",
-                use_container_width=True,
-            )
-        with right:
-            if st.button("Skip size check and finish", key="step5_skip_size_check_not_run_v1", use_container_width=True):
-                _skip_current_size_candidate(scope, "size check skipped", current_run_signature)
-        if not should_run:
-            return
-
-        with st.spinner("Testing universe-size candidates with the real engine..."):
-            payload = _run_size_search(run_map, max_engine_tests=max_engine_tests)
+        max_candidates = _suggestion_candidate_count(1)
+        estimate = _format_runtime_estimate(SIZE_SECONDS_PER_TEST * max_candidates)
+        label = f"{max_candidates} universe-size alternative" if max_candidates == 1 else f"{max_candidates} universe-size alternatives"
+        with st.spinner(f"Testing {label} ({estimate})..."):
+            payload = _run_size_search(run_map, max_engine_tests=max_candidates)
         st.session_state[SIZE_SUGGESTION_STATE_KEY] = payload
         st.session_state[SIZE_SUGGESTION_SCOPE_KEY] = str(payload.get("scope", scope))
         st.session_state[SIZE_SUGGESTION_TIMING_KEY] = _coerce_mapping(payload.get("timing_summary", {}))
@@ -1386,6 +1410,8 @@ def render_size_improvement(run_result: dict) -> None:
             st.info(f"No safe size candidates were available to test for this run. {error}")
         else:
             st.info("No safe size candidates were available to test for this run.")
+        if st.button("Finish with current universe size", key="step5_finish_size_no_candidates_v1", use_container_width=True):
+            _skip_current_size_candidate(scope, "no safe size candidates", current_run_signature)
         return
 
     baseline_size = _safe_int(payload.get("baseline_size", run_map.get("universe_size", st.session_state.get(UNIVERSE_SIZE, 25))), 25)
@@ -1406,8 +1432,8 @@ def render_size_improvement(run_result: dict) -> None:
     st.caption(
         f"Size-search window: current baseline {baseline_size} → {philosophy} guidance cap {cap_size} "
         f"(deployment hard cap {deployment_hard_cap}). "
-        f"Planned candidates: {coarse_label}. Demo speed mode may stop after the capped coarse tests; "
-        "full mode can add nearby local refinements. Baseline is not rerun."
+        f"Coarse candidates: {coarse_label}. If one coarse size looks promising, up to two local refinements are tested nearby. "
+        "Baseline is not rerun."
     )
 
     accepted_items = [dict(x) for x in evaluations if bool(_coerce_mapping(x).get("accepted", False))]
@@ -1427,17 +1453,49 @@ def render_size_improvement(run_result: dict) -> None:
             "The diagnostics table shows the tested coarse/refinement sizes. If a size cannot be materialised from the cached panel it is labelled Not testable rather than rejected."
         )
     elif size_was_skipped:
-        st.info("Current universe size kept for this run. The improvement flow is complete.")
+        st.warning("Universe size skipped: current universe size kept for this run. The improvement flow is complete.")
         if skipped_label:
             st.caption(f"Skipped size recommendation: {skipped_label}.")
     else:
         best_candidate = accepted_items[0]
-        st.success("Recommended universe size found. The best accepted candidate is shown below.")
         _render_recommended_candidate(best_candidate, perf, baseline_size)
-        st.caption(
-            "The diagnostics table shows every planned universe-size candidate. Only the best accepted candidate "
-            "is offered as the main action; rejected or unsupported sizes are shown for transparency."
-        )
+
+        action_label = str(best_candidate.get("label", "recommended size") or "recommended size")
+        left, right = st.columns(2)
+        with left:
+            if st.button("Apply recommended size", key="step5_apply_best_size_candidate_v1", use_container_width=True):
+                _apply_candidate(best_candidate)
+        with right:
+            if st.button("Keep current size and finish", key="step5_skip_best_size_candidate_v1", use_container_width=True):
+                _skip_current_size_candidate(scope, action_label, current_run_signature)
+
+        _render_continue_with_current_result_button(run_map, key="step5_size_continue_current_result_v1")
+
+        with st.expander("Why this candidate passed", expanded=False):
+            st.success("This candidate passed the universe-size acceptance gate.")
+            st.caption(
+                f"This keeps the current preset and technical engine config, starts from the current {baseline_size}-asset universe, "
+                f"and only changes the tested universe size."
+            )
+            gate_reason = str(best_candidate.get("gate_reason", "") or "")
+            if gate_reason:
+                st.caption(gate_reason)
+            target_size = _safe_int(best_candidate.get("universe_size"), 0)
+            st.caption(
+                f"baseline_size={int(baseline_size)} · tested_size={int(target_size)} · "
+                f"score_delta={_safe_float(best_candidate.get('score_delta'), 0.0):+.3f}"
+            )
+
+        with st.expander("Optimised universe assets", expanded=False):
+            assets = _asset_list(best_candidate.get("assets", []))
+            if assets:
+                preview = ", ".join(asset_display_label(x) for x in assets[:50])
+                if len(assets) > 50:
+                    preview += f" ... +{len(assets) - 50} more"
+                st.write(preview)
+            detail = build_universe_mix_detail(assets)
+            if isinstance(detail, pd.DataFrame) and not detail.empty:
+                st.dataframe(detail, use_container_width=True, hide_index=True)
 
     with st.expander("Universe size diagnostics", expanded=False):
         st.caption(
@@ -1449,16 +1507,7 @@ def render_size_improvement(run_result: dict) -> None:
             st.dataframe(table, use_container_width=True, hide_index=True)
 
     action_label = str(accepted_items[0].get("label", "recommended size") if accepted_items else "current size")
-    if accepted_items and not size_was_skipped:
-        best_candidate = accepted_items[0]
-        left, right = st.columns(2)
-        with left:
-            if st.button("Apply recommended size", key="step5_apply_best_size_candidate_v1", use_container_width=True):
-                _apply_candidate(best_candidate)
-        with right:
-            if st.button("Keep current size and finish", key="step5_skip_best_size_candidate_v1", use_container_width=True):
-                _skip_current_size_candidate(scope, action_label, current_run_signature)
-    elif not size_was_skipped:
+    if not accepted_items and not size_was_skipped:
         if st.button("Keep current size and finish", key="step5_keep_current_size_finish_v1", use_container_width=True):
             _skip_current_size_candidate(scope, action_label, current_run_signature)
 

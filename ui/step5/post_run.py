@@ -8,7 +8,13 @@ import streamlit.components.v1 as components
 import pandas as pd
 
 from ui.step5.run_panel import clear_retired_step5_state
-from ui.step5.preset_recommendations import render_preset_improvement
+from ui.step5.preset_recommendations import (
+    PRESET_APPLIED_LABEL_KEY,
+    PRESET_APPLIED_SIGNATURE_KEY,
+    PRESET_SKIPPED_LABEL_KEY,
+    PRESET_SKIPPED_SCOPE_KEY,
+    render_preset_improvement,
+)
 from ui.step5.auto_opt_recommendations import (
     AUTO_OPT_APPLIED_LABEL_KEY,
     AUTO_OPT_APPLIED_SIGNATURE_KEY,
@@ -47,92 +53,172 @@ from ui.step5.reliability_assessment import render_result_reliability_assessment
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
 PRESET_SUGGESTION_TIMING_KEY = "step5_preset_suggestion_timing_v1"
 STEP5_REAL_RUN_RESULT_ANCHOR_ID = "step5-real-run-result-anchor"
-STEP5_DEMO_SPEED_MODE_KEY = "step5_demo_speed_mode_v1"
+STEP5_IMPROVEMENT_CHECKS_ANCHOR_ID = "step5-improvement-checks-anchor"
 
 
+SUGGESTION_DEPTH_MODE_KEY = "step5_suggestion_testing_depth_mode_v1"
+SUGGESTION_DEPTH_COUNT_KEYS: dict[str, str] = {
+    "preset": "step5_suggestion_count_preset_v1",
+    "auto_opt": "step5_suggestion_count_auto_opt_v1",
+    "universe": "step5_suggestion_count_universe_v1",
+    "size": "step5_suggestion_count_size_v1",
+}
+SUGGESTION_DEPTH_PRESETS: dict[str, dict[str, int]] = {
+    "Fast": {"preset": 1, "auto_opt": 1, "universe": 2, "size": 1},
+    "Balanced": {"preset": 1, "auto_opt": 2, "universe": 4, "size": 1},
+    "Thorough": {"preset": 2, "auto_opt": 3, "universe": 6, "size": 2},
+}
+SUGGESTION_DEPTH_DEFAULT = "Balanced"
+SUGGESTION_SECONDS_PER_TEST: dict[str, float] = {
+    "preset": 30.0,
+    "auto_opt": 30.0,
+    "universe": 22.0,
+    "size": 30.0,
+}
 
-def _demo_speed_mode_enabled() -> bool:
-    """Return whether optional improvement checks should use a smaller candidate budget.
 
-    Demo speed mode is ON by default because Streamlit Cloud runs are user-facing
-    and each candidate reruns the real engine. Users can disable it from the
-    Step 5 improvement area when they intentionally want fuller diagnostics.
-    """
-    if STEP5_DEMO_SPEED_MODE_KEY not in st.session_state:
-        st.session_state[STEP5_DEMO_SPEED_MODE_KEY] = True
-    return bool(st.session_state.get(STEP5_DEMO_SPEED_MODE_KEY, True))
+def _clamp_suggestion_count(value: Any, *, default: int = 1, low: int = 1, high: int = 8) -> int:
+    try:
+        raw = int(value)
+    except Exception:
+        raw = int(default)
+    return int(max(low, min(high, raw)))
 
 
-def _render_improvement_mode_control() -> None:
-    """Render the global mode/gating note for Step 5 optional suggestions."""
-    if STEP5_DEMO_SPEED_MODE_KEY not in st.session_state:
-        st.session_state[STEP5_DEMO_SPEED_MODE_KEY] = True
+def _format_runtime_estimate(seconds: float) -> str:
+    """Human-sized runtime estimate for suggestion-test spinners and captions."""
+    try:
+        seconds = float(seconds)
+    except Exception:
+        seconds = 30.0
+    if seconds <= 40:
+        return "~30s"
+    if seconds <= 70:
+        return "~1 min"
+    if seconds <= 105:
+        return "~90s"
+    if seconds <= 150:
+        return "~2 min"
+    minutes = seconds / 60.0
+    if minutes < 10:
+        rounded = round(minutes * 2.0) / 2.0
+        return f"~{rounded:g} min"
+    return f"~{round(minutes):.0f} min"
 
-    st.markdown("## 4. Improve this setup (optional)")
-    st.info(
-        "Optional improvement checks rerun candidate strategies with the real engine. "
-        "They are useful for audit/comparison, but they are not required before Step 6 projection."
-    )
-    st.checkbox(
-        "Demo speed mode — test fewer candidates for a faster hosted demo",
-        key=STEP5_DEMO_SPEED_MODE_KEY,
-        help=(
-            "Recommended for Streamlit Cloud. ON uses a smaller candidate budget; "
-            "OFF runs the fuller diagnostic search and may take several minutes."
-        ),
-    )
-    if _demo_speed_mode_enabled():
+
+def _current_suggestion_counts() -> dict[str, int]:
+    defaults = SUGGESTION_DEPTH_PRESETS[SUGGESTION_DEPTH_DEFAULT]
+    out: dict[str, int] = {}
+    for phase, key in SUGGESTION_DEPTH_COUNT_KEYS.items():
+        out[phase] = _clamp_suggestion_count(st.session_state.get(key, defaults.get(phase, 1)), default=defaults.get(phase, 1))
+    return out
+
+
+def _apply_suggestion_depth_preset(mode: str) -> dict[str, int]:
+    if mode not in SUGGESTION_DEPTH_PRESETS:
+        return _current_suggestion_counts()
+    counts = dict(SUGGESTION_DEPTH_PRESETS[mode])
+    for phase, value in counts.items():
+        st.session_state[SUGGESTION_DEPTH_COUNT_KEYS[phase]] = int(value)
+    return counts
+
+
+def _render_suggestion_depth_controls() -> None:
+    """Optional runtime/coverage control for the sequential suggestion tests."""
+    defaults = SUGGESTION_DEPTH_PRESETS[SUGGESTION_DEPTH_DEFAULT]
+    if SUGGESTION_DEPTH_MODE_KEY not in st.session_state:
+        st.session_state[SUGGESTION_DEPTH_MODE_KEY] = SUGGESTION_DEPTH_DEFAULT
+    for phase, key in SUGGESTION_DEPTH_COUNT_KEYS.items():
+        if key not in st.session_state:
+            st.session_state[key] = int(defaults.get(phase, 1))
+
+    with st.expander("Suggestion testing depth", expanded=False):
+        st.caption("Higher depth tests more alternatives, but each extra candidate adds real engine runtime.")
+        mode_options = ["Fast", "Balanced", "Thorough", "Custom"]
+        current_mode = str(st.session_state.get(SUGGESTION_DEPTH_MODE_KEY, SUGGESTION_DEPTH_DEFAULT) or SUGGESTION_DEPTH_DEFAULT)
+        if current_mode not in mode_options:
+            current_mode = SUGGESTION_DEPTH_DEFAULT
+            st.session_state[SUGGESTION_DEPTH_MODE_KEY] = current_mode
+        mode = st.selectbox(
+            "Testing depth",
+            options=mode_options,
+            index=mode_options.index(current_mode),
+            key=SUGGESTION_DEPTH_MODE_KEY,
+            help="Controls how many rerun-tested alternatives are evaluated in each optional suggestion phase.",
+        )
+
+        if mode in SUGGESTION_DEPTH_PRESETS:
+            counts = _apply_suggestion_depth_preset(mode)
+            st.caption(
+                f"{mode}: "
+                f"{counts['preset']} preset · {counts['auto_opt']} tuning · "
+                f"{counts['universe']} universe-mix · {counts['size']} size test(s)."
+            )
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.number_input(
+                    "Preset",
+                    min_value=1,
+                    max_value=4,
+                    step=1,
+                    key=SUGGESTION_DEPTH_COUNT_KEYS["preset"],
+                    help="Strategy preset alternatives to rerun-test.",
+                )
+            with c2:
+                st.number_input(
+                    "Engine tuning",
+                    min_value=1,
+                    max_value=6,
+                    step=1,
+                    key=SUGGESTION_DEPTH_COUNT_KEYS["auto_opt"],
+                    help="Technical tuning alternatives to rerun-test.",
+                )
+            with c3:
+                st.number_input(
+                    "Universe mix",
+                    min_value=1,
+                    max_value=8,
+                    step=1,
+                    key=SUGGESTION_DEPTH_COUNT_KEYS["universe"],
+                    help="Same-size universe compositions to rerun-test.",
+                )
+            with c4:
+                st.number_input(
+                    "Universe size",
+                    min_value=1,
+                    max_value=6,
+                    step=1,
+                    key=SUGGESTION_DEPTH_COUNT_KEYS["size"],
+                    help="Universe-size alternatives to rerun-test.",
+                )
+            counts = _current_suggestion_counts()
+
+        estimates = {
+            phase: counts[phase] * SUGGESTION_SECONDS_PER_TEST.get(phase, 30.0)
+            for phase in SUGGESTION_DEPTH_COUNT_KEYS
+        }
+        total_estimate = sum(estimates.values())
         st.caption(
-            "Current mode: quick checks. Preset/engine tuning test 1 candidate each; "
-            "universe composition keeps the full 4-candidate comparison; size remains capped for speed. Use full mode only for deeper diagnostics."
+            "Estimated extra runtime if all phases run: "
+            f"{_format_runtime_estimate(total_estimate)} "
+            f"({counts['preset']}/{counts['auto_opt']}/{counts['universe']}/{counts['size']} tests)."
         )
-    else:
-        st.warning(
-            "Full diagnostic mode is enabled. The optional suggestion flow can take several minutes on Streamlit Cloud.",
-            icon="⚠️",
+        st.caption(
+            "The estimate is approximate and depends on the deployed environment, cache state and panel size. "
+            "Timings are recorded later in Advanced run diagnostics and timings."
         )
 
 
-def _auto_opt_has_any_candidate_payload() -> bool:
-    payload = _coerce_mapping(st.session_state.get(AUTO_OPT_SUGGESTION_STATE_KEY, {}))
-    return bool(list(payload.get("evaluations", []) or []))
+def _maybe_scroll_to_improvement_checks() -> None:
+    """Consume the legacy scroll flag without moving the viewport.
 
-
-def _render_universe_waiting_for_engine_tuning_not_run() -> None:
-    st.markdown("### Universe composition suggestion")
-    st.info(
-        "Universe composition is waiting for the engine-tuning decision. "
-        "Run or skip the engine-tuning check first so the sequence stays auditable."
-    )
-
-
-def _maybe_scroll_to_real_run_result() -> None:
-    """Scroll back to the real result after applying a rerun-tested preset.
-
-    Streamlit has no native scroll-to-anchor API, so this tiny hidden component is
-    intentionally limited to one job: move the viewport back to section 3 after
-    an Apply action promotes a candidate result.
+    The Strategy Engine surface is now compact enough that forced scroll jumps
+    after Apply/Skip/Test actions feel disorienting. Older modules may still set
+    the flag, so this function keeps compatibility while making the UI stable.
     """
-    if not bool(st.session_state.pop(STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY, False)):
-        return
-
-    components.html(
-        f"""
-        <script>
-        const anchorId = {STEP5_REAL_RUN_RESULT_ANCHOR_ID!r};
-        function scrollToRealRunResult() {{
-            const doc = window.parent.document;
-            const el = doc.getElementById(anchorId);
-            if (el) {{
-                el.scrollIntoView({{ behavior: "smooth", block: "start" }});
-            }}
-        }}
-        setTimeout(scrollToRealRunResult, 250);
-        setTimeout(scrollToRealRunResult, 800);
-        </script>
-        """,
-        height=0,
-    )
+    st.session_state.pop(STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY, None)
+    return None
 
 
 def _coerce_mapping(value: Any) -> dict:
@@ -228,8 +314,8 @@ def _render_feature_mu_block(run_map: dict) -> None:
             st.write("No family summary available.")
 
     if selected_cols:
-        st.markdown("**Selected feature_mu columns**")
-        st.write(selected_cols)
+        with st.expander("Selected feature_mu columns", expanded=False):
+            st.write(selected_cols)
 
 
 
@@ -285,15 +371,10 @@ def _render_engine_timing_block(run_map: dict) -> None:
     if not engine_timing:
         return
 
-    st.markdown("### Engine timing diagnostics")
+    st.markdown("### Engine timing summary")
 
     total_engine = _safe_float(engine_timing.get("total_engine", 0.0), 0.0)
     walk_forward = _safe_float(engine_timing.get("walk_forward_loop", 0.0), 0.0)
-    cov_sigma = _safe_float(engine_timing.get("covariance_sigma_total", 0.0), 0.0)
-    mu_sigma = _safe_float(engine_timing.get("mu_sigma_total", 0.0), 0.0)
-    weight_build = _safe_float(engine_timing.get("weight_build_total", 0.0), 0.0)
-    signal_model = _safe_float(engine_timing.get("signal_model_total", 0.0), 0.0)
-    feature_mu = _safe_float(engine_timing.get("feature_mu_total", 0.0), 0.0)
     probabilistic = _safe_float(engine_timing.get("probabilistic_total", 0.0), 0.0)
     n_oos_dates = _safe_int(engine_timing.get("n_oos_dates", 0), 0)
     n_loop_iterations = _safe_int(engine_timing.get("n_loop_iterations", 0), 0)
@@ -304,24 +385,11 @@ def _render_engine_timing_block(run_map: dict) -> None:
     with c2:
         st.metric("Walk-forward", f"{walk_forward:.2f}s")
     with c3:
-        st.metric("Cov/Sigma", f"{cov_sigma:.2f}s")
-    with c4:
-        st.metric("Mu/Sigma", f"{mu_sigma:.2f}s")
-
-    c5, c6, c7, c8 = st.columns(4)
-    with c5:
-        st.metric("Weight build", f"{weight_build:.2f}s")
-    with c6:
-        st.metric("Signal model", f"{signal_model:.2f}s")
-    with c7:
-        st.metric("Feature_mu", f"{feature_mu:.2f}s")
-    with c8:
         st.metric("Probabilistic", f"{probabilistic:.2f}s")
+    with c4:
+        st.metric("OOS months", int(n_oos_dates))
 
-    st.caption(
-        f"n_oos_dates={n_oos_dates} · "
-        f"n_loop_iterations={n_loop_iterations}"
-    )
+    st.caption(f"Loop iterations={n_loop_iterations}. Timing is diagnostic only and can vary by environment.")
 
     detail_rows = []
     preferred_order = [
@@ -348,11 +416,8 @@ def _render_engine_timing_block(run_map: dict) -> None:
                 detail_rows.append({"component": key, "seconds": float(value)})
 
     if detail_rows:
-        st.markdown("**Engine timing breakdown**")
-        st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
-
-
-
+        with st.expander("Engine timing breakdown", expanded=False):
+            st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
 
 
 def _render_preset_suggestion_timing_block() -> None:
@@ -377,7 +442,7 @@ def _render_preset_suggestion_timing_block() -> None:
         st.metric("Passed gate", int(accepted_count))
 
     st.caption(
-        "This is the extra time used by the automatic Step 5 preset suggestion test. "
+        "This is the extra time used by the automatic strategy-preset suggestion test. "
         "It is separate from the main portfolio engine run shown above."
     )
 
@@ -394,8 +459,8 @@ def _render_preset_suggestion_timing_block() -> None:
                 }
             )
         if clean_rows:
-            st.markdown("**Preset suggestion timing breakdown**")
-            st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+            with st.expander("Preset suggestion timing breakdown", expanded=False):
+                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
 
 
 def _render_auto_opt_suggestion_timing_block() -> None:
@@ -420,7 +485,7 @@ def _render_auto_opt_suggestion_timing_block() -> None:
         st.metric("Passed gate", int(accepted_count))
 
     st.caption(
-        "This is the extra time used by the automatic Step 5 engine tuning suggestion test. "
+        "This is the extra time used by the automatic engine-tuning suggestion test. "
         "It is separate from the main portfolio engine run and the preset suggestion test."
     )
 
@@ -437,8 +502,8 @@ def _render_auto_opt_suggestion_timing_block() -> None:
                 }
             )
         if clean_rows:
-            st.markdown("**Engine tuning timing breakdown**")
-            st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+            with st.expander("Engine tuning timing breakdown", expanded=False):
+                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
 
 
 def _clear_auto_opt_suggestion_state() -> None:
@@ -471,38 +536,36 @@ def _preset_blocks_engine_tuning(preset_flow_state: Any) -> bool:
 
 
 def _auto_opt_applied_for_current_run(run_map: dict) -> bool:
-    current_run_signature = str(_coerce_mapping(run_map).get("run_signature", "") or "")
-    applied_signature = str(st.session_state.get(AUTO_OPT_APPLIED_SIGNATURE_KEY, "") or "")
-    return bool(current_run_signature and applied_signature and current_run_signature == applied_signature)
+    # Earlier phases can promote a new Step 5 run result, which changes the run
+    # signature. Keep the wizard state tied to the stored decision, not only to
+    # the latest promoted signature; otherwise completed phases jump back to
+    # Active/Locked after a later Apply action.
+    return bool(
+        str(st.session_state.get(AUTO_OPT_APPLIED_LABEL_KEY, "") or "")
+        or str(st.session_state.get(AUTO_OPT_APPLIED_SIGNATURE_KEY, "") or "")
+    )
 
 
 def _universe_applied_for_current_run(run_map: dict) -> bool:
-    current_run_signature = str(_coerce_mapping(run_map).get("run_signature", "") or "")
-    applied_signature = str(st.session_state.get(UNIVERSE_APPLIED_SIGNATURE_KEY, "") or "")
-    return bool(current_run_signature and applied_signature and current_run_signature == applied_signature)
+    return bool(
+        str(st.session_state.get(UNIVERSE_APPLIED_LABEL_KEY, "") or "")
+        or str(st.session_state.get(UNIVERSE_APPLIED_SIGNATURE_KEY, "") or "")
+    )
 
 
 def _auto_opt_skipped_for_current_run(run_map: dict) -> bool:
-    run_map = _coerce_mapping(run_map)
-    current_run_signature = str(run_map.get("run_signature", "") or "")
-    skipped_run_signature = str(st.session_state.get(AUTO_OPT_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
-    skipped_scope = str(st.session_state.get(AUTO_OPT_SKIPPED_SCOPE_KEY, "") or "")
     return bool(
-        skipped_scope
-        and current_run_signature
-        and (not skipped_run_signature or skipped_run_signature == current_run_signature)
+        str(st.session_state.get(AUTO_OPT_SKIPPED_SCOPE_KEY, "") or "")
+        or str(st.session_state.get(AUTO_OPT_SKIPPED_LABEL_KEY, "") or "")
+        or str(st.session_state.get(AUTO_OPT_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
     )
 
 
 def _universe_skipped_for_current_run(run_map: dict) -> bool:
-    run_map = _coerce_mapping(run_map)
-    current_run_signature = str(run_map.get("run_signature", "") or "")
-    skipped_run_signature = str(st.session_state.get(UNIVERSE_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
-    skipped_scope = str(st.session_state.get(UNIVERSE_SKIPPED_SCOPE_KEY, "") or "")
     return bool(
-        skipped_scope
-        and current_run_signature
-        and (not skipped_run_signature or skipped_run_signature == current_run_signature)
+        str(st.session_state.get(UNIVERSE_SKIPPED_SCOPE_KEY, "") or "")
+        or str(st.session_state.get(UNIVERSE_SKIPPED_LABEL_KEY, "") or "")
+        or str(st.session_state.get(UNIVERSE_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
     )
 
 
@@ -511,27 +574,195 @@ def _universe_decision_completed_for_current_run(run_map: dict) -> bool:
 
 
 def _size_applied_for_current_run(run_map: dict) -> bool:
-    run_map = _coerce_mapping(run_map)
-    current_run_signature = str(run_map.get("run_signature", "") or "")
-    applied_signature = str(st.session_state.get(SIZE_APPLIED_SIGNATURE_KEY, "") or "")
-    return bool(current_run_signature and applied_signature and current_run_signature == applied_signature)
+    return bool(
+        str(st.session_state.get(SIZE_APPLIED_LABEL_KEY, "") or "")
+        or str(st.session_state.get(SIZE_APPLIED_SIGNATURE_KEY, "") or "")
+    )
 
 
 def _size_skipped_for_current_run(run_map: dict) -> bool:
-    run_map = _coerce_mapping(run_map)
-    current_run_signature = str(run_map.get("run_signature", "") or "")
-    skipped_run_signature = str(st.session_state.get(SIZE_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
-    skipped_scope = str(st.session_state.get(SIZE_SKIPPED_SCOPE_KEY, "") or "")
     return bool(
-        skipped_scope
-        and current_run_signature
-        and (not skipped_run_signature or skipped_run_signature == current_run_signature)
+        str(st.session_state.get(SIZE_SKIPPED_SCOPE_KEY, "") or "")
+        or str(st.session_state.get(SIZE_SKIPPED_LABEL_KEY, "") or "")
+        or str(st.session_state.get(SIZE_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
     )
 
 
 def _size_decision_completed_for_current_run(run_map: dict) -> bool:
     return bool(_size_applied_for_current_run(run_map) or _size_skipped_for_current_run(run_map))
 
+
+def _preset_applied_for_current_run(run_map: dict) -> bool:
+    return bool(
+        str(st.session_state.get(PRESET_APPLIED_LABEL_KEY, "") or "")
+        or str(st.session_state.get(PRESET_APPLIED_SIGNATURE_KEY, "") or "")
+    )
+
+
+def _preset_skipped_for_current_run(run_map: dict) -> bool:
+    return bool(
+        str(st.session_state.get(PRESET_SKIPPED_SCOPE_KEY, "") or "")
+        or str(st.session_state.get(PRESET_SKIPPED_LABEL_KEY, "") or "")
+    )
+
+
+def _preset_decision_completed_for_current_run(run_map: dict) -> bool:
+    return bool(_preset_applied_for_current_run(run_map) or _preset_skipped_for_current_run(run_map))
+
+
+def _phase_state(*, applied: bool, skipped: bool, active: bool) -> tuple[str, str]:
+    """Resolve the visual state shown in the Step 5 improvement rail."""
+    if applied:
+        return "applied", "Applied"
+    if skipped:
+        return "skipped", "Skipped"
+    if active:
+        return "active", "Active"
+    return "locked", "Locked"
+
+
+def _render_improvement_phase_row(run_map: dict) -> None:
+    """Render the sequential improvement flow as a compact phase rail.
+
+    Applied phases are green, skipped phases are amber, active phases are blue,
+    and locked phases are faded. This avoids pretending that a skipped phase was
+    successfully optimised while still showing that the wizard can continue.
+    """
+    preset_applied = _preset_applied_for_current_run(run_map)
+    preset_skipped = _preset_skipped_for_current_run(run_map)
+
+    tuning_applied = _auto_opt_applied_for_current_run(run_map)
+    tuning_skipped = _auto_opt_skipped_for_current_run(run_map)
+
+    universe_applied = _universe_applied_for_current_run(run_map)
+    universe_skipped = _universe_skipped_for_current_run(run_map)
+
+    size_applied = _size_applied_for_current_run(run_map)
+    size_skipped = _size_skipped_for_current_run(run_map)
+
+    # Defensive dependency resolution: if a later phase has already been resolved,
+    # earlier phases must not appear active/locked even if an old session-state key
+    # was cleared by a rerun. This keeps the rail coherent after Apply/Skip actions.
+    size_done = bool(size_applied or size_skipped)
+    universe_done = bool(universe_applied or universe_skipped or size_done)
+    tuning_done = bool(tuning_applied or tuning_skipped or universe_done)
+    preset_done = bool(preset_applied or preset_skipped or tuning_done)
+
+    effective_preset_applied = bool(preset_applied or (preset_done and not preset_skipped))
+    effective_tuning_applied = bool(tuning_applied or (tuning_done and not tuning_skipped))
+    effective_universe_applied = bool(universe_applied or (universe_done and not universe_skipped))
+
+    phase_specs = [
+        {"num": "1", "label": "Strategy preset", "caption": "Template/style", "applied": effective_preset_applied, "skipped": preset_skipped, "active": not preset_done},
+        {"num": "2", "label": "Engine tuning", "caption": "Technical knobs", "applied": effective_tuning_applied, "skipped": tuning_skipped, "active": preset_done and not tuning_done},
+        {"num": "3", "label": "Universe mix", "caption": "Same-size assets", "applied": effective_universe_applied, "skipped": universe_skipped, "active": tuning_done and not universe_done},
+        {"num": "4", "label": "Universe size", "caption": "Basket breadth", "applied": size_applied, "skipped": size_skipped, "active": universe_done and not size_done},
+    ]
+
+    phases = []
+    for spec in phase_specs:
+        state, status = _phase_state(applied=bool(spec["applied"]), skipped=bool(spec["skipped"]), active=bool(spec["active"]))
+        phases.append({**spec, "state": state, "status": status})
+
+    def _card_html(phase: dict) -> str:
+        state = str(phase.get("state", "locked"))
+        aria_disabled = "true" if state == "locked" else "false"
+        return (
+            f'<div class="lb-phase-card lb-phase-{state}" aria-disabled="{aria_disabled}">'
+            f'<div class="lb-phase-topline">'
+            f'<span>Phase {phase.get("num", "")}</span>'
+            f'<span class="lb-phase-status">{phase.get("status", "")}</span>'
+            f'</div>'
+            f'<div class="lb-phase-title">{phase.get("label", "")}</div>'
+            f'<div class="lb-phase-caption">{phase.get("caption", "")}</div>'
+            f'</div>'
+        )
+
+    cards = "".join(_card_html(phase) for phase in phases)
+    st.markdown(
+        f"""
+        <style>
+            .lb-phase-rail {{
+                display: grid;
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                gap: 0.85rem;
+                margin: 0.6rem 0 1.25rem 0;
+            }}
+            .lb-phase-card {{
+                border: 1px solid rgba(49, 51, 63, 0.16);
+                border-radius: 0.75rem;
+                padding: 0.95rem 1rem;
+                min-height: 7.25rem;
+                background: #ffffff;
+                box-shadow: 0 1px 2px rgba(49, 51, 63, 0.04);
+            }}
+            .lb-phase-topline {{
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.5rem;
+                color: rgba(49, 51, 63, 0.62);
+                font-size: 0.86rem;
+                margin-bottom: 0.75rem;
+            }}
+            .lb-phase-status {{
+                border-radius: 999px;
+                padding: 0.18rem 0.55rem;
+                font-size: 0.76rem;
+                background: rgba(49, 51, 63, 0.06);
+                white-space: nowrap;
+            }}
+            .lb-phase-title {{
+                font-size: 1.05rem;
+                font-weight: 700;
+                color: rgb(49, 51, 63);
+                margin-bottom: 0.65rem;
+            }}
+            .lb-phase-caption {{
+                color: rgba(49, 51, 63, 0.60);
+                font-size: 0.88rem;
+                line-height: 1.35;
+            }}
+            .lb-phase-active {{
+                border-color: rgba(49, 101, 195, 0.55);
+                background: rgba(236, 242, 255, 0.95);
+            }}
+            .lb-phase-active .lb-phase-status {{
+                color: rgb(45, 86, 166);
+                background: rgba(49, 101, 195, 0.12);
+                font-weight: 700;
+            }}
+            .lb-phase-applied {{
+                border-color: rgba(65, 135, 54, 0.28);
+                background: rgba(240, 249, 238, 0.92);
+            }}
+            .lb-phase-applied .lb-phase-status {{
+                color: rgb(60, 122, 48);
+                background: rgba(65, 135, 54, 0.12);
+                font-weight: 700;
+            }}
+            .lb-phase-skipped {{
+                border-color: rgba(153, 111, 16, 0.34);
+                background: rgba(255, 248, 224, 0.82);
+            }}
+            .lb-phase-skipped .lb-phase-status {{
+                color: rgb(125, 88, 8);
+                background: rgba(153, 111, 16, 0.13);
+                font-weight: 700;
+            }}
+            .lb-phase-locked {{
+                opacity: 0.48;
+                background: rgba(249, 250, 252, 0.72);
+                box-shadow: none;
+            }}
+            .lb-phase-locked .lb-phase-status {{ color: rgba(49, 51, 63, 0.58); }}
+            @media (max-width: 800px) {{ .lb-phase-rail {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
+            @media (max-width: 520px) {{ .lb-phase-rail {{ grid-template-columns: 1fr; }} }}
+        </style>
+        <div class="lb-phase-rail">{cards}</div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 def _auto_opt_blocks_universe(run_map: dict) -> bool:
     """Return True when phase 2 has a pending accepted candidate.
@@ -550,15 +781,9 @@ def _auto_opt_blocks_universe(run_map: dict) -> bool:
 
 
 def _render_universe_waiting_for_engine_tuning() -> None:
+    """Keep later locked phases quiet; the phase rail already explains the sequence."""
     _clear_universe_suggestion_state()
-    st.markdown("### Universe composition suggestion")
-    st.info(
-        "Universe composition becomes available after you apply the engine tuning suggestion, or after engine tuning converges with no accepted candidate."
-    )
-    st.caption(
-        "This avoids testing asset-composition changes on top of technical settings that may still be replaced in the previous phase."
-    )
-
+    return
 
 def _render_universe_suggestion_timing_block() -> None:
     timing = _coerce_mapping(st.session_state.get(UNIVERSE_SUGGESTION_TIMING_KEY, {}))
@@ -581,8 +806,8 @@ def _render_universe_suggestion_timing_block() -> None:
         st.metric("Passed gate", int(accepted_count))
 
     st.caption(
-        "This is the extra time used by the automatic Step 5 universe-composition suggestion. "
-        "It tests only a small number of same-size asset compositions from the existing Step 4 data panel."
+        "This is the extra time used by the automatic universe-mix suggestion. "
+        "It tests only a small number of same-size asset compositions from the selected market-data panel."
     )
 
     candidate_rows = timing.get("candidate_seconds", [])
@@ -598,8 +823,8 @@ def _render_universe_suggestion_timing_block() -> None:
                 }
             )
         if clean_rows:
-            st.markdown("**Universe suggestion timing breakdown**")
-            st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+            with st.expander("Universe suggestion timing breakdown", expanded=False):
+                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
 
 
 def _render_size_suggestion_timing_block() -> None:
@@ -626,8 +851,8 @@ def _render_size_suggestion_timing_block() -> None:
         st.metric("Passed gate", int(accepted_count))
 
     st.caption(
-        "This is the extra time used by the automatic Step 5 universe-size suggestion. "
-        "It tests coarse/refinement sizes after the universe-composition decision has been resolved."
+        "This is the extra time used by the automatic universe-size suggestion. "
+        "It tests coarse/refinement sizes after the universe-mix decision has been resolved."
     )
 
     candidate_rows = timing.get("candidate_seconds", [])
@@ -643,12 +868,12 @@ def _render_size_suggestion_timing_block() -> None:
                 }
             )
         if clean_rows:
-            st.markdown("**Universe size suggestion timing breakdown**")
-            st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+            with st.expander("Universe size suggestion timing breakdown", expanded=False):
+                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
 
 
 def _render_completed_improvement_timing_summary() -> None:
-    """Keep historical suggestion timing visible after Apply without re-running tests."""
+    """Keep historical suggestion timing available without making it part of the main page."""
     preset_timing = _coerce_mapping(st.session_state.get(PRESET_SUGGESTION_TIMING_KEY, {}))
     tuning_timing = _coerce_mapping(st.session_state.get(AUTO_OPT_SUGGESTION_TIMING_KEY, {}))
     universe_timing = _coerce_mapping(st.session_state.get(UNIVERSE_SUGGESTION_TIMING_KEY, {}))
@@ -662,105 +887,118 @@ def _render_completed_improvement_timing_summary() -> None:
     if total <= 0.0:
         return
 
-    st.markdown("### Completed improvement flow timing")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        st.metric("Preset test", f"{preset_total:.2f}s" if preset_total > 0 else "—")
-    with c2:
-        st.metric("Engine tuning test", f"{tuning_total:.2f}s" if tuning_total > 0 else "—")
-    with c3:
-        st.metric("Universe test", f"{universe_total:.2f}s" if universe_total > 0 else "—")
-    with c4:
-        st.metric("Size test", f"{size_total:.2f}s" if size_total > 0 else "—")
-    with c5:
-        st.metric("Total overhead", f"{total:.2f}s")
+    with st.expander("Completed suggestion timing diagnostics", expanded=False):
+        st.caption(
+            "Historical timing only: these suggestion tests were not re-run after Apply; "
+            "the current result was promoted from the previously tested candidate."
+        )
 
-    preset_candidates = _safe_int(preset_timing.get("candidate_count", 0), 0)
-    preset_accepted = _safe_int(preset_timing.get("accepted_count", 0), 0)
-    tuning_candidates = _safe_int(tuning_timing.get("candidate_count", 0), 0)
-    tuning_accepted = _safe_int(tuning_timing.get("accepted_count", 0), 0)
-    universe_candidates = _safe_int(universe_timing.get("candidate_count", 0), 0)
-    universe_accepted = _safe_int(universe_timing.get("accepted_count", 0), 0)
-    size_candidates = _safe_int(size_timing.get("candidate_count", 0), 0)
-    size_accepted = _safe_int(size_timing.get("accepted_count", 0), 0)
-    st.caption(
-        "Historical timing only: these suggestion tests were not re-run after Apply; "
-        "the current result was promoted from the previously tested candidate. "
-        f"Preset candidates={preset_candidates}, passed_gate={preset_accepted} · "
-        f"Engine tuning candidates={tuning_candidates}, passed_gate={tuning_accepted} · "
-        f"Universe candidates={universe_candidates}, passed_gate={universe_accepted} · "
-        f"Size candidates={size_candidates}, passed_gate={size_accepted}. "
-        "Only the highest-scoring passed-gate candidate was promoted."
-    )
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            st.metric("Preset test", f"{preset_total:.2f}s" if preset_total > 0 else "—")
+        with c2:
+            st.metric("Engine tuning test", f"{tuning_total:.2f}s" if tuning_total > 0 else "—")
+        with c3:
+            st.metric("Universe test", f"{universe_total:.2f}s" if universe_total > 0 else "—")
+        with c4:
+            st.metric("Size test", f"{size_total:.2f}s" if size_total > 0 else "—")
+        with c5:
+            st.metric("Total overhead", f"{total:.2f}s")
 
-    rows = []
-    for phase_name, timing in [
-        ("Preset suggestion", preset_timing),
-        ("Engine tuning", tuning_timing),
-        ("Universe composition", universe_timing),
-        ("Universe size", size_timing),
-    ]:
-        candidate_rows = timing.get("candidate_seconds", [])
-        if not isinstance(candidate_rows, list):
-            continue
-        for row in candidate_rows:
-            row_map = _coerce_mapping(row)
-            rows.append(
-                {
-                    "phase": phase_name,
-                    "candidate": str(row_map.get("candidate", "Candidate") or "Candidate"),
-                    "status": _display_candidate_status(row_map.get("status", "")),
-                    "seconds": _safe_float(row_map.get("seconds", 0.0), 0.0),
-                }
-            )
+        preset_candidates = _safe_int(preset_timing.get("candidate_count", 0), 0)
+        preset_accepted = _safe_int(preset_timing.get("accepted_count", 0), 0)
+        tuning_candidates = _safe_int(tuning_timing.get("candidate_count", 0), 0)
+        tuning_accepted = _safe_int(tuning_timing.get("accepted_count", 0), 0)
+        universe_candidates = _safe_int(universe_timing.get("candidate_count", 0), 0)
+        universe_accepted = _safe_int(universe_timing.get("accepted_count", 0), 0)
+        size_candidates = _safe_int(size_timing.get("candidate_count", 0), 0)
+        size_accepted = _safe_int(size_timing.get("accepted_count", 0), 0)
+        st.caption(
+            f"Preset candidates={preset_candidates}, passed_gate={preset_accepted} · "
+            f"Engine tuning candidates={tuning_candidates}, passed_gate={tuning_accepted} · "
+            f"Universe candidates={universe_candidates}, passed_gate={universe_accepted} · "
+            f"Size candidates={size_candidates}, passed_gate={size_accepted}. "
+            "Only the highest-scoring passed-gate candidate was promoted."
+        )
 
-    if rows:
-        st.markdown("**Completed suggestion timing breakdown**")
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        rows = []
+        for phase_name, timing in [
+            ("Preset suggestion", preset_timing),
+            ("Engine tuning", tuning_timing),
+            ("Universe composition", universe_timing),
+            ("Universe size", size_timing),
+        ]:
+            candidate_rows = timing.get("candidate_seconds", [])
+            if not isinstance(candidate_rows, list):
+                continue
+            for row in candidate_rows:
+                row_map = _coerce_mapping(row)
+                rows.append(
+                    {
+                        "phase": phase_name,
+                        "candidate": str(row_map.get("candidate", "Candidate") or "Candidate"),
+                        "status": _display_candidate_status(row_map.get("status", "")),
+                        "seconds": _safe_float(row_map.get("seconds", 0.0), 0.0),
+                    }
+                )
 
+        if rows:
+            st.markdown("**Candidate timing breakdown**")
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 def _render_completed_improvement_flow(run_map: dict) -> None:
+    """Compact terminal state for the improvement wizard."""
     size_applied = _size_applied_for_current_run(run_map)
     size_skipped = _size_skipped_for_current_run(run_map)
-    universe_applied = _universe_applied_for_current_run(run_map)
-    universe_skipped = _universe_skipped_for_current_run(run_map)
+
     if size_applied:
         label = str(st.session_state.get(SIZE_APPLIED_LABEL_KEY, "") or "the accepted universe size suggestion")
-        message = f"Improvement flow completed: {label}. The rerun-tested candidate is now the current Step 5 result."
+        st.success(f"Improvement flow completed: {label}. The rerun-tested candidate is now the current strategy engine result.")
     elif size_skipped:
         label = str(st.session_state.get(SIZE_SKIPPED_LABEL_KEY, "") or "the recommended universe size")
-        message = f"Improvement flow completed: current universe size kept. Skipped recommendation: {label}."
-    elif universe_applied:
-        label = str(st.session_state.get(UNIVERSE_APPLIED_LABEL_KEY, "") or "the accepted universe composition suggestion")
-        message = f"Universe composition resolved: {label}. Universe size can now be tested for this run."
-    elif universe_skipped:
-        label = str(st.session_state.get(UNIVERSE_SKIPPED_LABEL_KEY, "") or "the recommended universe composition")
-        message = f"Universe composition resolved: current universe kept. Skipped recommendation: {label}. Universe size can now be tested for this run."
+        st.warning(f"Universe size skipped: current universe size kept. Skipped recommendation: {label}.")
     else:
-        tuning_label = str(st.session_state.get(AUTO_OPT_APPLIED_LABEL_KEY, "") or "the accepted improvement suggestion")
-        message = f"Improvement flow completed: {tuning_label}. The rerun-tested candidate is now the current Step 5 result."
+        st.info("Improvement flow completed for this run.")
 
-    _render_improvement_mode_control()
-    st.success(message)
     st.caption(
-        "Preset, engine-tuning, universe-composition, and universe-size tests are kept sequential to avoid mixing candidate results. "
-        "Change the strategy setup, technical controls, Step 4 universe, or run a new baseline if you want to start a fresh improvement cycle."
+        "Change the strategy setup, technical controls, selected universe, or run a new baseline if you want to start a fresh improvement cycle."
     )
     _render_completed_improvement_timing_summary()
 
 
+def _render_resolved_phase_history(run_map: dict) -> None:
+    """Show completed improvement decisions once, without re-rendering old phase bodies."""
+    decisions: list[str] = []
+
+    if _preset_applied_for_current_run(run_map):
+        label = str(st.session_state.get(PRESET_APPLIED_LABEL_KEY, "") or "preset improvement")
+        decisions.append(f"Preset applied: {label}")
+    elif _preset_skipped_for_current_run(run_map):
+        label = str(st.session_state.get(PRESET_SKIPPED_LABEL_KEY, "") or "current preset kept")
+        decisions.append(f"Preset skipped: {label}")
+
+    if _auto_opt_applied_for_current_run(run_map):
+        label = str(st.session_state.get(AUTO_OPT_APPLIED_LABEL_KEY, "") or "engine tuning improvement")
+        decisions.append(f"Engine tuning applied: {label}")
+    elif _auto_opt_skipped_for_current_run(run_map):
+        label = str(st.session_state.get(AUTO_OPT_SKIPPED_LABEL_KEY, "") or "current tuning kept")
+        decisions.append(f"Engine tuning skipped: {label}")
+
+    if _universe_applied_for_current_run(run_map):
+        label = str(st.session_state.get(UNIVERSE_APPLIED_LABEL_KEY, "") or "universe mix improvement")
+        decisions.append(f"Universe mix applied: {label}")
+    elif _universe_skipped_for_current_run(run_map):
+        label = str(st.session_state.get(UNIVERSE_SKIPPED_LABEL_KEY, "") or "current universe kept")
+        decisions.append(f"Universe mix skipped: {label}")
+
+    if decisions:
+        st.caption("Resolved so far: " + " · ".join(decisions))
+
 
 def _render_engine_tuning_waiting_for_preset() -> None:
+    """Keep later locked phases quiet; the phase rail already explains the sequence."""
     _clear_auto_opt_suggestion_state()
-    st.markdown("### Engine tuning suggestion")
-    st.info(
-        "Engine tuning becomes available after you apply the preset suggestion or choose to keep the current preset."
-    )
-    st.caption(
-        "This avoids testing technical knobs on a strategy preset that may be replaced in the previous phase. "
-        "Once the preset decision is resolved, this phase will test small variations around the active engine configuration."
-    )
-
+    return
 
 def _result_interpretation(perf: dict) -> tuple[str, str]:
     cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
@@ -863,7 +1101,8 @@ def _render_metric_explainer(perf: dict) -> None:
         )
 
 
-def _render_what_to_watch(perf: dict, philosophy: Any) -> None:
+
+def _render_what_to_watch(perf: dict, philosophy: Any, *, as_expander: bool = True) -> None:
     profile = str(philosophy or "Balanced").strip() or "Balanced"
     cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
     sharpe = _safe_float(perf.get("sharpe", 0.0), 0.0)
@@ -878,7 +1117,7 @@ def _render_what_to_watch(perf: dict, philosophy: Any) -> None:
     if sharpe < 0.50:
         watch_items.append("Sharpe is modest; the portfolio may not be earning enough return for the risk it takes.")
     else:
-        watch_items.append("Sharpe is usable; the key question is whether the improvement over the baseline justifies the extra engine complexity.")
+        watch_items.append("Sharpe is usable; the key question is whether any suggested change improves the trade-off enough to justify extra engine complexity.")
     if maxdd >= 0.18:
         watch_items.append("MaxDD is the key risk flag: a drawdown near 20% can be psychologically hard even if the long-run return is positive.")
     if vol >= 0.15:
@@ -888,11 +1127,18 @@ def _render_what_to_watch(perf: dict, philosophy: Any) -> None:
     elif profile.lower() == "growth":
         watch_items.append("Because the selected philosophy is Growth, some volatility is acceptable, but Sharpe should still justify the risk.")
 
-    with st.expander("What to watch before changing the strategy", expanded=False):
+    def _body() -> None:
+        st.markdown("**What to watch before changing the strategy**")
         st.markdown("\n".join(f"- {item}" for item in watch_items))
         st.caption(
-            "Use the benchmark context above as external reference only; the most direct comparison is still between the tested internal configurations."
+            "Use benchmark context as external reference only; the most direct comparison is still between rerun-tested internal configurations."
         )
+
+    if as_expander:
+        with st.expander("What to watch before changing the strategy", expanded=False):
+            _body()
+    else:
+        _body()
 
 
 def _current_engine_knobs(run_map: dict) -> dict:
@@ -966,7 +1212,8 @@ def _engine_improvement_target(perf: dict, philosophy: Any) -> str:
     )
 
 
-def _render_engine_levers_to_try(perf: dict, philosophy: Any, run_map: dict) -> None:
+
+def _render_engine_levers_to_try(perf: dict, philosophy: Any, run_map: dict, *, as_expander: bool = True) -> None:
     """Explain which engine controls map to the issues flagged by the result."""
     cfg = _current_engine_knobs(run_map)
     cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
@@ -1019,7 +1266,8 @@ def _render_engine_levers_to_try(perf: dict, philosophy: Any, run_map: dict) -> 
             "Sensible first test: make small technical changes only, then accept them only if the real rerun improves the trade-off."
         )
 
-    with st.expander("Engine levers that could improve this run", expanded=True):
+    def _body() -> None:
+        st.markdown("**Engine levers that could improve this run**")
         st.markdown(f"**Improvement target:** {_engine_improvement_target(perf, philosophy)}")
         st.markdown(f"**Suggested first test:** {suggested_direction}")
 
@@ -1035,19 +1283,24 @@ def _render_engine_levers_to_try(perf: dict, philosophy: Any, run_map: dict) -> 
         st.caption("Current engine levers: " + " · ".join(current_bits))
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         st.info(
-            "The Engine tuning suggestion below tests these kinds of parameter changes with the real engine before showing an Apply button. "
+            "The improvement phases below test these kinds of changes with the real engine before showing an Apply button. "
             "Do not change knobs just because they sound better; compare the rerun-tested metrics."
         )
 
+    if as_expander:
+        with st.expander("Engine levers that could improve this run", expanded=False):
+            _body()
+    else:
+        _body()
 
 
 def _render_reliability_note() -> None:
-    st.info(
-        "**Reliability note:** these figures come from a historical walk-forward backtest using the selected Step 4 asset panel. "
-        "The panel start date provides historical input for the engine; the displayed performance is based on the evaluated OOS returns produced after the engine has enough prior history. "
-        "They are useful for comparing configurations inside the app, but they are not forecasts or guarantees. "
-        "Results depend on the date range, asset universe, data quality, and engine assumptions. Step 6 should be used to explore future uncertainty rather than treating this run as a prediction."
-    )
+    with st.expander("Reliability note and limits", expanded=False):
+        st.info(
+            "These figures come from a historical walk-forward backtest using the selected asset panel. "
+            "They are useful for comparing configurations inside the app, but they are not forecasts or guarantees. "
+            "Results depend on the date range, asset universe, data quality, and engine assumptions. Long-Term Scenario Explorer should be used to explore future uncertainty rather than treating this run as a prediction."
+        )
 
 
 BENCHMARK_CONTEXT_ASSETS = [
@@ -1303,56 +1556,78 @@ def _benchmark_full_history_rows() -> tuple[pd.DataFrame, list[str], dict]:
     return pd.DataFrame(rows), notes, window_meta
 
 
-def _render_benchmark_context(perf: dict, run_map: dict) -> None:
-    st.markdown("### Benchmark context — same evaluated period")
 
+def _render_benchmark_context(perf: dict, run_map: dict, *, inline_details: bool = False) -> dict:
     bench_df, notes, window_meta = _benchmark_context_rows(perf, run_map)
     panel_window = str(window_meta.get("panel_window", "—") or "—")
     eval_window = str(window_meta.get("evaluation_window", "—") or "—")
     target_periods = _safe_int(window_meta.get("target_periods", 0), 0)
     warmup_periods = window_meta.get("warmup_periods", None)
 
-    st.caption(
-        "The Step 4 start date defines the historical market-data panel used by the engine. "
-        "The metrics above are the engine's walk-forward evaluated returns, so the main benchmark table below uses that same evaluated period."
-    )
-
     if target_periods > 0:
         warmup_text = (
-            f" · Approx. warm-up/training before evaluation: {int(warmup_periods)} monthly observations"
+            f" · warm-up before evaluation: {int(warmup_periods)} monthly observations"
             if isinstance(warmup_periods, int) and warmup_periods > 0
             else ""
         )
-        st.info(
-            f"Step 4 panel: {panel_window} · Engine evaluated period: {eval_window} "
-            f"({target_periods} monthly OOS returns){warmup_text}."
+        st.caption(
+            f"Same evaluated period: {eval_window} · {target_periods} monthly OOS returns{warmup_text}. "
+            f"Full Step 4 panel: {panel_window}."
         )
     elif panel_window != "—":
-        st.info(f"Step 4 panel: {panel_window}. Exact OOS return length was not found in the run payload.")
+        st.caption(f"Full Step 4 panel: {panel_window}. Exact OOS return length was not found in the run payload.")
+
+    def _metric(row_name: str, col: str) -> str:
+        if not isinstance(bench_df, pd.DataFrame) or bench_df.empty:
+            return "—"
+        try:
+            rows = bench_df.loc[bench_df["Reference"].astype(str).str.contains(row_name, case=False, regex=False)]
+            if rows.empty:
+                return "—"
+            return str(rows.iloc[0].get(col, "—") or "—")
+        except Exception:
+            return "—"
 
     if isinstance(bench_df, pd.DataFrame) and not bench_df.empty:
-        st.dataframe(bench_df, use_container_width=True, hide_index=True)
-        st.caption(
-            "Note: TLT tracks 20+ year US Treasury bonds. Long-duration bonds can show weak or negative returns "
-            "when interest rates rise, because fixed-rate bond prices generally move inversely to rates."
+        strategy_cagr = _metric("Your strategy", "CAGR")
+        strategy_vol = _metric("Your strategy", "Vol")
+        strategy_maxdd = _metric("Your strategy", "MaxDD")
+        spy_cagr = _metric("SPY", "CAGR")
+        qqq_cagr = _metric("QQQ", "CAGR")
+        spy_vol = _metric("SPY", "Vol")
+        qqq_vol = _metric("QQQ", "Vol")
+        spy_maxdd = _metric("SPY", "MaxDD")
+        qqq_maxdd = _metric("QQQ", "MaxDD")
+        st.info(
+            "**Quick read:** this strategy returned "
+            f"{strategy_cagr} CAGR with {strategy_vol} volatility and {strategy_maxdd} MaxDD over the evaluated window. "
+            f"For context, SPY was {spy_cagr} CAGR / {spy_vol} vol / {spy_maxdd} MaxDD, "
+            f"while QQQ was {qqq_cagr} CAGR / {qqq_vol} vol / {qqq_maxdd} MaxDD. "
+            "Use this as context, not as a replacement for the active strategy engine result."
         )
     else:
         st.info("Benchmark context is unavailable for this run because the Step 4 panel could not be read.")
 
-    with st.expander("Benchmark details and methodology", expanded=False):
-        st.markdown("**Why can long-term Treasury bonds show negative CAGR?**")
-        st.write(
-            "TLT tracks long-duration US Treasury bonds, specifically bonds with more than 20 years "
-            "remaining to maturity. Long-duration fixed-rate bonds are sensitive to interest-rate changes: "
-            "when market interest rates rise, existing bond prices generally fall."
+    def _render_benchmark_tables_and_methodology() -> None:
+        st.caption(
+            "This compares the active strategy with familiar reference assets over the same evaluated period. "
+            "The full-history table is contextual only."
         )
-        st.caption("Sources: iShares/BlackRock TLT fund description; SEC Investor Bulletin on Interest Rate Risk.")
+        if isinstance(bench_df, pd.DataFrame) and not bench_df.empty:
+            compact_cols = [col for col in ["Reference", "Type", "CAGR", "Vol", "MaxDD", "Sharpe", "Reading"] if col in bench_df.columns]
+            st.markdown("**Same evaluated period**")
+            st.dataframe(bench_df[compact_cols], use_container_width=True, hide_index=True)
+            st.caption(
+                "Note: TLT tracks 20+ year US Treasury bonds. Long-duration bonds can show weak or negative returns "
+                "when interest rates rise, because fixed-rate bond prices generally move inversely to rates."
+            )
+        else:
+            st.info("Same-window benchmark details are unavailable for this run.")
 
         st.divider()
         st.markdown("**Full-history benchmark context from Step 4 panel**")
         st.caption(
-            "This table uses the full available Step 4 history for each reference asset, usually starting around 2005 for the selected benchmark set. "
-            "It is long-run context only, not a direct comparison with the engine result unless the strategy is also evaluated over the same full window."
+            "This table uses the full available Step 4 history for each reference asset. It is contextual only, not a direct comparison with the engine result unless the strategy is evaluated over the same full window."
         )
         full_df, full_notes, _ = _benchmark_full_history_rows()
         if isinstance(full_df, pd.DataFrame) and not full_df.empty:
@@ -1365,13 +1640,13 @@ def _render_benchmark_context(perf: dict, run_map: dict) -> None:
                 st.write(f"- {note}")
 
         st.divider()
-        st.markdown("**Benchmark methodology and exclusions**")
-        st.markdown(
-            "- The **main benchmark table** compares like with like: your engine result and reference assets over the same walk-forward evaluated period.\n"
-            "- The **full-history table** is contextual only. It shows what well-known assets did across the full Step 4 panel, but it is not the direct scorecard for your strategy.\n"
-            "- Benchmarks are **not hardcoded historical ranges**; they are recomputed from the current Step 4 panel using the same monthly-return convention.\n"
-            "- This is educational context, not an investment recommendation and not a forecast."
-        )
+        st.markdown("**Methodology and exclusions**")
+        st.markdown("""
+- The **main benchmark table** compares like with like: your engine result and reference assets over the same walk-forward evaluated period.
+- The **full-history table** is contextual only and is not the direct scorecard for your strategy.
+- Benchmarks are recomputed from the current Step 4 panel using the same monthly-return convention.
+- This is educational context, not an investment recommendation and not a forecast.
+""")
         if notes:
             st.caption("Main benchmark panel notes")
             for note in notes:
@@ -1382,17 +1657,23 @@ def _render_benchmark_context(perf: dict, run_map: dict) -> None:
             for item in SHORTER_HISTORY_CONTEXT:
                 st.write(f"- {item}")
 
+    if inline_details:
+        _render_benchmark_tables_and_methodology()
+    else:
+        with st.expander("Benchmark comparison", expanded=False):
+            _render_benchmark_tables_and_methodology()
+
     return {"bench_df": bench_df, "window_meta": window_meta}
 
 
 def render_post_run(run_result: dict) -> None:
     """Render the Gold Stable post-run surface.
 
-    Active Step 5 flow:
+    Active strategy engine flow:
     - real engine metrics
-    - optional engine timing diagnostics
-    - feature_mu metadata
-    - OOS-return bridge into Step 6
+    - compact validation context
+    - optional improvement checks
+    - OOS-return bridge into Long-Term Scenario Explorer
     """
     run_map = _coerce_mapping(run_result)
     if not run_map:
@@ -1405,8 +1686,24 @@ def render_post_run(run_result: dict) -> None:
         return
 
     st.markdown(f'<div id="{STEP5_REAL_RUN_RESULT_ANCHOR_ID}"></div>', unsafe_allow_html=True)
-    _maybe_scroll_to_real_run_result()
-    st.markdown("## 3. Real run result")
+    philosophy = str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
+    try:
+        universe_size = int(st.session_state.get("universe_size", 25) or 25)
+    except Exception:
+        universe_size = 25
+    template = str(st.session_state.get("step5_template", "") or "—")
+    style = str(st.session_state.get("step5_style", "") or "—")
+
+    run_signature = str(run_map.get("run_signature", "") or "")
+    config_fingerprint = str(run_map.get("config_fingerprint", "") or "")
+    run_timestamp = str(run_map.get("run_timestamp", "") or "")
+    source = str(run_map.get("source", "micro_pipeline_real") or "micro_pipeline_real")
+    panel_label = str(run_map.get("asset_panel_source_label", "Step 4 asset panel") or "Step 4 asset panel")
+    panel_rows = int(_safe_float(run_map.get("asset_panel_n_rows", 0), 0))
+    panel_assets = int(_safe_float(run_map.get("asset_panel_n_assets", 0), 0))
+    panel_shape = run_map.get("panel_shape", None)
+    oos_months = len(_extract_oos_returns(run_map))
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("CAGR", _pct(_safe_float(perf.get("cagr", 0.0))))
@@ -1418,81 +1715,134 @@ def render_post_run(run_result: dict) -> None:
         st.metric("Sharpe", f"{_safe_float(perf.get('sharpe', 0.0)):.2f}")
 
     headline, body = _result_interpretation(perf)
-    st.info(f"**{headline}:** {body}")
-
-    _render_metric_explainer(perf)
-
-    philosophy = str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
     fit_level, fit_message = _philosophy_fit_message(perf, philosophy)
-    if fit_level == "success":
-        st.success(f"**Philosophy fit:** {fit_message}")
-    elif fit_level == "warning":
-        st.warning(f"**Philosophy fit:** {fit_message}")
-    else:
-        st.info(f"**Philosophy fit:** {fit_message}")
 
-    benchmark_payload = _render_benchmark_context(perf, run_map)
-    render_result_reliability_assessment(run_map, benchmark_payload=benchmark_payload)
-    _render_what_to_watch(perf, philosophy)
-    _render_engine_levers_to_try(perf, philosophy, run_map)
-    _render_reliability_note()
+    cagr_val = _safe_float(perf.get("cagr", 0.0), 0.0)
+    vol_val = _safe_float(perf.get("annual_volatility", perf.get("volatility", 0.0)), 0.0)
+    maxdd_val = abs(_safe_float(perf.get("max_drawdown", 0.0), 0.0))
+    sharpe_val = _safe_float(perf.get("sharpe", 0.0), 0.0)
 
-    run_signature = str(run_map.get("run_signature", "") or "")
-    config_fingerprint = str(run_map.get("config_fingerprint", "") or "")
-    run_timestamp = str(run_map.get("run_timestamp", "") or "")
-    source = str(run_map.get("source", "micro_pipeline_real") or "micro_pipeline_real")
-    panel_label = str(run_map.get("asset_panel_source_label", "Step 4 asset panel") or "Step 4 asset panel")
-    panel_rows = int(_safe_float(run_map.get("asset_panel_n_rows", 0), 0))
-    panel_assets = int(_safe_float(run_map.get("asset_panel_n_assets", 0), 0))
-    panel_shape = run_map.get("panel_shape", None)
+    with st.expander("How to read this result and decide on suggestions", expanded=False):
+        st.markdown(
+            f"**Summary:** this run is broadly interpretable as a {_pct(cagr_val)} CAGR / "
+            f"{_pct(vol_val)} volatility strategy with a historical drawdown near "
+            f"-{100.0 * maxdd_val:.2f}% and Sharpe {sharpe_val:.2f}."
+        )
+        left, right = st.columns([1.1, 0.9])
+        with left:
+            st.info(f"**{headline}:** {body}")
+        with right:
+            if fit_level == "success":
+                st.success(f"**Philosophy fit:** {fit_message}")
+            elif fit_level == "warning":
+                st.warning(f"**Philosophy fit:** {fit_message}")
+            else:
+                st.info(f"**Philosophy fit:** {fit_message}")
+
+        st.markdown(
+            f"- **CAGR ({_pct(cagr_val)})** — historical average annual growth in this backtest. Higher is better, but it is not guaranteed.\n"
+            f"- **Volatility ({_pct(vol_val)})** — how bumpy the portfolio was historically. Lower usually feels more stable.\n"
+            f"- **MaxDD (-{100.0 * maxdd_val:.2f}%)** — worst historical peak-to-trough fall. This is the main pain-test metric.\n"
+            f"- **Sharpe ({sharpe_val:.2f})** — return per unit of risk. Higher usually means the return compensated better for volatility."
+        )
+        st.caption(f"Execution context: {template} + {style} · Cached panel: {panel_assets} assets / {panel_rows:,} rows.")
+        st.caption(
+            "If this result is acceptable, continue to the Long-Term Scenario Explorer. Benchmark, validation, and improvement checks below are optional."
+        )
+
+        st.divider()
+        st.markdown("**About the Strategy Engine**")
+        st.write(
+            "**Purpose:** turn the selected risk profile, asset universe and market-data panel into a tested "
+            "strategy return series. This is the execution stage, not a new data-preparation step."
+        )
+        st.write(
+            "The engine uses the prepared market-data panel and the selected preset to produce one historical "
+            "walk-forward strategy series. It does not rebuild the asset universe here."
+        )
+        st.caption(
+            "This result is a historical backtest output for comparison inside the app. It is not a forecast, "
+            "a guarantee, or a live fund track record."
+        )
+
+        st.divider()
+        st.markdown("**Deciding whether to apply suggestions**")
+        st.caption("Each suggestion is rerun with the real engine before it can be applied.")
+        _render_what_to_watch(perf, philosophy, as_expander=False)
+        st.divider()
+        _render_engine_levers_to_try(perf, philosophy, run_map, as_expander=False)
+
+    benchmark_payload = {"bench_df": pd.DataFrame(), "window_meta": {}}
+    with st.expander("Benchmark sanity check", expanded=False):
+        st.caption(
+            "Optional context only: compare the active strategy with familiar assets over the same evaluated period, "
+            "without letting benchmarks replace the main strategy engine result."
+        )
+        benchmark_payload = _render_benchmark_context(perf, run_map, inline_details=True)
+
+        st.divider()
+        st.markdown("**Reliability, robustness and limits**")
+        render_result_reliability_assessment(run_map, benchmark_payload=benchmark_payload, inline_details=True)
+        st.info(
+            "These figures come from a historical walk-forward backtest using the selected asset panel. "
+            "They are useful for comparing configurations inside the app, but they are not forecasts or guarantees. "
+            "Results depend on the date range, asset universe, data quality, and engine assumptions."
+        )
 
     size_flow_completed = _size_decision_completed_for_current_run(run_map)
     universe_flow_completed = _universe_decision_completed_for_current_run(run_map)
     auto_opt_already_applied = _auto_opt_applied_for_current_run(run_map)
     auto_opt_already_skipped = _auto_opt_skipped_for_current_run(run_map)
 
+    st.markdown(f'<div id="{STEP5_IMPROVEMENT_CHECKS_ANCHOR_ID}"></div>', unsafe_allow_html=True)
+    _maybe_scroll_to_improvement_checks()
+    st.markdown("## Optional improvement checks")
+    st.caption(
+        "Review optional suggestions below. Once a recommendation appears, you can apply it, "
+        "keep the current setup, or continue without the remaining checks."
+    )
+
+    _render_suggestion_depth_controls()
+    _render_improvement_phase_row(run_map)
+
+    preset_flow_completed = _preset_decision_completed_for_current_run(run_map)
+
     if size_flow_completed:
+        _render_resolved_phase_history(run_map)
         _render_completed_improvement_flow(run_map)
     elif universe_flow_completed:
-        # Phase 3 has already been resolved for this run. Do not stop the
-        # improvement flow here: Phase 4 can now test universe size on top of
-        # the active composition baseline.
-        _render_improvement_mode_control()
-        render_universe_improvement(run_map)
+        _render_resolved_phase_history(run_map)
         render_size_improvement(run_map)
     elif auto_opt_already_applied or auto_opt_already_skipped:
-        # Phase 2 has already been resolved for this run. Do not send the
-        # current signature back through Phase 1, otherwise the preset search
-        # is tested again before Phase 3 becomes available.
-        _render_improvement_mode_control()
-        render_auto_opt_improvement(run_map)
+        _render_resolved_phase_history(run_map)
         render_universe_improvement(run_map)
+    elif preset_flow_completed:
+        _render_resolved_phase_history(run_map)
+        render_auto_opt_improvement(run_map)
     else:
-        _render_improvement_mode_control()
         preset_flow_state = render_preset_improvement(run_map)
         if _preset_blocks_engine_tuning(preset_flow_state):
             _render_engine_tuning_waiting_for_preset()
         else:
             render_auto_opt_improvement(run_map)
-            if _auto_opt_blocks_universe(run_map):
-                _render_universe_waiting_for_engine_tuning()
-            elif (
-                not _auto_opt_applied_for_current_run(run_map)
-                and not _auto_opt_skipped_for_current_run(run_map)
-                and not _auto_opt_has_any_candidate_payload()
-            ):
-                _render_universe_waiting_for_engine_tuning_not_run()
-            else:
-                render_universe_improvement(run_map)
 
-    st.markdown("## 5. Ready for projection")
+    st.markdown("---")
     n_oos = _store_projection_bridge_context(run_map)
-    if n_oos > 0:
-        st.success(f"Projection bridge ready: {n_oos} monthly OOS returns stored for Step 6.")
-    else:
-        st.info("Projection bridge note: no OOS return series was found in this run payload; Step 6 can still use fallback profile assumptions.")
+    step6_title = "Ready for Long-Term Scenario Explorer" if size_flow_completed else "Long-Term Scenario Explorer hand-off available"
+    step6_caption = (
+        "This is the hand-off into the Long-Term Scenario Explorer. The active strategy engine result is stored and can now feed the projection."
+        if size_flow_completed
+        else "Current result can already feed the Long-Term Scenario Explorer. You can continue now, or finish the remaining optional checks first."
+    )
 
-    with st.expander("Diagnostics (advanced)", expanded=False):
+    with st.expander(step6_title, expanded=False):
+        st.caption(step6_caption)
+        if n_oos > 0:
+            st.success(f"{n_oos} monthly OOS returns stored for the Long-Term Scenario Explorer.")
+        else:
+            st.info("No OOS return series was found in this run payload; the Long-Term Scenario Explorer can still use fallback profile assumptions.")
+
+    with st.expander("Advanced run diagnostics and timings", expanded=False):
         meta_parts = [
             f"source={source}",
             f"asset_panel={panel_label}",
@@ -1521,15 +1871,13 @@ def render_post_run(run_result: dict) -> None:
         render_start_date_robustness_timing_block(run_map)
         _render_feature_mu_block(run_map)
 
-    clear_retired_step5_state()
-
     st.markdown("---")
-    left, right = st.columns(2)
-    with left:
-        if st.button("Back to Step 4", key="step5_back_to_step4"):
+    nav_left, nav_right = st.columns(2)
+    with nav_left:
+        if st.button("← Back to Risk Profile and Universe", key="step5_bridge_back_to_investment_setup", use_container_width=True):
             st.session_state["current_step"] = 4
             st.rerun()
-    with right:
-        if st.button("Continue to Projection", key="step5_continue_to_step6", use_container_width=True):
+    with nav_right:
+        if st.button("Continue to Long-Term Scenario Explorer →", key="step5_bridge_continue_to_long_term", use_container_width=True):
             st.session_state["current_step"] = 6
             st.rerun()

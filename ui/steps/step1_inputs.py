@@ -416,6 +416,41 @@ def _weekly_to_period_amount(weekly: float, period: str) -> float:
     return float(weekly)
 
 
+def _ensure_budget_amount_defaults() -> None:
+    """Seed the canonical Step 1 budget fields before autosave/widgets read them.
+
+    The compact dashboard can render the detailed controls collapsed. In that
+    state Streamlit has not instantiated the exact number inputs yet, so the
+    canonical amount keys may be missing. If autosave reads missing keys as zero,
+    the budget bar collapses after a preset click. This helper keeps one source
+    of truth alive even when controls are hidden.
+    """
+    defaults = (
+        (STEP1_INCOME_AMOUNT, STEP1_INCOME_PERIOD, 460.0),
+        (STEP1_FIXED_AMOUNT, STEP1_FIXED_PERIOD, 185.0),
+        (STEP1_VARIABLE_AMOUNT, STEP1_VARIABLE_PERIOD, 80.0),
+        (STEP1_DISCRETIONARY_AMOUNT, STEP1_DISCRETIONARY_PERIOD, 35.0),
+    )
+
+    for amount_key, period_key, default_weekly in defaults:
+        if period_key not in st.session_state:
+            st.session_state[period_key] = "Weekly"
+        if amount_key not in st.session_state:
+            st.session_state[amount_key] = float(default_weekly)
+            st.session_state[period_key] = "Weekly"
+
+    current_weeklies = [
+        _period_to_weekly(st.session_state.get(amount_key, 0.0), st.session_state.get(period_key, "Weekly"))
+        for amount_key, period_key, _default_weekly in defaults
+    ]
+    if all(float(value or 0.0) <= 0.0 for value in current_weeklies):
+        for amount_key, period_key, default_weekly in defaults:
+            st.session_state[amount_key] = float(default_weekly)
+            st.session_state[period_key] = "Weekly"
+        st.session_state[STEP1_QUICK_BASE_MARGIN_WEEKLY_KEY] = 160.0
+        st.session_state[STEP1_QUICK_MARGIN_WEEKLY_KEY] = 160.0
+
+
 def _step1_quick_weekly_values() -> dict[str, float]:
     income = _period_to_weekly(st.session_state.get(STEP1_INCOME_AMOUNT, 460.0), st.session_state.get(STEP1_INCOME_PERIOD, "Weekly"))
     fixed = _period_to_weekly(st.session_state.get(STEP1_FIXED_AMOUNT, 185.0), st.session_state.get(STEP1_FIXED_PERIOD, "Weekly"))
@@ -490,12 +525,6 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
                 <span><b>Spending:</b> £{(fixed + variable + discretionary):,.0f}/week</span>
                 <span><b>Free margin:</b> <span style="color:{margin_colour}; font-weight:700;">£{margin:,.0f}/week</span></span>
             </div>
-            <div style="display:flex; flex-wrap:wrap; gap:0.45rem 0.9rem; font-size:0.74rem; color:#64748b; margin-top:0.45rem;">
-                <span>Fixed essentials</span>
-                <span>Variable essentials</span>
-                <span>Discretionary</span>
-                <span>Free margin / deficit</span>
-            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -505,6 +534,7 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
 def _auto_save_current_situation_snapshot() -> None:
     """Persist the current Step 1 estimate without asking for a confirm button."""
     try:
+        _ensure_budget_amount_defaults()
         snapshot = prepare_step1_preview()
         confirm_step1_snapshot(snapshot)
         st.session_state[CONFIRMED_SNAPSHOT] = True
@@ -521,6 +551,101 @@ def _queue_quick_margin_and_rerun(new_margin: float, *, min_value: float, max_va
     st.rerun()
 
 
+_STEP1_BUDGET_SLIDER_SPECS = (
+    (
+        "step1_budget_slider_income_weekly_v1",
+        STEP1_INCOME_AMOUNT,
+        STEP1_INCOME_PERIOD,
+        "Take-home income (£/week)",
+        0,
+        1500,
+        10,
+        460.0,
+    ),
+    (
+        "step1_budget_slider_fixed_weekly_v1",
+        STEP1_FIXED_AMOUNT,
+        STEP1_FIXED_PERIOD,
+        "Fixed essentials (£/week)",
+        0,
+        1200,
+        5,
+        185.0,
+    ),
+    (
+        "step1_budget_slider_variable_weekly_v1",
+        STEP1_VARIABLE_AMOUNT,
+        STEP1_VARIABLE_PERIOD,
+        "Variable essentials (£/week)",
+        0,
+        700,
+        5,
+        80.0,
+    ),
+    (
+        "step1_budget_slider_discretionary_weekly_v1",
+        STEP1_DISCRETIONARY_AMOUNT,
+        STEP1_DISCRETIONARY_PERIOD,
+        "Discretionary spending (£/week)",
+        0,
+        500,
+        5,
+        35.0,
+    ),
+)
+
+
+def _sync_budget_slider_defaults_from_amounts() -> None:
+    """Sync the weekly budget sliders from the canonical Step 1 amount keys.
+
+    This runs before the slider widgets are instantiated, so helper buttons and
+    exact-number edits stay reflected in the slider positions on the next rerun.
+    """
+    _ensure_budget_amount_defaults()
+    for slider_key, amount_key, period_key, _label, min_value, max_value, _step, default in _STEP1_BUDGET_SLIDER_SPECS:
+        weekly_value = _period_to_weekly(
+            st.session_state.get(amount_key, default),
+            st.session_state.get(period_key, "Weekly"),
+        )
+        st.session_state[slider_key] = float(max(float(min_value), min(float(max_value), float(weekly_value))))
+
+
+def _apply_budget_slider_to_amount(slider_key: str, amount_key: str, period_key: str) -> None:
+    """Copy a weekly slider value into the existing Step 1 amount model."""
+    value = safe_float(st.session_state.get(slider_key, 0.0), 0.0)
+    st.session_state[amount_key] = float(round(max(value, 0.0), 2))
+    st.session_state[period_key] = "Weekly"
+    st.session_state[CONFIRMED_SNAPSHOT] = False
+    invalidate_downstream_from_step1()
+
+
+def _render_budget_value_sliders() -> None:
+    """Render the detailed budget controls as weekly sliders."""
+    _sync_budget_slider_defaults_from_amounts()
+
+    st.markdown("#### Budget sliders")
+    st.caption(
+        "Use these to tune the weekly income and spending categories. Free margin is calculated from these values."
+    )
+
+    row1 = st.columns(2)
+    row2 = st.columns(2)
+    slots = [row1[0], row1[1], row2[0], row2[1]]
+
+    for slot, spec in zip(slots, _STEP1_BUDGET_SLIDER_SPECS):
+        slider_key, amount_key, period_key, label, min_value, max_value, step, default = spec
+        with slot:
+            st.slider(
+                label,
+                min_value=int(min_value),
+                max_value=int(max_value),
+                step=int(step),
+                key=slider_key,
+                on_change=_apply_budget_slider_to_amount,
+                args=(slider_key, amount_key, period_key),
+            )
+
+
 def _ensure_quick_margin_state() -> tuple[int, int, int, float]:
     """Initialise slider state before the slider widget is instantiated.
 
@@ -530,7 +655,8 @@ def _ensure_quick_margin_state() -> tuple[int, int, int, float]:
     """
     values = _step1_quick_weekly_values()
     current_margin = float(values.get("margin", 0.0) or 0.0)
-    if STEP1_QUICK_BASE_MARGIN_WEEKLY_KEY not in st.session_state:
+    stored_base_margin = safe_float(st.session_state.get(STEP1_QUICK_BASE_MARGIN_WEEKLY_KEY, current_margin), current_margin)
+    if STEP1_QUICK_BASE_MARGIN_WEEKLY_KEY not in st.session_state or (stored_base_margin <= 0.0 and current_margin > 0.0):
         st.session_state[STEP1_QUICK_BASE_MARGIN_WEEKLY_KEY] = float(round(current_margin))
 
     base_margin = float(st.session_state.get(STEP1_QUICK_BASE_MARGIN_WEEKLY_KEY, current_margin) or current_margin)
@@ -581,20 +707,12 @@ def _render_step1_quick_estimate_panel() -> dict[str, float]:
     if success_message:
         show_toast_or_success(success_message, icon="✅", fallback_level="success")
     seed_step1_from_snapshot_if_missing()
+    _ensure_budget_amount_defaults()
 
     st.markdown("### Budget estimate")
-    st.caption("Start with one visual estimate. Exact income/category editing stays optional.")
+    st.caption("Start with a quick preset or open detailed budget controls to tune the income and spending categories.")
 
     slider_min, slider_max, _, base_margin = _ensure_quick_margin_state()
-    desired_margin = st.slider(
-        "How much money do you usually have left each week?",
-        min_value=int(slider_min),
-        max_value=int(slider_max),
-        step=5,
-        key=STEP1_QUICK_MARGIN_WEEKLY_KEY,
-        help="This quick estimate represents the money usually left each week. Use advanced exact editing if your income/spending split needs more detail.",
-    )
-    _apply_quick_margin_to_discretionary(float(desired_margin))
     values = _step1_quick_weekly_values()
 
     _render_budget_colour_bar(values)
@@ -610,19 +728,21 @@ def _render_step1_quick_estimate_panel() -> dict[str, float]:
         if st.button("Expensive", key="step1_quick_expensive_week", use_container_width=True):
             _queue_quick_margin_and_rerun(base_margin - 50.0, min_value=slider_min, max_value=slider_max)
 
-    if float(values.get("margin", 0.0) or 0.0) >= 0.0:
-        st.success(f"Auto-saved estimate: about **£{float(values['margin']):,.0f}/week** free margin.")
-    else:
+    if float(values.get("margin", 0.0) or 0.0) < 0.0:
         st.warning(
-            f"This quick estimate is short by about **£{abs(float(values['margin'])):,.0f}/week**. "
-            "Move the slider right or open advanced editing if the income/spending split looks wrong."
+            f"This estimate is short by about **£{abs(float(values['margin'])):,.0f}/week**. "
+            "Use the presets or open detailed budget controls if the income/spending split looks wrong."
         )
 
-    with st.expander("Advanced exact editing", expanded=False):
+    with st.expander("Detailed budget controls", expanded=False):
         st.caption(
-            "Open only the detailed tools you need. The quick slider remains the normal demo flow; "
-            "these controls are for more precise budgeting inputs."
+            "Adjust the main weekly budget values first. Optional tools below can estimate income, break down essentials, "
+            "or show exact number inputs when needed."
         )
+
+        _render_budget_value_sliders()
+        st.divider()
+        st.markdown("#### Optional tools")
 
         toggle_cols = st.columns(2)
         with toggle_cols[0]:
@@ -645,8 +765,8 @@ def _render_step1_quick_estimate_panel() -> dict[str, float]:
             )
             show_exact_totals = st.checkbox(
                 "Edit exact income and spending totals",
-                value=True,
-                key="step1_adv_show_exact_totals_v1",
+                value=False,
+                key="step1_adv_show_exact_totals_v2",
             )
 
         # IMPORTANT: the helper sections below appear before the exact total
@@ -880,28 +1000,30 @@ def _render_step1_quick_estimate_panel() -> dict[str, float]:
 
 
 def _render_cashflow_summary(values: dict[str, float], target_weekly: float) -> None:
+    """Render the compact cash-flow summary.
+
+    Target and feasibility status live in the cards below, so this top summary
+    intentionally stays focused on the current weekly cash-flow baseline.
+    The target_weekly parameter is kept for call-site compatibility.
+    """
     income = float(values.get("income", 0.0) or 0.0)
     spending = float(values.get("spending", 0.0) or 0.0)
     margin = float(values.get("margin", 0.0) or 0.0)
-    target_text = f"£{target_weekly:,.0f}/week" if target_weekly > 0 else "Not set"
-    status = "Ready" if margin > 0 and target_weekly > 0 else ("Needs margin" if margin <= 0 else "Choose target")
-    status_colour = "#047857" if status == "Ready" else "#92400e"
+    margin_colour = "#047857" if margin >= 0 else "#b91c1c"
+
     st.markdown(
         f"""
         <div style="border:1px solid rgba(49,51,63,0.14); border-radius:14px; padding:0.8rem 1rem; background:#ffffff; margin:0.5rem 0 1rem 0;">
             <div style="font-weight:700; margin-bottom:0.45rem;">Cash-flow summary</div>
-            <div style="display:grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap:0.75rem; align-items:start;">
+            <div style="display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:0.75rem; align-items:start;">
                 <div><div style="font-size:0.74rem;color:#64748b;">Income</div><div style="font-weight:700;">£{income:,.0f}/week</div></div>
                 <div><div style="font-size:0.74rem;color:#64748b;">Spending</div><div style="font-weight:700;">£{spending:,.0f}/week</div></div>
-                <div><div style="font-size:0.74rem;color:#64748b;">Free margin</div><div style="font-weight:700;">£{margin:,.0f}/week</div></div>
-                <div><div style="font-size:0.74rem;color:#64748b;">Target</div><div style="font-weight:700;">{target_text}</div></div>
-                <div><div style="font-size:0.74rem;color:#64748b;">Status</div><div style="font-weight:700;color:{status_colour};">{status}</div></div>
+                <div><div style="font-size:0.74rem;color:#64748b;">Free margin</div><div style="font-weight:700;color:{margin_colour};">£{margin:,.0f}/week</div></div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
 
 def _target_service_payload(snapshot: dict, target_weekly: float | None = None) -> tuple[dict, dict, dict, str, int]:
     from ui.services.step2_goal_service import (
@@ -977,16 +1099,16 @@ def _render_savings_target_card(snapshot: dict) -> tuple[dict, dict, dict, float
         st.session_state[STEP1_TARGET_WEEKLY_SAVINGS] = float(round(float(target_context.get("recommended_target", max(0.0, baseline_weekly * 0.30))), 2))
         st.session_state[STEP2_SELECTED_PRESET] = "Recommended"
 
-    p1, p2, p3 = st.columns(3)
-    with p1:
-        if st.button("Safe", key="step1_dashboard_target_safe", use_container_width=True):
-            _apply_target_preset_and_rerun(float(target_context.get("safe_target", baseline_weekly * 0.20)), "Safe")
-    with p2:
-        if st.button("Recommended", key="step1_dashboard_target_recommended", use_container_width=True):
-            _apply_target_preset_and_rerun(float(target_context.get("recommended_target", baseline_weekly * 0.30)), "Recommended")
-    with p3:
-        if st.button("Ambitious", key="step1_dashboard_target_ambitious", use_container_width=True):
-            _apply_target_preset_and_rerun(float(target_context.get("ambitious_target", baseline_weekly * 0.40)), "Ambitious")
+    preset_options = ["Safe", "Recommended", "Ambitious"]
+    preset_display_labels = {
+        "Safe": "Cautious",
+        "Recommended": "Balanced",
+        "Ambitious": "Stretch",
+    }
+    active_preset_before = str(st.session_state.get(STEP2_SELECTED_PRESET, "Recommended") or "Recommended")
+    if active_preset_before not in preset_options:
+        active_preset_before = "Recommended"
+        st.session_state[STEP2_SELECTED_PRESET] = active_preset_before
 
     target_weekly = float(
         st.number_input(
@@ -1000,6 +1122,30 @@ def _render_savings_target_card(snapshot: dict) -> tuple[dict, dict, dict, float
     )
     st.session_state[STEP2_TARGET_USER_TOUCHED_INTERNAL] = True
 
+    preset_cols = st.columns(3)
+    for idx, preset_name in enumerate(preset_options):
+        display_label = preset_display_labels.get(preset_name, preset_name)
+        preset_value = {
+            "Safe": float(target_context.get("safe_target", baseline_weekly * 0.20)),
+            "Recommended": float(target_context.get("recommended_target", baseline_weekly * 0.30)),
+            "Ambitious": float(target_context.get("ambitious_target", baseline_weekly * 0.40)),
+        }.get(preset_name, float(target_context.get("recommended_target", baseline_weekly * 0.30)))
+        with preset_cols[idx]:
+            if st.button(
+                display_label,
+                key=f"step1_dashboard_target_preset_{preset_name.lower()}_v2",
+                use_container_width=True,
+                type="primary" if preset_name == active_preset_before else "secondary",
+                help=(
+                    "Lower-pressure target."
+                    if preset_name == "Safe"
+                    else "Balanced default target."
+                    if preset_name == "Recommended"
+                    else "Higher-pressure stretch target."
+                ),
+            ):
+                _apply_target_preset_and_rerun(preset_value, preset_name)
+
     try:
         updated_snapshot, target_context, feasibility, _, planning_horizon = _target_service_payload(snapshot, target_weekly)
     except Exception:
@@ -1009,19 +1155,13 @@ def _render_savings_target_card(snapshot: dict) -> tuple[dict, dict, dict, float
         feasibility = {}
 
     active_preset = str(st.session_state.get(STEP2_SELECTED_PRESET, "Recommended") or "Recommended")
+    active_display = {
+        "Safe": "Cautious",
+        "Recommended": "Balanced",
+        "Ambitious": "Stretch",
+    }.get(active_preset, active_preset)
     pct = (target_weekly / baseline_weekly) if baseline_weekly > 0 else 0.0
-    st.caption(f"Preset: **{active_preset}** · Uses about **{pct * 100:.0f}%** of the current weekly margin.")
-
-    if feasibility:
-        required = float(feasibility.get("required_weekly", target_weekly) or target_weekly)
-        baseline = float(feasibility.get("baseline_margin_weekly", baseline_weekly) or baseline_weekly)
-        need = float(feasibility.get("need_weekly", 0.0) or 0.0)
-        if required <= baseline:
-            st.success("Quick check: this target is achievable under the current estimate.")
-        elif need <= float(feasibility.get("discretionary_weekly", 0.0) or 0.0):
-            st.info("Quick check: achievable, but it depends on reducing flexible spending.")
-        else:
-            st.warning("Quick check: this target may be stretched under the current estimate.")
+    st.caption(f"Uses about **{pct * 100:.0f}%** of the current weekly margin.")
 
     return updated_snapshot, target_context, feasibility, float(target_weekly), int(planning_horizon)
 
@@ -1127,13 +1267,11 @@ def _render_feasibility_card(snapshot: dict, *, target_weekly: float) -> None:
     expected_delta = expected - baseline_final
     conservative_delta = conservative - baseline_final
     if conservative_delta >= -max(25.0, abs(baseline_final) * 0.02) and expected_delta >= 0:
-        st.success("Result: feasible in this short-term test.")
+        st.success("This target looks feasible in the short-term test.")
     elif expected_delta >= 0:
-        st.warning("Result: positive expected case, but downside-sensitive.")
+        st.info("This target is feasible, but the cautious case leaves less room for surprises.")
     else:
-        st.error("Result: stretched under the current assumptions.")
-
-    st.caption("The path chart is shown separately below so this summary stays compact.")
+        st.error("This target looks stretched under the current assumptions.")
 
 
 def _render_feasibility_chart_card(snapshot: dict, *, target_weekly: float) -> None:

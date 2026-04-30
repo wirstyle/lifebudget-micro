@@ -465,7 +465,7 @@ def _render_step4_intro_banners() -> None:
     """
     st.info(
         "**Purpose:** choose an investment philosophy, a matching asset universe, "
-        "and the cached market-data panel used by Step 5. No optimisation happens here."
+        "and the cached market-data panel used by the strategy engine. No optimisation happens here."
     )
 
 def _render_contribution_bridge_card(investment_context: dict) -> None:
@@ -476,23 +476,32 @@ def _render_contribution_bridge_card(investment_context: dict) -> None:
     )
     monthly = _safe_float(investment_context.get("monthly_contribution", 0.0), 0.0)
     weekly = _safe_float(investment_context.get("weekly_equivalent", 0.0), 0.0)
-    surplus = _safe_float(investment_context.get("baseline_monthly", 0.0), 0.0)
     source_text = "Demo default" if source == "Demo default" else "Personal Finance Setup"
     source_note = "fallback" if source == "Demo default" else "inherited"
 
     st.markdown(
         f"""
-        <div style="border:1px solid rgba(49,51,63,0.14); border-radius:14px; padding:0.75rem 0.95rem; background:#ffffff; margin:0.55rem 0 0.85rem 0;">
-            <div style="display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:0.75rem; align-items:center;">
-                <div><div style="font-size:0.72rem;color:#64748b;">Monthly contribution</div><div style="font-weight:750;font-size:1.08rem;">£{monthly:,.0f}</div></div>
-                <div><div style="font-size:0.72rem;color:#64748b;">Weekly equivalent</div><div style="font-weight:750;font-size:1.08rem;">£{weekly:,.0f}</div></div>
-                <div><div style="font-size:0.72rem;color:#64748b;">Monthly surplus</div><div style="font-weight:750;font-size:1.08rem;">£{surplus:,.0f}</div></div>
-                <div><div style="font-size:0.72rem;color:#64748b;">Source</div><div style="font-weight:750;font-size:0.95rem;">{source_text}</div><div style="font-size:0.68rem;color:#64748b;">{source_note}</div></div>
+        <div style="border:1px solid rgba(49,51,63,0.14); border-radius:16px; padding:0.95rem 1.05rem; background:#ffffff; margin:0.7rem 0 0.85rem 0;">
+            <div style="display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:1.25rem; align-items:center;">
+                <div>
+                    <div style="font-size:0.78rem; color:#64748b; font-weight:500;">Monthly contribution</div>
+                    <div style="font-weight:800; font-size:1.08rem; margin-top:0.25rem;">£{monthly:,.0f}</div>
+                </div>
+                <div>
+                    <div style="font-size:0.78rem; color:#64748b; font-weight:500;">Weekly equivalent</div>
+                    <div style="font-weight:800; font-size:1.08rem; margin-top:0.25rem;">£{weekly:,.0f}</div>
+                </div>
+                <div>
+                    <div style="font-size:0.78rem; color:#64748b; font-weight:500;">Source</div>
+                    <div style="font-weight:800; font-size:1.02rem; margin-top:0.25rem;">{source_text}</div>
+                    <div style="font-size:0.76rem; color:#64748b; margin-top:0.16rem;">{source_note}</div>
+                </div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
 
 def _render_strategy_badge(label: str, value: str) -> None:
     st.markdown(
@@ -546,12 +555,12 @@ def _render_philosophy_strategy_card(current_philosophy: str, bundle: dict, rec_
             _render_strategy_badge("Template", str(rec_template))
             _render_strategy_badge("Style", str(rec_style))
             _render_strategy_badge("Projection", str(bundle.get("projection_profile", current_philosophy)))
-            st.success("Coherent with the selected philosophy.")
+            st.caption("Coherent with the selected philosophy.")
 
         with st.expander("Why this fits / terms explained", expanded=False):
             st.write(
                 f"The {current_philosophy} setup keeps the philosophy, universe size, strategy template "
-                "and projection tone aligned before the Step 5 engine run."
+                "and projection tone aligned before the strategy engine run."
             )
             st.write("**CAGR** is a long-term average annual growth rate; it is not a yearly guarantee.")
             st.write("**Volatility** describes how bumpy the journey may feel along the way.")
@@ -562,11 +571,11 @@ def _render_philosophy_strategy_card(current_philosophy: str, bundle: dict, rec_
 
 def _render_alignment_message(current_combo_status: str, current_philosophy: str, rec_template: str) -> None:
     if current_combo_status == "recommended":
-        st.success(f"Strategy setup is aligned with **{current_philosophy}** and the **{rec_template}** template.")
-    elif current_combo_status == "allowed":
-        st.info("Strategy setup is allowed for this philosophy, but it is not the primary preferred combo.")
+        return
+    if current_combo_status == "allowed":
+        st.info("Strategy setup is allowed for this risk profile, but it is not the primary recommended combo.")
     else:
-        st.warning("Current strategy setup is outside the allowed normal-mode space for this philosophy. It will be corrected in Step 5.")
+        st.warning("Current strategy setup is outside the allowed normal-mode space for this risk profile. It will be corrected before the strategy engine runs.")
 
 
 def _render_universe_mix_compact(selected_assets: list[str]) -> None:
@@ -602,10 +611,13 @@ def _render_universe_mix_compact(selected_assets: list[str]) -> None:
 def _render_investment_setup_card(current_philosophy: str, bundle: dict, rec_template: str, rec_style: str) -> tuple[int, str, list[str], list[str]]:
     """Render the main Step 4 decision as one compact card.
 
-    Strategy profile and universe selection are one conceptual decision: choose
-    the risk posture and the matching asset universe used by the Step 5 engine.
-    Keep the main card focused on the decision; push deeper explanations,
-    default-engine details and full composition into expanders.
+    The visual hierarchy is intentionally vertical:
+    1. choose the risk posture;
+    2. choose the asset universe that should feed the strategy engine;
+    3. show one compact current-setup summary.
+
+    Keep this as UI/layout only. The asset selection, state sync and panel
+    construction logic below stays unchanged.
     """
     card = dict(PHILOSOPHY_FEEL_CARDS.get(str(current_philosophy), PHILOSOPHY_FEEL_CARDS["Balanced"]))
 
@@ -616,22 +628,15 @@ def _render_investment_setup_card(current_philosophy: str, bundle: dict, rec_tem
         )
         or bundle["default_universe_size"]
     )
-    show_all_sizes = bool(st.session_state.get("show_all_sizes_input", False))
-    show_all_strategies = bool(st.session_state.get("show_all_strategies_input", False))
-
-    size_options = _build_visible_size_options(current_philosophy, show_all_sizes, current_size)
-    if current_size not in size_options:
-        current_size = int(bundle["default_universe_size"])
-        st.session_state["universe_size_input"] = current_size
 
     with st.container(border=True):
-        st.markdown("### 1. Investment setup")
-        st.caption("Choose a risk posture and matching asset universe for the Step 5 engine.")
+        # ------------------------------------------------------------------
+        # 1) Risk profile comes first. It drives the recommended universe.
+        # ------------------------------------------------------------------
+        st.markdown("### Risk profile")
+        profile_left, profile_right = st.columns([0.47, 0.53], gap="large")
 
-        left, right = st.columns([1.0, 1.05])
-
-        with left:
-            st.markdown("**Strategy profile**")
+        with profile_left:
             selected_philosophy = st.selectbox(
                 "Investment philosophy",
                 options=INVESTMENT_PHILOSOPHY_OPTIONS,
@@ -643,21 +648,58 @@ def _render_investment_setup_card(current_philosophy: str, bundle: dict, rec_tem
                 _sync_widget_defaults_from_philosophy(selected_philosophy)
                 st.rerun()
 
-            st.markdown(f"**{current_philosophy}:** {card.get('one_liner', '')}")
-            st.caption(card.get("detail", ""))
-            st.markdown(
-                f"""
-                <div style="display:flex; flex-wrap:wrap; gap:0.45rem; margin-top:0.55rem; margin-bottom:0.15rem;">
-                    <span style="background:#f1f5f9; padding:0.28rem 0.55rem; border-radius:999px; font-size:0.78rem;"><b>Return</b> {card.get('expected_return', '—')}</span>
-                    <span style="background:#f1f5f9; padding:0.28rem 0.55rem; border-radius:999px; font-size:0.78rem;"><b>Volatility</b> {card.get('volatility', '—')}</span>
-                    <span style="background:#f1f5f9; padding:0.28rem 0.55rem; border-radius:999px; font-size:0.78rem;"><b>Typical size</b> {card.get('typical_size', '—')}</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        profile_summary = " ".join(
+            part.strip()
+            for part in [str(card.get("one_liner", "") or ""), str(card.get("detail", "") or "")]
+            if part.strip()
+        )
 
-        with right:
-            st.markdown("**Universe basket**")
+        with profile_right:
+            if profile_summary:
+                st.markdown(
+                    f"""
+                    <div style="margin-top:1.62rem; color:#475569; font-size:0.95rem; line-height:1.55;">
+                        {profile_summary}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        st.markdown(
+            f"""
+            <div style="margin-top:0.95rem; color:#334155; font-size:0.91rem; line-height:1.55; width:100%; display:flex; flex-wrap:wrap; gap:0.35rem 0.55rem;">
+                <span><strong>Return:</strong> {card.get('expected_return', '—')}</span>
+                <span style="color:#94a3b8;">·</span>
+                <span><strong>Volatility:</strong> {card.get('volatility', '—')}</span>
+                <span style="color:#94a3b8;">·</span>
+                <span><strong>Typical universe:</strong> {card.get('typical_size', '—')}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.divider()
+
+        # ------------------------------------------------------------------
+        # 2) Universe basket follows the risk profile. Checkboxes sit above
+        #    the selects they affect, so the relationship is visually clear.
+        # ------------------------------------------------------------------
+        st.markdown("### Universe basket")
+        u1, u2 = st.columns(2)
+
+        with u1:
+            show_all_sizes = bool(
+                st.checkbox(
+                    "Show all sizes",
+                    value=bool(st.session_state.get("show_all_sizes_input", False)),
+                    key="show_all_sizes_input",
+                    help="Show all universe sizes supported by the cached deployment panel.",
+                )
+            )
+            size_options = _build_visible_size_options(current_philosophy, show_all_sizes, current_size)
+            if current_size not in size_options:
+                current_size = int(bundle["default_universe_size"])
+                st.session_state["universe_size_input"] = current_size
+
             selected_size = st.selectbox(
                 "Universe size",
                 size_options,
@@ -666,15 +708,25 @@ def _render_investment_setup_card(current_philosophy: str, bundle: dict, rec_tem
                 help="The public deployment demo supports sizes up to 100 assets from the cached bundle.",
             )
 
-            current_strategy = str(
+        current_strategy = str(
+            st.session_state.get(
+                "universe_strategy_input",
                 st.session_state.get(
-                    "universe_strategy_input",
-                    st.session_state.get(
-                        "universe_strategy",
-                        resolve_recommended_strategy_for_size(current_philosophy, selected_size),
-                    ),
+                    "universe_strategy",
+                    resolve_recommended_strategy_for_size(current_philosophy, selected_size),
+                ),
+            )
+            or resolve_recommended_strategy_for_size(current_philosophy, selected_size)
+        )
+
+        with u2:
+            show_all_strategies = bool(
+                st.checkbox(
+                    "Show all strategies",
+                    value=bool(st.session_state.get("show_all_strategies_input", False)),
+                    key="show_all_strategies_input",
+                    help="Show all strategies available for the selected size instead of only the philosophy-preferred subset.",
                 )
-                or resolve_recommended_strategy_for_size(current_philosophy, selected_size)
             )
             strategy_options = _build_visible_strategy_options(
                 current_philosophy,
@@ -693,42 +745,22 @@ def _render_investment_setup_card(current_philosophy: str, bundle: dict, rec_tem
                 key="universe_strategy_input",
             )
 
-            c1, c2 = st.columns(2)
-            with c1:
-                show_all_sizes = bool(
-                    st.checkbox(
-                        "Show all sizes",
-                        value=bool(st.session_state.get("show_all_sizes_input", False)),
-                        key="show_all_sizes_input",
-                        help="Show all universe sizes supported by the cached deployment panel.",
-                    )
-                )
-            with c2:
-                show_all_strategies = bool(
-                    st.checkbox(
-                        "Show all strategies",
-                        value=bool(st.session_state.get("show_all_strategies_input", False)),
-                        key="show_all_strategies_input",
-                        help="Show all strategies available for the selected size instead of only the philosophy-preferred subset.",
-                    )
-                )
-
-            preset_assets = build_generated_universe(selected_size, selected_strategy)
-            custom_allowed = int(selected_size) in {12, 25}
-            default_custom_enabled = (
-                bool(st.session_state.get("universe_custom_enabled_input", st.session_state.get(UNIVERSE_CUSTOM_ENABLED, False)))
-                if custom_allowed
-                else False
-            )
-            custom_enabled = st.checkbox(
-                "Use custom asset list",
-                value=default_custom_enabled,
-                disabled=not custom_allowed,
-                key="universe_custom_enabled_input",
-                help="Advanced: replace the recommended basket with a manual asset list. Available for 12- and 25-asset universes.",
-            )
-            if not custom_allowed:
-                st.caption("Custom asset editing is available for 12- and 25-asset universes only.")
+        preset_assets = build_generated_universe(selected_size, selected_strategy)
+        custom_allowed = int(selected_size) in {12, 25}
+        default_custom_enabled = (
+            bool(st.session_state.get("universe_custom_enabled_input", st.session_state.get(UNIVERSE_CUSTOM_ENABLED, False)))
+            if custom_allowed
+            else False
+        )
+        custom_enabled = st.checkbox(
+            "Use custom asset list",
+            value=default_custom_enabled,
+            disabled=not custom_allowed,
+            key="universe_custom_enabled_input",
+            help="Advanced: replace the recommended basket with a manual asset list. Available for 12- and 25-asset universes.",
+        )
+        if not custom_allowed:
+            st.caption("Custom asset editing is available for 12- and 25-asset universes only.")
 
         custom_assets_text = ""
         if bool(custom_enabled):
@@ -768,29 +800,30 @@ def _render_investment_setup_card(current_philosophy: str, bundle: dict, rec_tem
         if group_count <= 0 and isinstance(mix_df, pd.DataFrame) and not mix_df.empty and "group" in mix_df.columns:
             group_count = int(mix_df["group"].nunique())
 
-        if selected_assets:
-            source_label = "custom basket" if bool(custom_enabled) else "recommended basket"
-            st.info(
-                f"**Current setup:** {current_philosophy} · {len(selected_assets)} assets · "
-                f"{selected_strategy} · {group_count or 'multiple'} asset groups · {source_label}."
-            )
-        else:
-            st.warning("No valid assets found yet for the primary universe.")
 
-        with st.expander("Advanced strategy defaults, guidance and full composition", expanded=False):
-            st.markdown("**Default engine bundle**")
-            st.caption(
-                f"Template: {rec_template} · Style: {rec_style} · "
-                f"Projection: {bundle.get('projection_profile', current_philosophy)}"
-            )
-            st.caption("These defaults stay aligned with the selected investment philosophy before Step 5 runs the engine.")
-            st.divider()
-            _render_size_strategy_guidance(current_philosophy, int(selected_size), str(selected_strategy))
-            st.divider()
-            _render_strategy_setup_guidance(current_philosophy)
-            st.divider()
-            st.caption(build_universe_preview_text(selected_assets))
-            _render_universe_mix_compact(selected_assets)
+    if selected_assets:
+        source_label = "custom basket" if bool(custom_enabled) else "recommended basket"
+        st.info(
+            f"**Current setup:** {current_philosophy} risk profile · {len(selected_assets)} assets · "
+            f"{selected_strategy} · {source_label}."
+        )
+    else:
+        st.warning("No valid assets found yet for the primary universe.")
+
+    with st.expander("Advanced strategy defaults, guidance and full composition", expanded=False):
+        st.markdown("**Default engine bundle**")
+        st.caption(
+            f"Template: {rec_template} · Style: {rec_style} · "
+            f"Projection: {bundle.get('projection_profile', current_philosophy)}"
+        )
+        st.caption("These defaults stay aligned with the selected risk profile before the strategy engine runs.")
+        st.divider()
+        _render_size_strategy_guidance(current_philosophy, int(selected_size), str(selected_strategy))
+        st.divider()
+        _render_strategy_setup_guidance(current_philosophy)
+        st.divider()
+        st.caption(build_universe_preview_text(selected_assets))
+        _render_universe_mix_compact(selected_assets)
 
     candidate_assets = build_strategy_candidate_pool(selected_size, selected_strategy)
     return int(selected_size), str(selected_strategy), list(selected_assets), list(candidate_assets)
@@ -1008,11 +1041,11 @@ def _render_panel_status_and_diagnostics(panel_error: str, selected_strategy: st
     with st.expander("Market-data status, preview and diagnostics", expanded=False):
         if bool(st.session_state.get(ASSET_PANEL_READY, False)):
             st.success(
-                f"Ready for Step 5: **{ready_asset_count or '—'} assets** · "
+                f"Ready for strategy engine: **{ready_asset_count or '—'} assets** · "
                 f"{panel_rows:,.0f} rows · {str(st.session_state.get(ASSET_RETURN_FREQUENCY, 'monthly') or 'monthly')} returns."
             )
         else:
-            st.error("Step 5 is hard-gated until the asset panel is ready.")
+            st.error("Strategy engine is locked until the asset panel is ready.")
             if panel_error:
                 st.caption(f"Latest panel error: {panel_error}")
 
@@ -1092,12 +1125,11 @@ def _render_panel_status_and_diagnostics(panel_error: str, selected_strategy: st
 
 
 def render_step_4() -> None:
-    section_header("Step 4 — Investment setup")
+    section_header("Risk Profile and Asset Universe")
     _render_step4_intro_banners()
     plan_snapshot = coerce_snapshot()
     raw_investment_context = store_investment_context(plan_snapshot)
     investment_context = _resolve_contribution_bridge_context(raw_investment_context, plan_snapshot)
-    _render_contribution_bridge_card(investment_context)
     maybe_apply_initial_universe_size_default()
     current_philosophy = get_canonical_investment_philosophy()
     bundle = apply_investment_philosophy_bundle(current_philosophy)
@@ -1108,6 +1140,12 @@ def render_step_4() -> None:
         rec_template,
         rec_style,
     )
+    with st.expander("Funding assumption for later simulations", expanded=False):
+        _render_contribution_bridge_card(investment_context)
+        st.caption(
+            "This value is inherited from the Personal Finance Planner when available. "
+            "If no prior plan exists, the demo fallback keeps the strategy lab usable."
+        )
     _render_market_data_setup_card(selected_assets, candidate_assets)
     st.session_state[INVESTMENT_START_DATE_STABILITY_ENABLED] = False
     st.session_state[INVESTMENT_START_DATE_STABILITY_DATES] = []
@@ -1146,7 +1184,7 @@ def render_step_4() -> None:
             st.rerun()
     with right:
         continue_disabled = not bool(st.session_state.get(ASSET_PANEL_READY, False))
-        if st.button("Continue to Investment Engine", key="step4_continue", disabled=continue_disabled, use_container_width=True):
+        if st.button("Continue to Engine Workspace", key="step4_continue", disabled=continue_disabled, use_container_width=True):
             st.session_state["step4_universe_payload"] = payload
             st.session_state[CURRENT_STEP] = 5
             st.session_state["current_step"] = 5
@@ -1154,4 +1192,4 @@ def render_step_4() -> None:
         if continue_disabled:
             st.caption("Finish this step by preparing a valid market-data panel first.")
         else:
-            st.caption("Ready to continue into the Investment Engine workspace.")
+            st.caption("Ready to continue into the Engine Workspace.")

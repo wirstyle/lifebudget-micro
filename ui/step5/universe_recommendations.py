@@ -64,15 +64,34 @@ UNIVERSE_SKIPPED_RUN_SIGNATURE_KEY = "step5_universe_skipped_run_signature_v1"
 UNIVERSE_SUGGESTION_TIMING_KEY = "step5_universe_suggestion_timing_v1"
 UNIVERSE_RECOMMENDATION_CONTEXT_KEY = "step5_recommended_universe_context_v1"
 STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_apply_v1"
-STEP5_DEMO_SPEED_MODE_KEY = "step5_demo_speed_mode_v1"
+UNIVERSE_SUGGESTION_COUNT_KEY = "step5_suggestion_count_universe_v1"
+UNIVERSE_SECONDS_PER_TEST = 22.0
 
 
+def _suggestion_candidate_count(default: int = 4) -> int:
+    try:
+        raw = int(st.session_state.get(UNIVERSE_SUGGESTION_COUNT_KEY, default))
+    except Exception:
+        raw = int(default)
+    return int(max(1, min(8, raw)))
 
-def _demo_speed_mode_enabled() -> bool:
-    """Use smaller candidate budgets by default in hosted/demo mode."""
-    if STEP5_DEMO_SPEED_MODE_KEY not in st.session_state:
-        st.session_state[STEP5_DEMO_SPEED_MODE_KEY] = True
-    return bool(st.session_state.get(STEP5_DEMO_SPEED_MODE_KEY, True))
+
+def _format_runtime_estimate(seconds: float) -> str:
+    try:
+        seconds = float(seconds)
+    except Exception:
+        seconds = 90.0
+    if seconds <= 40:
+        return "~30s"
+    if seconds <= 70:
+        return "~1 min"
+    if seconds <= 105:
+        return "~90s"
+    if seconds <= 150:
+        return "~2 min"
+    minutes = seconds / 60.0
+    rounded = round(minutes * 2.0) / 2.0
+    return f"~{rounded:g} min"
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +157,54 @@ def _normalise_perf(perf: Any) -> dict:
         "max_drawdown": abs(_safe_float(p.get("max_drawdown", 0.0), 0.0)),
         "periods": _safe_int(p.get("periods", 0), 0),
     }
+
+
+def _extract_oos_returns_for_projection(run_map: dict) -> list[float]:
+    candidates = [
+        _coerce_mapping(run_map).get("oos_returns_monthly"),
+        _coerce_mapping(run_map).get("oos_returns_simple"),
+        _coerce_mapping(run_map).get("portfolio_returns"),
+        _coerce_mapping(run_map).get("oos_returns"),
+        _coerce_mapping(run_map).get("returns"),
+    ]
+    for raw in candidates:
+        if raw is None:
+            continue
+        try:
+            if hasattr(raw, "tolist"):
+                raw = raw.tolist()
+        except Exception:
+            raw = []
+        if not isinstance(raw, list):
+            continue
+        out: list[float] = []
+        for item in raw:
+            try:
+                out.append(float(item))
+            except Exception:
+                continue
+        if out:
+            return out
+    return []
+
+
+def _store_projection_bridge_context_for_current_result(run_map: dict) -> None:
+    run_map = _coerce_mapping(run_map)
+    ctx = st.session_state.get("investment_context", {})
+    if not isinstance(ctx, dict):
+        ctx = {}
+    ctx["oos_returns_monthly"] = list(_extract_oos_returns_for_projection(run_map))
+    ctx.setdefault("run_signature", str(run_map.get("run_signature", "") or ""))
+    st.session_state["investment_context"] = ctx
+
+
+def _render_continue_with_current_result_button(run_map: dict, *, key: str) -> None:
+    _, continue_col, _ = st.columns([0.29, 0.42, 0.29])
+    with continue_col:
+        if st.button("Continue with current result", key=key, use_container_width=True):
+            _store_projection_bridge_context_for_current_result(run_map)
+            st.session_state["current_step"] = 6
+            st.rerun()
 
 
 def _coerce_cfg_payload(cfg_payload: Any) -> dict:
@@ -467,7 +534,7 @@ def _candidate_specs(
             family="strategy_seed",
             assets=generated,
             strategy_name=strategy,
-            caption="Same universe size, generated from an alternative Step 4 composition seed already available in the data panel.",
+            caption="Same universe size, generated from an alternative composition seed already available in the data panel.",
         )
 
     # 2) Fallback / complement: build small same-size compositions from the loaded
@@ -486,7 +553,7 @@ def _candidate_specs(
             family="risk_adjusted_pool",
             assets=_take_top_assets(metrics, profile_score, universe_size),
             strategy_name=current_strategy,
-            caption="Same size, selected from loaded Step 4 candidate assets by the current philosophy score.",
+            caption="Same size, selected from loaded candidate assets by the current philosophy score.",
         )
     if not metrics.empty and len(candidates) < int(max_candidates):
         _add(
@@ -494,7 +561,7 @@ def _candidate_specs(
             family="risk_control_pool",
             assets=_take_top_assets(metrics, "annual_volatility", universe_size, ascending=True),
             strategy_name=current_strategy,
-            caption="Same size, selected from loaded Step 4 candidate assets with lower realised volatility.",
+            caption="Same size, selected from loaded candidate assets with lower realised volatility.",
         )
     if not metrics.empty and len(candidates) < int(max_candidates):
         _add(
@@ -502,7 +569,7 @@ def _candidate_specs(
             family="momentum_pool",
             assets=_take_top_assets(metrics, "trailing_12m_return", universe_size),
             strategy_name=current_strategy,
-            caption="Same size, selected from loaded Step 4 candidate assets with stronger trailing return behaviour.",
+            caption="Same size, selected from loaded candidate assets with stronger trailing return behaviour.",
         )
     if not metrics.empty and len(candidates) < int(max_candidates):
         _add(
@@ -510,7 +577,7 @@ def _candidate_specs(
             family="diversified_pool",
             assets=_diversified_assets(metrics, universe_size, philosophy),
             strategy_name=current_strategy,
-            caption="Same size, selected from loaded Step 4 candidate assets while spreading picks across asset groups where possible.",
+            caption="Same size, selected from loaded candidate assets while spreading picks across asset groups where possible.",
         )
 
     return candidates[: int(max_candidates)]
@@ -549,6 +616,7 @@ def _build_scope(run_result: dict) -> str:
             "universe_size": int(step4_payload.get("size", st.session_state.get(UNIVERSE_SIZE, 25)) or 25),
             "universe_strategy": str(step4_payload.get("strategy", st.session_state.get(UNIVERSE_STRATEGY, "")) or ""),
             "current_assets": current_assets,
+            "suggestion_candidates": _suggestion_candidate_count(4),
             "panel_assets": _panel_assets(panel_df),
             "panel_fp": _stable_panel_fingerprint(panel_df),
             "phase": "universe_composition_v1",
@@ -566,7 +634,7 @@ def _run_universe_search(run_result: dict, *, max_candidates: int = 4) -> dict:
     panel = st.session_state.get(ASSET_PANEL_DF, st.session_state.get("asset_panel_df"))
     panel_df = panel.copy() if isinstance(panel, pd.DataFrame) else pd.DataFrame()
     if panel_df.empty:
-        return {"scope": _build_scope(run_result), "evaluations": [], "error": "Step 4 asset panel is missing."}
+        return {"scope": _build_scope(run_result), "evaluations": [], "error": "The selected market-data panel is missing."}
 
     step4_payload = _coerce_mapping(build_step4_universe_payload_from_state())
     universe_size = _safe_int(step4_payload.get("size", st.session_state.get(UNIVERSE_SIZE, 25)), 25)
@@ -721,7 +789,7 @@ def _normalise_promoted_candidate_result(candidate: dict, cfg_payload: dict) -> 
             "source": "micro_pipeline_real",
             "promoted_from_universe_candidate": True,
             "universe_candidate_label": str(candidate_map.get("label", "Universe composition candidate") or "Universe composition candidate"),
-            "asset_panel_source_label": "Step 5 recommended universe composition",
+            "asset_panel_source_label": "Strategy engine recommended universe composition",
             "asset_panel_n_rows": int(len(candidate_panel)),
             "asset_panel_n_assets": int(candidate_panel["asset"].nunique()) if "asset" in candidate_panel.columns else 0,
             "performance_summary": dict(perf),
@@ -797,7 +865,7 @@ def _apply_candidate(candidate: dict) -> None:
         ASSET_PANEL_DF: candidate_panel if isinstance(candidate_panel, pd.DataFrame) and not candidate_panel.empty else source_panel,
         "asset_panel_df": candidate_panel if isinstance(candidate_panel, pd.DataFrame) and not candidate_panel.empty else source_panel,
         ASSET_PANEL_READY: bool(isinstance(candidate_panel, pd.DataFrame) and not candidate_panel.empty),
-        ASSET_PANEL_SOURCE_LABEL: "Step 5 recommended universe composition",
+        ASSET_PANEL_SOURCE_LABEL: "Strategy engine recommended universe composition",
     }
 
     if promoted_result:
@@ -858,7 +926,7 @@ def _skip_current_universe_candidate(scope: str, label: str, run_signature: str)
     """Mark the current universe-composition recommendation as skipped.
 
     This completes the improvement flow while preserving diagnostics/timing and
-    leaving the existing Step 4 universe/panel untouched.
+    leaving the existing selected universe/panel untouched.
     """
     patch = {
         UNIVERSE_SKIPPED_SCOPE_KEY: str(scope or ""),
@@ -915,16 +983,13 @@ def _candidate_table(evaluations: list[dict], current_perf: dict) -> pd.DataFram
 
 
 def _render_recommended_candidate(candidate: dict, current_perf: dict) -> None:
+    """Render the actionable universe-mix candidate as a compact card."""
     item = _coerce_mapping(candidate)
     perf = _normalise_perf(item.get("performance_summary", {}))
     current = _normalise_perf(current_perf)
-    assets = _asset_list(item.get("assets", []))
 
-    st.markdown("### Recommended universe composition")
+    st.markdown("### Recommended universe mix")
     st.markdown(f"**{item.get('label', 'Universe composition candidate')}**")
-    caption = str(item.get("caption", "") or "")
-    if caption:
-        st.caption(caption)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -942,25 +1007,6 @@ def _render_recommended_candidate(candidate: dict, current_perf: dict) -> None:
     with c4:
         st.metric("Sharpe", f"{perf['sharpe']:.2f}", delta=f"{perf['sharpe'] - current['sharpe']:+.2f}")
 
-    st.success("This candidate passed the universe-composition acceptance gate.")
-    gate_reason = str(item.get("gate_reason", "") or "")
-    if gate_reason:
-        st.caption(gate_reason)
-    if item.get("error"):
-        st.warning(str(item.get("error")))
-
-    with st.expander("Recommended universe assets", expanded=False):
-        if assets:
-            preview = ", ".join(asset_display_label(x) for x in assets[:40])
-            if len(assets) > 40:
-                preview += f" ... +{len(assets) - 40} more"
-            st.write(preview)
-        st.caption(
-            f"size={item.get('universe_size', '—')} · strategy={item.get('universe_strategy', '—')} · "
-            f"overlap_vs_current={100.0 * _safe_float(item.get('overlap_vs_current'), 0.0):.0f}% · "
-            f"score_delta={_safe_float(item.get('score_delta'), 0.0):+.3f}"
-        )
-
 
 def render_universe_improvement(run_result: dict) -> None:
     """Render the third Step 5 improvement phase: universe composition.
@@ -973,11 +1019,7 @@ def render_universe_improvement(run_result: dict) -> None:
     if not perf:
         return
 
-    st.markdown("### Universe composition suggestion")
-    st.caption(
-        "This keeps the current strategy preset, technical engine configuration, and universe size, "
-        "then tests a small number of alternative asset compositions using only assets already present in the Step 4 data panel."
-    )
+    # The phase rail already labels this as Universe mix. Keep this panel action-first.
 
     msg = st.session_state.pop("step5_universe_apply_message_v1", "")
 
@@ -987,11 +1029,11 @@ def render_universe_improvement(run_result: dict) -> None:
     if applied_signature and current_run_signature and applied_signature == current_run_signature:
         label = applied_label or "the accepted universe composition suggestion"
         st.success(
-            f"Universe composition applied: {label}. The rerun-tested candidate is now the current Step 5 result."
+            f"Universe composition applied: {label}. The rerun-tested candidate is now the current strategy engine result."
         )
         st.caption(
             "Universe testing is hidden for this run to avoid suggesting the same loop again. "
-            "Change Step 4 or run a new baseline if you want to test a different universe."
+            "Change the selected universe or run a new baseline if you want to test a different universe."
         )
         return
 
@@ -1006,40 +1048,22 @@ def render_universe_improvement(run_result: dict) -> None:
     skipped_scope = str(st.session_state.get(UNIVERSE_SKIPPED_SCOPE_KEY, "") or "")
     skipped_label = str(st.session_state.get(UNIVERSE_SKIPPED_LABEL_KEY, "") or "")
     skipped_run_signature = str(st.session_state.get(UNIVERSE_SKIPPED_RUN_SIGNATURE_KEY, "") or "")
-    if (
+    universe_was_skipped = bool(
         skipped_scope
         and skipped_scope == scope
         and (not skipped_run_signature or skipped_run_signature == current_run_signature)
-        and not evaluations
-    ):
-        st.info("Universe-composition check skipped for this run. Universe size can now be reviewed or skipped.")
+    )
+    if universe_was_skipped and not evaluations:
+        st.warning("Universe mix skipped: current universe composition kept for this run. Universe size can now be reviewed or skipped.")
         if skipped_label:
-            st.caption(f"Skipped universe-composition check: {skipped_label}.")
+            st.caption(f"Skipped universe mix check: {skipped_label}.")
         return
 
     if saved_scope != scope or not evaluations:
-        quick_mode = _demo_speed_mode_enabled()
-        max_candidates = 4
-        estimate = "~90s+"
-        st.info(
-            f"Universe composition is optional and reruns {max_candidates} asset-composition candidates "
-            f"with the real engine. Estimated time: {estimate}."
-        )
-        left, right = st.columns(2)
-        should_run = False
-        with left:
-            should_run = st.button(
-                "Run universe composition check" if quick_mode else "Run full universe check",
-                key="step5_run_universe_suggestion_check_v1",
-                use_container_width=True,
-            )
-        with right:
-            if st.button("Skip universe-composition check", key="step5_skip_universe_check_not_run_v1", use_container_width=True):
-                _skip_current_universe_candidate(scope, "universe-composition check skipped", current_run_signature)
-        if not should_run:
-            return
-
-        with st.spinner("Testing alternative universe compositions with the real engine..."):
+        max_candidates = _suggestion_candidate_count(4)
+        estimate = _format_runtime_estimate(UNIVERSE_SECONDS_PER_TEST * max_candidates)
+        label = f"{max_candidates} universe-mix alternative" if max_candidates == 1 else f"{max_candidates} universe-mix alternatives"
+        with st.spinner(f"Testing {label} ({estimate})..."):
             payload = _run_universe_search(run_map, max_candidates=max_candidates)
         st.session_state[UNIVERSE_SUGGESTION_STATE_KEY] = payload
         st.session_state[UNIVERSE_SUGGESTION_SCOPE_KEY] = str(payload.get("scope", scope))
@@ -1052,6 +1076,8 @@ def render_universe_improvement(run_result: dict) -> None:
             st.info(f"No safe universe candidates were available to test for this run. {error}")
         else:
             st.info("No safe universe candidates were available to test for this run.")
+        if st.button("Continue with current universe mix", key="step5_continue_universe_no_candidates_v1", use_container_width=True):
+            _skip_current_universe_candidate(scope, "no safe universe candidates", current_run_signature)
         return
 
     accepted_items = [dict(x) for x in evaluations if bool(_coerce_mapping(x).get("accepted", False))]
@@ -1072,28 +1098,13 @@ def render_universe_improvement(run_result: dict) -> None:
             "the acceptance gate did not find a better trade-off."
         )
     elif universe_was_skipped:
-        st.info("Current universe composition kept for this run. The improvement flow is complete.")
+        st.warning("Universe mix skipped: current universe composition kept for this run. Universe size can now be reviewed or skipped.")
         if skipped_label:
             st.caption(f"Skipped universe recommendation: {skipped_label}.")
     else:
         best_candidate = accepted_items[0]
-        st.success("Recommended universe composition found. The best accepted candidate is shown below.")
         _render_recommended_candidate(best_candidate, perf)
-        st.caption(
-            "The diagnostics table shows every universe candidate tested by the engine. Only the best accepted candidate "
-            "is offered as the main action; rejected candidates are shown for transparency, not as recommendations."
-        )
 
-    with st.expander("Universe composition diagnostics", expanded=False):
-        st.caption(
-            f"tested_candidates={len(evaluations)} · elapsed={_safe_float(payload.get('elapsed_sec', 0.0), 0.0):.2f}s · "
-            f"scope={str(payload.get('scope', scope))}"
-        )
-        if not table.empty:
-            st.dataframe(table, use_container_width=True, hide_index=True)
-
-    if accepted_items and not universe_was_skipped:
-        best_candidate = accepted_items[0]
         left, right = st.columns(2)
         with left:
             if st.button("Apply recommended universe", key="step5_apply_best_universe_candidate_v1", use_container_width=True):
@@ -1105,6 +1116,45 @@ def render_universe_improvement(run_result: dict) -> None:
                     str(best_candidate.get("label", "recommended universe") or "recommended universe"),
                     current_run_signature,
                 )
+
+        _render_continue_with_current_result_button(run_map, key="step5_universe_continue_current_result_v1")
+
+        with st.expander("Why this candidate passed", expanded=False):
+            st.success("This candidate passed the universe-composition acceptance gate.")
+            caption = str(best_candidate.get("caption", "") or "")
+            if caption:
+                st.caption(caption)
+            gate_reason = str(best_candidate.get("gate_reason", "") or "")
+            if gate_reason:
+                st.caption(gate_reason)
+            if best_candidate.get("error"):
+                st.warning(str(best_candidate.get("error")))
+            st.caption(
+                f"size={best_candidate.get('universe_size', '—')} · "
+                f"strategy={best_candidate.get('universe_strategy', '—')} · "
+                f"overlap_vs_current={100.0 * _safe_float(best_candidate.get('overlap_vs_current'), 0.0):.0f}% · "
+                f"score_delta={_safe_float(best_candidate.get('score_delta'), 0.0):+.3f}"
+            )
+
+        with st.expander("Recommended universe assets", expanded=False):
+            assets = _asset_list(best_candidate.get("assets", []))
+            if assets:
+                preview = ", ".join(asset_display_label(x) for x in assets[:40])
+                if len(assets) > 40:
+                    preview += f" ... +{len(assets) - 40} more"
+                st.write(preview)
+
+    with st.expander("Universe composition diagnostics", expanded=False):
+        st.caption(
+            f"tested_candidates={len(evaluations)} · elapsed={_safe_float(payload.get('elapsed_sec', 0.0), 0.0):.2f}s · "
+            f"scope={str(payload.get('scope', scope))}"
+        )
+        if not table.empty:
+            st.dataframe(table, use_container_width=True, hide_index=True)
+
+    if not accepted_items and not universe_was_skipped:
+        if st.button("Continue with current universe mix", key="step5_continue_current_universe_v1", use_container_width=True):
+            _skip_current_universe_candidate(scope, "no accepted universe mix candidate", current_run_signature)
 
 
 # Compatibility wrapper for older imports.
