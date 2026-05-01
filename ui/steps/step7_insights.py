@@ -26,6 +26,10 @@ STEP0_PATHWAY = "step0_planning_pathway"
 STEP6_VIEW_MODE_KEY = "step6_projection_view_mode_v1"
 CASH_ONLY_PROJECTION_RESULT = "investment_projection_cash_only_result"
 COMPARE_BRANCH_RESULT = "step6_compare_branch_result"
+try:
+    from ui.state.keys import INVESTMENT_PROJECTION_COMPARE_RESULTS
+except Exception:  # pragma: no cover - keep Step 7 compatible with older key modules.
+    INVESTMENT_PROJECTION_COMPARE_RESULTS = "investment_projection_compare_results"
 
 
 def _current_pathway() -> str:
@@ -69,7 +73,9 @@ def _current_step7_mode() -> str:
 
     compare_payload = _coerce_mapping(st.session_state.get(COMPARE_BRANCH_RESULT, {}))
     compare_rows = compare_payload.get("rows", [])
-    has_compare_rows = isinstance(compare_rows, list) and len(compare_rows) > 0
+    has_compare_rows = (
+        isinstance(compare_rows, list) and len(compare_rows) > 0
+    ) or _has_current_horizon_comparison_state()
 
     if mode == "savings_only":
         return "savings_only"
@@ -117,12 +123,66 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     return float(default)
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return int(default)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return int(default)
+            return int(float(cleaned.replace(",", "")))
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
 def _fmt_gbp0(value: Any) -> str:
     return f"£{_safe_float(value, 0.0):,.0f}"
 
 
 def _fmt_pct_from_fraction(value: Any, decimals: int = 1) -> str:
     return f"{_safe_float(value, 0.0) * 100.0:.{decimals}f}%"
+
+
+def _first_non_empty_text(*values: Any) -> str:
+    """Return the first useful text value from mixed state/summary fields."""
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in {"none", "nan", "null", "—", "-"}:
+            return text
+    return ""
+
+
+def _session_text(*keys: str) -> str:
+    """Read the first non-empty text value from Streamlit session state."""
+    return _first_non_empty_text(*(st.session_state.get(key) for key in keys))
+
+
+def _projection_profile_text(proj: Dict[str, Any] | None = None) -> str:
+    """Best-effort risk/projection profile label for report copy."""
+    proj = _coerce_mapping(proj or {})
+    return _first_non_empty_text(
+        proj.get("projection_profile"),
+        proj.get("risk_profile"),
+        proj.get("profile"),
+        proj.get("philosophy"),
+        st.session_state.get("step6_projection_profile"),
+        st.session_state.get("step4_philosophy"),
+        st.session_state.get("investment_philosophy"),
+        st.session_state.get("selected_philosophy"),
+        st.session_state.get("risk_profile"),
+        st.session_state.get("mother_philosophy"),
+    )
+
+
+def _set_step(step: int) -> None:
+    """Route to an app step using both current and legacy state keys."""
+    st.session_state[CURRENT_STEP] = int(step)
+    st.session_state["current_step"] = int(step)
+    st.rerun()
 
 
 def _extract_engine_summary() -> dict:
@@ -183,6 +243,248 @@ def _has_projection(summary: Dict[str, Any]) -> bool:
         for key in ("median_terminal", "expected_terminal", "final_value", "p90_terminal")
     )
 
+
+
+def _has_current_horizon_comparison_state() -> bool:
+    """Return True when the newer Step 6 horizon-comparison state exists.
+
+    Older Step 6 versions stored final-report rows in ``step6_compare_branch_result``.
+    The current Long-Term Scenario stores the investment/proxy horizon payloads in
+    ``INVESTMENT_PROJECTION_COMPARE_RESULTS`` and keeps the savings-only branch in
+    ``CASH_ONLY_PROJECTION_RESULT``. Step 7 should accept both contracts.
+    """
+    compare_results = _coerce_mapping(st.session_state.get(INVESTMENT_PROJECTION_COMPARE_RESULTS, {}))
+    investment_summary = _extract_projection_summary(INVESTMENT_PROJECTION_RESULT)
+    if compare_results and _has_projection(investment_summary):
+        return True
+    if compare_results:
+        return True
+    savings_summary = _extract_projection_summary(CASH_ONLY_PROJECTION_RESULT)
+    if _has_projection(investment_summary) and _has_projection(savings_summary):
+        return True
+    # Current Step 6 may have a valid investment/proxy projection and render the
+    # savings-only baseline on the chart/table without persisting a separate cash
+    # payload. Treat that as sufficient state; rows can be reconstructed.
+    return bool(_has_projection(investment_summary))
+
+
+def _horizon_years_from_label(value: Any) -> int:
+    """Parse labels such as '20 years' or '1 years (current)' safely."""
+    import re
+
+    match = re.search(r"(\d+)", str(value or ""))
+    if not match:
+        return 0
+    try:
+        return int(match.group(1))
+    except Exception:
+        return 0
+
+
+def _safe_money_float(value: Any, default: float = 0.0) -> float:
+    """Parse numeric or currency-like values without assuming display format."""
+    if isinstance(value, (int, float)):
+        return _safe_float(value, default)
+    text = str(value or "").strip()
+    if not text or text in {"—", "-", "None"}:
+        return float(default)
+    cleaned = (
+        text.replace("£", "")
+        .replace(",", "")
+        .replace("%", "")
+        .strip()
+    )
+    return _safe_float(cleaned, default)
+
+
+def _extract_compare_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Support Step 6 compare payloads stored as either raw result or wrapper."""
+    payload = _coerce_mapping(payload)
+    if not payload:
+        return {}
+    result = _coerce_mapping(payload.get("result", {}))
+    return result if result else payload
+
+
+def _cash_terminal_by_horizon() -> dict[int, float]:
+    """Build a year -> savings-only terminal map from the current cash payload."""
+    cash_payload = _extract_projection_payload(CASH_ONLY_PROJECTION_RESULT)
+    cash_summary = _extract_projection_summary(cash_payload)
+    out: dict[int, float] = {}
+
+    horizon_table = cash_summary.get("horizon_table") or cash_payload.get("horizon_table") or []
+    if isinstance(horizon_table, pd.DataFrame):
+        horizon_rows = horizon_table.to_dict("records")
+    elif isinstance(horizon_table, list):
+        horizon_rows = horizon_table
+    else:
+        horizon_rows = []
+
+    for row in horizon_rows:
+        row_map = _coerce_mapping(row)
+        years = _safe_int(row_map.get("_years"), 0) or _horizon_years_from_label(
+            row_map.get("Horizon") or row_map.get("horizon")
+        )
+        if years <= 0:
+            continue
+        value = None
+        for key in (
+            "Expected",
+            "expected",
+            "median final wealth",
+            "Median terminal",
+            "median_terminal",
+            "expected_terminal",
+            "final_value",
+        ):
+            if key in row_map and row_map.get(key) is not None:
+                value = _safe_money_float(row_map.get(key), 0.0)
+                break
+        if value is not None and value > 0.0:
+            out[int(years)] = float(value)
+
+    cash_horizon = _safe_int(cash_summary.get("horizon_years"), 0)
+    cash_terminal = _metric(cash_summary, "median_terminal", "expected_terminal", "final_value", default=0.0)
+    if cash_horizon > 0 and cash_terminal > 0.0:
+        out.setdefault(int(cash_horizon), float(cash_terminal))
+
+    return out
+
+
+def _infer_savings_only_terminal_for_horizon(years: Any) -> float:
+    """Infer the savings-only baseline from the active Step 6 projection state.
+
+    The current Long-Term Scenario can display the savings-only baseline directly
+    in the horizon table/chart without storing a separate
+    ``CASH_ONLY_PROJECTION_RESULT`` payload. Final Report therefore needs this
+    fallback: same starting pot + same monthly contribution + no investment
+    return, volatility or drawdown.
+    """
+    years_int = _safe_int(years, 0)
+    if years_int <= 0:
+        return 0.0
+
+    investment_summary = _extract_projection_summary(INVESTMENT_PROJECTION_RESULT)
+
+    starting_value = _metric(
+        investment_summary,
+        "starting_value",
+        default=_safe_float(st.session_state.get("investment_projection_current_savings", 0.0), 0.0),
+    )
+    if starting_value <= 0.0:
+        starting_value = _safe_float(st.session_state.get("investment_projection_current_savings", 0.0), 0.0)
+
+    monthly_contribution = _metric(investment_summary, "monthly_contribution", default=0.0)
+    if monthly_contribution <= 0.0:
+        total_contributed = _metric(investment_summary, "total_contributed", default=0.0)
+        source_horizon = _safe_int(investment_summary.get("horizon_years"), 0)
+        if total_contributed > starting_value and source_horizon > 0:
+            monthly_contribution = (total_contributed - starting_value) / float(source_horizon * 12)
+
+    if monthly_contribution <= 0.0:
+        investment_context = _coerce_mapping(st.session_state.get("investment_context", {}))
+        monthly_contribution = _safe_float(investment_context.get("monthly_contribution", 0.0), 0.0)
+
+    if monthly_contribution <= 0.0:
+        weekly = _safe_float(st.session_state.get("target_a_weekly", 0.0), 0.0)
+        if weekly > 0.0:
+            monthly_contribution = weekly * 52.0 / 12.0
+
+    if monthly_contribution <= 0.0:
+        return 0.0
+
+    return float(starting_value) + (float(monthly_contribution) * 12.0 * float(years_int))
+
+
+def _projection_payload_horizon(payload: Dict[str, Any], fallback_key: Any = None) -> int:
+    summary = _extract_projection_summary(payload)
+    return (
+        _safe_int(summary.get("horizon_years"), 0)
+        or _safe_int(fallback_key, 0)
+        or _horizon_years_from_label(fallback_key)
+    )
+
+
+def _legacy_compare_rows() -> list[dict[str, Any]]:
+    compare_payload = _coerce_mapping(st.session_state.get(COMPARE_BRANCH_RESULT, {}))
+    rows = compare_payload.get("rows", [])
+    if isinstance(rows, pd.DataFrame):
+        return rows.to_dict("records")
+    if isinstance(rows, list):
+        return [dict(row) for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _horizon_compare_rows_from_current_state() -> list[dict[str, Any]]:
+    """Translate current Step 6 horizon-comparison payloads into Step 7 rows."""
+    cash_by_year = _cash_terminal_by_horizon()
+    compare_results = _coerce_mapping(st.session_state.get(INVESTMENT_PROJECTION_COMPARE_RESULTS, {}))
+
+    investment_payloads: list[tuple[int, Dict[str, Any]]] = []
+    seen: set[int] = set()
+
+    current_payload = _extract_projection_payload(INVESTMENT_PROJECTION_RESULT)
+    current_summary = _extract_projection_summary(current_payload)
+    current_years = _projection_payload_horizon(current_payload)
+    if current_years > 0 and _has_projection(current_summary):
+        investment_payloads.append((int(current_years), current_payload))
+        seen.add(int(current_years))
+
+    for key, raw_payload in compare_results.items():
+        payload = _extract_compare_payload(_coerce_mapping(raw_payload))
+        summary = _extract_projection_summary(payload)
+        if not _has_projection(summary):
+            continue
+        years = _projection_payload_horizon(payload, key)
+        if years <= 0 or years in seen:
+            continue
+        investment_payloads.append((int(years), payload))
+        seen.add(int(years))
+
+    rows: list[dict[str, Any]] = []
+    for years, payload in sorted(investment_payloads, key=lambda item: item[0]):
+        summary = _extract_projection_summary(payload)
+        inv_median = _metric(summary, "median_terminal", "expected_terminal", "final_value", default=0.0)
+        inv_p10 = _metric(summary, "p10_terminal", "median_terminal", "expected_terminal", "final_value", default=inv_median)
+        inv_p90 = _metric(summary, "p90_terminal", "median_terminal", "expected_terminal", "final_value", default=inv_median)
+        if inv_median <= 0.0:
+            continue
+
+        savings_terminal = cash_by_year.get(int(years))
+        if savings_terminal is None:
+            # Final fallback: if only a single savings-only projection exists,
+            # use it for its matching horizon and leave other rows incomplete.
+            cash_summary = _extract_projection_summary(CASH_ONLY_PROJECTION_RESULT)
+            cash_horizon = _safe_int(cash_summary.get("horizon_years"), 0)
+            if cash_horizon == int(years):
+                savings_terminal = _metric(cash_summary, "median_terminal", "expected_terminal", "final_value", default=0.0)
+
+        if savings_terminal is None or savings_terminal <= 0.0:
+            savings_terminal = _infer_savings_only_terminal_for_horizon(years)
+
+        if savings_terminal is None or savings_terminal <= 0.0:
+            continue
+
+        rows.append(
+            {
+                "Horizon": f"{int(years)} years" + (" (current)" if int(years) == current_years else ""),
+                "Savings-only": float(savings_terminal),
+                "Investing median": float(inv_median),
+                "Investing P10": float(inv_p10),
+                "Investing P90": float(inv_p90),
+                "Difference": float(inv_median - savings_terminal),
+                "_years": int(years),
+            }
+        )
+    return rows
+
+
+def _compare_rows_from_available_state() -> list[dict[str, Any]]:
+    """Prefer legacy fair-comparison rows, then fall back to current Step 6 state."""
+    legacy_rows = _legacy_compare_rows()
+    if legacy_rows:
+        return legacy_rows
+    return _horizon_compare_rows_from_current_state()
 
 def _engine_result_is_real() -> bool:
     """Return True only when Step 5 genuinely ran.
@@ -647,112 +949,223 @@ def _render_investing_insights(proj: Dict[str, Any], cash_proj: Dict[str, Any], 
     _render_decision_support_note(compare=compare)
 
 
-def _render_compare_branch_insights(engine: Dict[str, Any]) -> None:
-    compare_payload = _coerce_mapping(st.session_state.get(COMPARE_BRANCH_RESULT, {}))
-    rows = compare_payload.get("rows", [])
-    proj = _extract_projection_summary(INVESTMENT_PROJECTION_RESULT)
+def _render_compare_branch_insights(engine: Dict[str, Any]) -> bool:
+    rows = _compare_rows_from_available_state()
+    proj_payload = _extract_projection_payload(INVESTMENT_PROJECTION_RESULT)
+    proj = _extract_projection_summary(proj_payload)
     cash_proj = _extract_projection_summary(CASH_ONLY_PROJECTION_RESULT)
 
+    # Last-resort bridge for sessions where Step 6 has a valid current
+    # investment/proxy projection but did not persist the horizon-comparison
+    # rows in the legacy shape expected by Step 7.
+    if not rows and _has_projection(proj):
+        years = (
+            _projection_payload_horizon(proj_payload)
+            or _safe_int(st.session_state.get("investment_projection_horizon_years"), 0)
+            or 1
+        )
+        inv_median = _metric(proj, "median_terminal", "expected_terminal", "final_value", default=0.0)
+        inv_p10 = _metric(proj, "p10_terminal", "median_terminal", "expected_terminal", "final_value", default=inv_median)
+        inv_p90 = _metric(proj, "p90_terminal", "median_terminal", "expected_terminal", "final_value", default=inv_median)
+        savings_terminal = _infer_savings_only_terminal_for_horizon(years)
+        if inv_median > 0.0 and savings_terminal > 0.0:
+            rows = [
+                {
+                    "Horizon": f"{int(years)} years (current)",
+                    "Savings-only": float(savings_terminal),
+                    "Investing median": float(inv_median),
+                    "Investing P10": float(inv_p10),
+                    "Investing P90": float(inv_p90),
+                    "Difference": float(inv_median - savings_terminal),
+                    "_years": int(years),
+                }
+            ]
+
     if not rows:
-        # Graceful fallback: if a user generated separate investment and savings
-        # projections but did not run the fair comparison table, still show the
-        # core comparison. Otherwise send them back to Step 6, not Step 5.
-        if _has_projection(proj) and _has_projection(cash_proj):
-            _render_investing_insights(proj, cash_proj, engine, compare=True)
-            return
         _render_missing_step6_result(
-            "Run the comparison view in the Long-Term Scenario first. It can use either the educational proxy or tested Strategy Engine returns.",
+            "Generate the comparison view in the Long-Term Scenario first. The Final Report can then summarise your personal finance setup, strategy/proxy pathway, and long-term scenario outputs.",
             button_key="step7_compare_missing_back",
         )
-        return
+        return False
 
     compare_df = pd.DataFrame(rows)
     valid = compare_df.dropna(subset=["Savings-only", "Investing median"], how="any") if not compare_df.empty else pd.DataFrame()
-
-    _render_proxy_evidence_note(compare=True)
-    _render_report_summary(mode_label="comparison", proj=proj, cash_proj=cash_proj, engine=engine, compare=True)
-    if _engine_result_is_real():
-        _render_engine_metrics(engine)
-
-    st.markdown("### Savings vs investment comparison")
     if valid.empty:
+        _render_proxy_evidence_note(compare=True)
         st.warning("No complete comparison rows were found. Re-run the Long-Term Scenario comparison.")
-        return
+        return False
 
+    valid = valid.copy()
     valid["Difference"] = pd.to_numeric(valid["Difference"], errors="coerce")
-    last_row = valid.sort_values("_years").iloc[-1] if "_years" in valid.columns else valid.iloc[-1]
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Longest savings-only", _fmt_gbp0(last_row.get("Savings-only", 0.0)))
-    with c2:
-        st.metric("Longest investing median", _fmt_gbp0(last_row.get("Investing median", 0.0)))
-    with c3:
-        st.metric("Median difference", _fmt_gbp0(last_row.get("Difference", 0.0)))
+    if "_years" in valid.columns:
+        valid = valid.sort_values("_years")
+    last_row = valid.iloc[-1]
 
     savings_terminal = _safe_float(last_row.get("Savings-only", 0.0), 0.0)
     investing_terminal = _safe_float(last_row.get("Investing median", 0.0), 0.0)
-    diff_terminal = _safe_float(last_row.get("Difference", 0.0), 0.0)
+    diff_terminal = _safe_float(last_row.get("Difference", investing_terminal - savings_terminal), 0.0)
+    monthly = (
+        _metric(proj, "monthly_contribution", default=0.0)
+        or _metric(cash_proj, "monthly_contribution", default=0.0)
+        or _safe_float(st.session_state.get("investment_projection_monthly_contribution", 0.0), 0.0)
+    )
+    if monthly <= 0.0:
+        investment_context = _coerce_mapping(st.session_state.get("investment_context", {}))
+        monthly = _safe_float(investment_context.get("monthly_contribution", 0.0), 0.0)
+    if monthly <= 0.0:
+        weekly = _safe_float(st.session_state.get("target_a_weekly", 0.0), 0.0)
+        monthly = weekly * 52.0 / 12.0 if weekly > 0.0 else 0.0
+
+    evidence = "tested Strategy Engine result" if _engine_result_is_real() else "educational investment proxy"
+    horizon_label = str(last_row.get("Horizon", "the longest horizon shown"))
+    horizons_text = " + ".join(str(x) for x in valid["Horizon"].astype(str).tolist()) if "Horizon" in valid.columns else "current horizon"
+
+    # Keep the evidence warning once, near the top. Repetition below is avoided.
+    _render_proxy_evidence_note(compare=True)
+    if _engine_result_is_real():
+        _render_engine_metrics(engine)
+
+    st.markdown("### Executive summary")
+    longest_years = _safe_int(last_row.get("_years"), 0) or _horizon_years_from_label(horizon_label)
+    horizon_prefix = f"{longest_years}y" if longest_years > 0 else "Longest-horizon"
+
+    metric_cols = st.columns(4 if monthly > 0 else 3)
+    col_idx = 0
+    if monthly > 0:
+        with metric_cols[col_idx]:
+            st.metric("Monthly contribution", f"{_fmt_gbp0(monthly)}/mo")
+        col_idx += 1
+    with metric_cols[col_idx]:
+        st.metric(f"{horizon_prefix} savings-only", _fmt_gbp0(savings_terminal))
+    with metric_cols[col_idx + 1]:
+        st.metric(f"{horizon_prefix} investment/proxy", _fmt_gbp0(investing_terminal))
+    with metric_cols[col_idx + 2]:
+        st.metric(f"{horizon_prefix} difference", _fmt_gbp0(diff_terminal))
+
+    st.markdown("### Setup snapshot")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        st.markdown("**Personal finance plan**")
+        if monthly > 0:
+            st.caption(f"Contribution capacity used: {_fmt_gbp0(monthly)}/month.")
+        else:
+            st.caption("Contribution capacity read from the stored personal finance setup.")
+    with s2:
+        st.markdown("**Investment setup**")
+        profile_text = _projection_profile_text(proj)
+        setup_bits = [f"Return path: {evidence}."]
+        if profile_text:
+            setup_bits.append(f"Risk profile: {profile_text}.")
+        setup_bits.append(
+            "Strategy Engine: tested." if _engine_result_is_real() else "Strategy Engine: not yet tested."
+        )
+        st.caption(" ".join(setup_bits))
+    with s3:
+        st.markdown("**Long-term scenario**")
+        st.caption(f"Horizon comparison: {horizons_text}.")
+
+    summary_text = (
+        f"This final report compares the savings-only baseline against a {evidence}. "
+        f"At **{horizon_label}**, the savings-only path reaches **{_fmt_gbp0(savings_terminal)}**, "
+        f"while the investment/proxy median reaches **{_fmt_gbp0(investing_terminal)}**, "
+        f"a modelled central difference of **{_fmt_gbp0(diff_terminal)}**. "
+        "That upside should be read alongside uncertainty, drawdown exposure and model risk."
+    )
+    insight_card("Executive interpretation", summary_text, level="info")
+
     if abs(diff_terminal) > max(10000.0, 5.0 * max(abs(investing_terminal), 1.0)):
         st.warning(
             "This comparison shows a very large gap between branches. Check that both branches use comparable horizons, contributions, starting pots and goal assumptions."
         )
 
+    st.markdown("### Final comparison")
     positive_rows = valid[pd.to_numeric(valid["Difference"], errors="coerce") > 0]
     if len(positive_rows) == len(valid):
-        insight_card(
-            "Comparison readout",
-            "Across the tested horizons, the investment pathway has a higher median outcome than savings-only. The key question is whether the extra upside is worth accepting uncertainty, model risk and drawdown exposure.",
-            level="info",
+        comparison_text = (
+            "Across the tested horizons, the investment/proxy pathway has a higher median outcome than savings-only. "
+            "The key question is whether the extra upside is worth accepting uncertainty, model risk and drawdown exposure."
         )
+        comparison_level = "info"
     elif len(positive_rows) > 0:
-        first_positive = positive_rows.sort_values("_years").iloc[0]
-        insight_card(
-            "Comparison readout",
-            f"Investment does not dominate equally at every horizon. It first shows a positive median difference around **{first_positive.get('Horizon', 'one of the tested horizons')}**.",
-            level="info",
+        first_positive = positive_rows.sort_values("_years").iloc[0] if "_years" in positive_rows.columns else positive_rows.iloc[0]
+        comparison_text = (
+            f"Investment/proxy does not dominate equally at every horizon. It first shows a positive median difference around "
+            f"**{first_positive.get('Horizon', 'one of the tested horizons')}**."
         )
+        comparison_level = "info"
     else:
-        insight_card(
-            "Comparison readout",
-            "In this run, investment does not clearly beat savings-only on median outcome across the tested horizons. That makes the extra uncertainty harder to justify under these assumptions.",
-            level="warning",
+        comparison_text = (
+            "In this run, investment/proxy does not clearly beat savings-only on median outcome across the tested horizons. "
+            "That makes the extra uncertainty harder to justify under these assumptions."
         )
+        comparison_level = "warning"
+    insight_card("Comparison readout", comparison_text, level=comparison_level)
 
     st.markdown("### Horizon interpretation")
-    _render_horizon_rows(valid.sort_values("_years").to_dict("records") if "_years" in valid.columns else valid.to_dict("records"))
+    _render_horizon_rows(valid.to_dict("records"))
 
-    if _has_projection(proj):
-        _render_projection_summary(proj, title="Investment scenario readout" if _engine_result_is_real() else "Investment proxy readout")
-    if _has_projection(cash_proj):
-        _render_projection_summary(cash_proj, title="Savings-only pathway readout")
+    st.markdown("### Final interpretation")
+    insight_card(
+        "Upside vs simplicity",
+        "Savings-only is simpler and avoids market volatility, but has limited upside. The investment/proxy path may improve the central outcome, but it depends on return assumptions and introduces uncertainty.",
+        level="info",
+    )
+    insight_card(
+        "Risk trade-off",
+        "A higher central scenario is not automatically a better decision. It needs to be judged against drawdown exposure, model risk, evidence quality and whether the user could stay invested through bad periods.",
+        level="info",
+    )
+    if _engine_result_is_real():
+        next_step_text = (
+            "Use the Long-Term Scenario to stress-test the result with different contributions, goals and horizons. "
+            "Return to the Strategy Engine only if the investment branch needs lower drawdown, a different universe or a cleaner risk profile."
+        )
+        next_step_level = "success"
+    else:
+        next_step_text = (
+            "This report currently uses an educational proxy. Run the Investment Strategy Lab to replace it with a tested Strategy Engine result, "
+            "then re-run the Long-Term Scenario so the final report uses stronger evidence."
+        )
+        next_step_level = "warning"
+    insight_card("Recommended next step", next_step_text, level=next_step_level)
 
-    st.markdown("### What this means")
-    st.write("• Savings-only is simpler and avoids market volatility, but has limited upside.")
-    st.write("• Investment may improve the median outcome, but introduces uncertainty, drawdown risk and dependence on model assumptions.")
-    if not _engine_result_is_real():
-        st.write("• Because this is currently proxy-based, it demonstrates the concept; the Investment Strategy Lab provides the stronger tested version.")
-    st.write("• This is a decision-support comparison, not a recommendation to invest or a promise of future performance.")
+    with st.expander("Selected-horizon projection details", expanded=False):
+        st.caption(
+            "Selected-horizon details are kept here so the main report stays focused on the cross-horizon comparison."
+        )
+        if _has_projection(proj):
+            _render_projection_summary(
+                proj,
+                title="Selected-horizon investment details" if _engine_result_is_real() else "Selected-horizon investment proxy details",
+            )
+        if _has_projection(cash_proj):
+            _render_projection_summary(cash_proj, title="Selected-horizon savings-only details")
+        if not _has_projection(proj) and not _has_projection(cash_proj):
+            st.caption("No separate selected-horizon projection payload was available; the report above was reconstructed from the comparison rows.")
 
-    _render_recommended_next_actions(mode_label="comparison", compare=True)
     _render_decision_support_note(compare=True)
+    return True
 
 
-def _render_footer(*, complete_text: str) -> None:
+def _render_footer(*, complete_text: str, show_strategy_lab: bool = False) -> None:
+    """Final navigation for the report page.
+
+    ``show_strategy_lab`` is kept for backwards compatibility with existing
+    call sites, but the footer intentionally exposes only the two core report
+    exits: refine the Long-Term Scenario or return Home.
+    """
     st.markdown("---")
     st.success(complete_text)
-    st.caption("You can return to the Long-Term Scenario to change assumptions, or return Home to choose another module.")
+    st.caption("You can refine the assumptions in Long-Term Scenario, or return Home to choose another module.")
+
+    safe_key = complete_text.lower().replace(" ", "_").replace(".", "")
     left, right = st.columns(2)
     with left:
-        if st.button("← Back to Long-Term Scenario", key=f"step7_back_to_step6_{complete_text.lower().replace(' ', '_')}"):
-            st.session_state[CURRENT_STEP] = 6
-            st.session_state["current_step"] = 6
-            st.rerun()
+        if st.button("← Back to Long-Term Scenario", key=f"step7_back_to_step6_{safe_key}", use_container_width=True):
+            _set_step(6)
     with right:
-        if st.button("Return to Home", key=f"step7_return_home_{complete_text.lower().replace(' ', '_')}", use_container_width=True):
-            st.session_state[CURRENT_STEP] = 0
-            st.session_state["current_step"] = 0
-            st.rerun()
+        if st.button("Return to Home", key=f"step7_return_home_{safe_key}", use_container_width=True):
+            _set_step(0)
 
 
 def render_step_7() -> None:
@@ -771,14 +1184,14 @@ def render_step_7() -> None:
         return
 
     if mode == "compare_both":
-        title = "Savings vs Investment Scenario Insights"
         section_header(
-            title,
-            "Final comparison of the savings-only route against the investment/proxy route under the selected assumptions."
+            "Final Report",
+            "Complete summary of your personal finance plan, investment setup, long-term scenario, and decision-support insights."
         )
         engine = _extract_engine_summary()
-        _render_compare_branch_insights(engine)
-        _render_footer(complete_text="Comparison path completed.")
+        report_complete = _render_compare_branch_insights(engine)
+        if report_complete:
+            _render_footer(complete_text="Final report generated.", show_strategy_lab=True)
         return
 
     title = "Investment Pathway Report"
@@ -792,4 +1205,4 @@ def render_step_7() -> None:
     proj = _extract_projection_summary(INVESTMENT_PROJECTION_RESULT)
     cash_proj = _extract_projection_summary(CASH_ONLY_PROJECTION_RESULT)
     _render_investing_insights(proj, cash_proj, engine, compare=False)
-    _render_footer(complete_text="Scenario path completed.")
+    _render_footer(complete_text="Scenario report generated.", show_strategy_lab=True)

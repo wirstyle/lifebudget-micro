@@ -370,14 +370,32 @@ def _has_projection_bridge() -> bool:
 
 
 def _has_projection_result() -> bool:
+    """Return True when Long-Term Scenario has produced reportable output.
+
+    Step 6 stores projections under a few legacy/current keys. Keep this
+    lightweight: only read session state, never trigger a recomputation.
+    """
     likely_keys = (
+        "investment_projection_result",
+        "investment_projection_compare_results",
+        "step6_compare_branch_result",
         "step6_projection_result",
         "step6_last_projection_result",
         "long_term_projection_result",
         "projection_result",
         "step7_report_context",
     )
-    return any(bool(st.session_state.get(key)) for key in likely_keys)
+    for key in likely_keys:
+        value = st.session_state.get(key)
+        if isinstance(value, dict) and len(value) > 0:
+            return True
+        if isinstance(value, list) and len(value) > 0:
+            return True
+        if value is not None and not isinstance(value, (dict, list, str)):
+            return bool(value)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
 
 
 def _is_investment_pathway(step: int) -> bool:
@@ -1649,11 +1667,270 @@ def _render_step6_sidebar(step: int) -> None:
     _render_step6_scenario_status()
 
     st.divider()
-    _render_step6_shortcuts()
-
     _render_step6_projection_diagnostics()
     _render_step6_q_and_a()
     _render_step6_terms()
+
+
+def _projection_result_payload() -> dict:
+    """Read the current Long-Term Scenario projection result without running work."""
+    for key in (
+        "investment_projection_result",
+        "step6_projection_result",
+        "step6_last_projection_result",
+        "long_term_projection_result",
+        "projection_result",
+    ):
+        payload = _coerce_mapping(st.session_state.get(key, {}))
+        if payload:
+            return payload
+    return {}
+
+
+def _projection_summary_from_payload(payload: dict) -> dict:
+    payload = _coerce_mapping(payload)
+    summary = _coerce_mapping(payload.get("summary", {}))
+    if summary:
+        return summary
+    result = _coerce_mapping(payload.get("result", {}))
+    result_summary = _coerce_mapping(result.get("summary", {}))
+    if result_summary:
+        return result_summary
+    return {}
+
+
+def _step7_compare_payload() -> dict:
+    for key in ("step6_compare_branch_result", "investment_projection_compare_results"):
+        payload = _coerce_mapping(st.session_state.get(key, {}))
+        if payload:
+            return payload
+    return {}
+
+
+def _step7_report_is_complete() -> bool:
+    compare_payload = _step7_compare_payload()
+    if compare_payload:
+        rows = compare_payload.get("rows")
+        if isinstance(rows, list):
+            return len(rows) > 0
+        return True
+    return bool(_projection_result_payload() or _has_projection_result())
+
+
+def _step7_horizon_label() -> str:
+    projection_summary = _projection_summary_from_payload(_projection_result_payload())
+    current_horizon = _safe_int(
+        st.session_state.get("investment_projection_horizon_years", projection_summary.get("horizon_years", 0)),
+        0,
+    )
+    compare_horizons = st.session_state.get("investment_projection_compare_horizons", [])
+    if not isinstance(compare_horizons, list):
+        compare_horizons = []
+
+    bits: list[str] = []
+    if current_horizon > 0:
+        bits.append(f"{current_horizon}y current")
+    for horizon in compare_horizons:
+        try:
+            horizon_int = int(horizon)
+        except Exception:
+            continue
+        if horizon_int > 0:
+            bits.append(f"{horizon_int}y")
+
+    deduped = list(dict.fromkeys(bits))
+    return " + ".join(deduped) if deduped else "available from Long-Term Scenario"
+
+
+def _step7_return_path_label() -> str:
+    ctx = _investment_context()
+    explicit = str(ctx.get("projection_return_source", "") or "").strip()
+    if explicit:
+        return explicit
+    philosophy = str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
+    if _latest_run_result():
+        return "Historical Strategy Engine path"
+    return f"Demo {philosophy} proxy"
+
+
+def _render_step7_current_report() -> None:
+    """Focused Final Report status for the sidebar."""
+    st.markdown("### Current report")
+
+    report_complete = _step7_report_is_complete()
+    if report_complete:
+        st.success("Final report available.")
+    else:
+        st.warning("Generate the Long-Term Scenario first.")
+
+    bridge = _step4_funding_bridge_summary()
+    monthly = _safe_float(bridge.get("monthly", 0.0), 0.0)
+    weekly = _safe_float(bridge.get("weekly", 0.0), 0.0)
+
+    st.caption("**Source:** Long-Term Scenario")
+    st.caption(f"**Return path:** {_step7_return_path_label()}")
+    if monthly > 0.0:
+        st.caption(f"**Monthly contribution:** {_money_plain(monthly)}/mo")
+    if weekly > 0.0:
+        st.caption(f"**Weekly equivalent:** {_money_weekly(weekly)}")
+    st.caption(f"**Horizon view:** {_step7_horizon_label()}")
+
+
+def _render_step7_readiness() -> None:
+    with st.expander("Report readiness", expanded=False):
+        snapshot = _planning_snapshot()
+        finance_summary = _personal_finance_sidebar_summary()
+        finance_ready = bool(snapshot) or bool(finance_summary.get("has_any_values", False))
+        panel_ready = _has_asset_panel()
+        run_ready = _has_step5_result()
+        projection_ready = _step7_report_is_complete()
+
+        _readiness_line(
+            "Personal finance",
+            finance_ready,
+            "contribution bridge available" if finance_ready else "set up finance plan",
+        )
+        _readiness_line(
+            "Market-data panel",
+            panel_ready,
+            "available" if panel_ready else "optional if using proxy/savings-only report",
+        )
+        _readiness_line(
+            "Strategy/proxy path",
+            True,
+            "tested engine path" if run_ready else "educational proxy available",
+        )
+        _readiness_line(
+            "Long-Term Scenario",
+            projection_ready,
+            "completed" if projection_ready else "generate scenario first",
+        )
+        _readiness_line(
+            "Final report",
+            projection_ready,
+            "available" if projection_ready else "pending scenario output",
+        )
+        st.caption("This sidebar reads app state only. It does not run projections, refresh data, or launch diagnostics.")
+
+
+def _render_step7_shortcuts() -> None:
+    st.markdown("### Report shortcuts")
+
+    step6_enabled, step6_reason = _step_access_state(6, 7)
+    if st.button(
+        "← Back to Long-Term Scenario",
+        key="global_sidebar_step7_back_to_scenario",
+        use_container_width=True,
+        disabled=not step6_enabled,
+        help=step6_reason,
+    ):
+        _go_to_step(6)
+
+    step5_enabled, step5_reason = _step_access_state(5, 7)
+    if st.button(
+        "Open Strategy Engine",
+        key="global_sidebar_step7_open_strategy_engine",
+        use_container_width=True,
+        disabled=not step5_enabled,
+        help=step5_reason,
+    ):
+        _go_to_step(5)
+
+    if st.button(
+        "Return Home",
+        key="global_sidebar_step7_return_home",
+        use_container_width=True,
+        help="Return to the module selector.",
+    ):
+        _go_to_step(0)
+
+    st.caption("Final-report actions are navigation only; heavy reruns stay on their main screens.")
+
+
+def _render_step7_report_diagnostics() -> None:
+    with st.expander("Report diagnostics", expanded=False):
+        st.markdown("**Projection source**")
+        st.caption(f"return_path={_step7_return_path_label()}")
+        st.caption(f"horizons={_step7_horizon_label()}")
+
+        compare_payload = _step7_compare_payload()
+        if compare_payload:
+            rows = compare_payload.get("rows")
+            if isinstance(rows, list):
+                st.caption(f"comparison_rows={len(rows)}")
+            else:
+                st.caption("comparison_payload=available")
+
+        panel_meta = _asset_panel_summary()
+        if panel_meta:
+            st.divider()
+            st.markdown("**Market-data panel**")
+            st.caption(
+                f"source={panel_meta.get('source', 'Step 4 panel')} · "
+                f"assets={panel_meta.get('assets', 0)} · rows={panel_meta.get('rows', 0)}"
+            )
+
+        run_map = _latest_run_result()
+        if run_map:
+            st.divider()
+            st.markdown("**Last Strategy Engine run**")
+            perf = _coerce_mapping(run_map.get("performance_summary", {}))
+            st.caption(
+                f"CAGR={_pct(perf.get('cagr', 0.0))} · "
+                f"Sharpe={_safe_float(perf.get('sharpe', 0.0), 0.0):.2f} · "
+                f"MaxDD=-{100.0 * abs(_safe_float(perf.get('max_drawdown', 0.0), 0.0)):.2f}%"
+            )
+            run_sig = str(run_map.get("run_signature", "") or "")
+            cfg_fp = str(run_map.get("config_fingerprint", "") or "")
+            if run_sig:
+                st.caption(f"run_signature={run_sig}")
+            if cfg_fp:
+                st.caption(f"config_fp={cfg_fp}")
+
+        if not compare_payload and not panel_meta and not run_map:
+            st.caption("Diagnostics populate after the scenario, market panel, or engine result exists.")
+
+
+def _render_step7_report_help() -> None:
+    with st.expander("Report Q&A & terms", expanded=False):
+        st.markdown("**What is this report for?**")
+        st.caption(
+            "It summarises the Long-Term Scenario output and frames the trade-off between savings-only planning, "
+            "educational proxy assumptions, and tested Strategy Engine paths when available."
+        )
+
+        st.markdown("**Savings-only baseline**")
+        st.caption("The same contribution path with no investment return, volatility, drawdown or market risk.")
+
+        st.markdown("**Educational proxy**")
+        st.caption(
+            "A labelled assumption used before Strategy Engine has produced a tested return path. It supports the report flow, "
+            "but should not be read as backtest evidence."
+        )
+
+        st.markdown("**Tested Strategy Engine path**")
+        st.caption("A historical out-of-sample return path generated by the Strategy Engine from the selected universe and configuration.")
+
+        st.markdown("**Scenario ranges**")
+        st.caption("P10 / median / P90 are modelled ranges under assumptions, not promised future outcomes.")
+
+        st.markdown("**Goal probability and loss vs contributions**")
+        st.caption(
+            "Goal probability checks whether simulated paths reach the selected goal. Loss vs contributions checks whether terminal value ends below total contributions."
+        )
+
+
+def _render_step7_sidebar(step: int) -> None:
+    """Render a report-focused sidebar for Final Report."""
+    _render_step_navigation(step)
+    st.divider()
+
+    _render_step7_current_report()
+
+    st.divider()
+    _render_step7_readiness()
+    _render_step7_report_diagnostics()
+    _render_step7_report_help()
 
 
 def render_global_sidebar() -> None:
@@ -1687,6 +1964,10 @@ def render_global_sidebar() -> None:
 
         if int(step) == 6:
             _render_step6_sidebar(step)
+            return
+
+        if int(step) == 7:
+            _render_step7_sidebar(step)
             return
 
         _render_step_navigation(step)
