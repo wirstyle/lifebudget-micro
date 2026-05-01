@@ -1008,88 +1008,155 @@ def _render_recommended_candidate(candidate: dict, current_perf: dict) -> None:
         st.metric("Sharpe", f"{perf['sharpe']:.2f}", delta=f"{perf['sharpe'] - current['sharpe']:+.2f}")
 
 
-def _format_asset_preview(assets: list[str], *, limit: int = 30) -> str:
+
+def _humanise_universe_family(value: Any) -> str:
+    raw = str(value or "").strip()
+    lookup = {
+        "diversified_pool": "Diversified pool",
+        "risk_adjusted_pool": "Risk-adjusted pool",
+        "momentum_pool": "Momentum pool",
+        "risk_control_pool": "Lower-volatility pool",
+        "available_pool": "Available pool",
+        "core_multi_asset": "Core multi-asset",
+    }
+    if raw in lookup:
+        return lookup[raw]
+    if not raw:
+        return "Universe mix"
+    return raw.replace("_", " ").replace("-", " ").title()
+
+
+def _clean_universe_candidate_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Return a user-facing candidate table without raw diagnostics columns."""
+    if not isinstance(table, pd.DataFrame) or table.empty:
+        return pd.DataFrame()
+
+    clean = table.copy()
+    if "family" in clean.columns:
+        clean["Test type"] = clean["family"].map(_humanise_universe_family)
+    else:
+        clean["Test type"] = "Universe mix"
+
+    clean = clean.rename(
+        columns={
+            "candidate": "Candidate",
+            "status": "Result",
+            "assets": "Assets",
+            "overlap vs current": "Overlap vs current",
+        }
+    )
+
+    preferred = [
+        "Candidate",
+        "Result",
+        "Test type",
+        "Assets",
+        "Overlap vs current",
+        "CAGR",
+        "Δ CAGR",
+        "Vol",
+        "Δ Vol",
+        "MaxDD",
+        "DD improvement",
+        "Sharpe",
+        "Δ Sharpe",
+    ]
+    cols = [col for col in preferred if col in clean.columns]
+    return clean.loc[:, cols] if cols else pd.DataFrame()
+
+
+def _selected_asset_mix_table(assets: list[str]) -> pd.DataFrame:
+    """Return the selected asset mix as the single user-facing asset list."""
     clean_assets = _asset_list(assets)
     if not clean_assets:
-        return "No asset list available."
-    preview = ", ".join(asset_display_label(x) for x in clean_assets[:limit])
-    if len(clean_assets) > limit:
-        preview += f" ... +{len(clean_assets) - limit} more"
-    return preview
+        return pd.DataFrame()
+
+    detail = build_universe_mix_detail(clean_assets)
+    if isinstance(detail, pd.DataFrame) and not detail.empty:
+        preferred_cols = [col for col in ["ticker", "name", "group", "subgroup"] if col in detail.columns]
+        if preferred_cols:
+            return detail.loc[:, preferred_cols].copy()
+        return detail.copy()
+
+    return pd.DataFrame(
+        [
+            {
+                "ticker": asset,
+                "name": asset_display_label(asset),
+                "group": "—",
+                "subgroup": "—",
+            }
+            for asset in clean_assets
+        ]
+    )
 
 
-def _render_universe_mix_decision_expander(
-    candidate: dict,
-    *,
-    payload: dict | None = None,
-    evaluations: list[dict] | None = None,
-    table: pd.DataFrame | None = None,
-    scope: str = "",
-) -> None:
-    """Render the user-facing decision guide for the accepted universe-mix candidate."""
+def _universe_mix_decision_summary(candidate: dict) -> pd.DataFrame:
     item = _coerce_mapping(candidate)
     assets = _asset_list(item.get("assets", []))
     overlap = 100.0 * _safe_float(item.get("overlap_vs_current"), 0.0)
     universe_size = _safe_int(item.get("universe_size"), len(assets))
-    payload_map = _coerce_mapping(payload)
-    evals = list(evaluations or [])
-    table_df = table if isinstance(table, pd.DataFrame) else pd.DataFrame()
-
-    with st.expander("How to decide on this universe-mix recommendation", expanded=False):
-        st.info(
-            "This keeps the same strategy preset, technical engine tuning and universe size. "
-            "It only changes the asset mix inside the available Step 4 market-data panel."
-        )
-        st.success("This candidate passed the universe-mix acceptance gate.")
-
-        caption = str(item.get("caption", "") or "")
-        if caption:
-            st.caption(caption)
-
-        gate_reason = str(item.get("gate_reason", "") or "")
-        if gate_reason:
-            st.caption(gate_reason)
-
-        if item.get("error"):
-            st.warning(str(item.get("error")))
-
-        summary_rows = [
+    return pd.DataFrame(
+        [
             {"Decision point": "Universe size", "Recommendation": f"Keep {int(universe_size)} assets"},
             {"Decision point": "Asset overlap vs current", "Recommendation": f"{overlap:.0f}%"},
             {"Decision point": "What changes", "Recommendation": "Asset composition only"},
         ]
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+    )
 
-        st.caption("Recommended asset preview")
-        st.write(_format_asset_preview(assets, limit=30))
 
-        st.caption(
-            "Decision rule: apply this only if the alternative mix feels like a better portfolio composition, "
-            "not because it changes the strategy preset or increases the universe size. Those remain unchanged."
+def _render_universe_mix_decision_expander(candidate: dict, evaluations: list[dict], table: pd.DataFrame) -> None:
+    """Render the Phase 3 decision frame using the same pattern as the earlier suggestions."""
+    item = _coerce_mapping(candidate)
+    assets = _asset_list(item.get("assets", []))
+    universe_size = _safe_int(item.get("universe_size"), len(assets))
+    clean_candidate_table = _clean_universe_candidate_table(table)
+    asset_detail = _selected_asset_mix_table(assets)
+
+    with st.expander("How to decide on this universe-mix recommendation", expanded=False):
+        st.info(
+            "Decision guide: this keeps the same strategy preset, technical engine tuning and universe size. "
+            "It only changes the asset mix inside the available Step 4 market-data panel. "
+            f"The recommendation keeps the same {int(universe_size)}-asset basket size and selects a different composition "
+            "from the loaded candidate assets. Apply it only if the alternative mix feels like a better portfolio composition, "
+            "not because it changes the preset or increases the universe size."
         )
 
-        if evals or not table_df.empty or payload_map:
-            st.divider()
-            st.markdown("**Advanced universe-mix diagnostics**")
-            st.caption(
-                f"tested_candidates={len(evals)} · elapsed={_safe_float(payload_map.get('elapsed_sec', 0.0), 0.0):.2f}s · "
-                f"scope={str(payload_map.get('scope', scope))}"
-            )
-            st.caption(
-                f"selected_size={universe_size} · "
-                f"selected_strategy={item.get('universe_strategy', '—')} · "
-                f"overlap_vs_current={overlap:.0f}% · "
-                f"score_delta={_safe_float(item.get('score_delta'), 0.0):+.3f}"
-            )
-            if assets:
-                st.caption("Full selected asset list")
-                st.write(_format_asset_preview(assets, limit=80))
-                detail = build_universe_mix_detail(assets)
-                if isinstance(detail, pd.DataFrame) and not detail.empty:
-                    st.dataframe(detail, use_container_width=True, hide_index=True)
-            if not table_df.empty:
-                st.dataframe(table_df, use_container_width=True, hide_index=True)
+        st.divider()
 
+        st.success("This candidate passed the universe-mix acceptance gate.")
+
+        summary = _universe_mix_decision_summary(item)
+        if not summary.empty:
+            st.dataframe(summary, use_container_width=True, hide_index=True)
+
+        if not clean_candidate_table.empty:
+            st.markdown("**Tested universe-mix candidates**")
+            st.dataframe(clean_candidate_table, use_container_width=True, hide_index=True)
+
+        caption = str(item.get("caption", "") or "").strip()
+        gate_reason = str(item.get("gate_reason", "") or "").strip()
+        rationale_parts: list[str] = []
+        if caption:
+            rationale_parts.append(caption)
+        else:
+            rationale_parts.append(
+                f"It keeps the same {int(universe_size)}-asset size but selects a different composition from the loaded candidate pool."
+            )
+        if gate_reason:
+            rationale_parts.append(gate_reason)
+        else:
+            rationale_parts.append(
+                "The acceptance gate passed this mix because it offered the best overall trade-off among the tested same-size alternatives."
+            )
+        st.write(" ".join(rationale_parts))
+
+        if item.get("error"):
+            st.warning(str(item.get("error")))
+
+        if not asset_detail.empty:
+            st.markdown("**Selected asset mix**")
+            st.dataframe(asset_detail, use_container_width=True, hide_index=True)
 
 def render_universe_improvement(run_result: dict) -> None:
     """Render the third Step 5 improvement phase: universe composition.
@@ -1202,37 +1269,7 @@ def render_universe_improvement(run_result: dict) -> None:
 
         _render_continue_with_current_result_button(run_map, key="step5_universe_continue_current_result_v1")
 
-        _render_universe_mix_decision_expander(
-            best_candidate,
-            payload=payload,
-            evaluations=evaluations,
-            table=table,
-            scope=scope,
-        )
-
-    if False and not (accepted_items and not universe_was_skipped):
-        with st.expander("Advanced universe-mix diagnostics", expanded=False):
-            st.caption(
-                f"tested_candidates={len(evaluations)} · elapsed={_safe_float(payload.get('elapsed_sec', 0.0), 0.0):.2f}s · "
-                f"scope={str(payload.get('scope', scope))}"
-            )
-            if accepted_items and not universe_was_skipped:
-                selected = _coerce_mapping(accepted_items[0])
-                st.caption(
-                    f"selected_size={selected.get('universe_size', '—')} · "
-                    f"selected_strategy={selected.get('universe_strategy', '—')} · "
-                    f"overlap_vs_current={100.0 * _safe_float(selected.get('overlap_vs_current'), 0.0):.0f}% · "
-                    f"score_delta={_safe_float(selected.get('score_delta'), 0.0):+.3f}"
-                )
-                selected_assets = _asset_list(selected.get("assets", []))
-                if selected_assets:
-                    st.caption("Full selected asset list")
-                    st.write(_format_asset_preview(selected_assets, limit=80))
-                    detail = build_universe_mix_detail(selected_assets)
-                    if isinstance(detail, pd.DataFrame) and not detail.empty:
-                        st.dataframe(detail, use_container_width=True, hide_index=True)
-            if not table.empty:
-                st.dataframe(table, use_container_width=True, hide_index=True)
+        _render_universe_mix_decision_expander(best_candidate, evaluations, table)
 
     if not accepted_items and not universe_was_skipped:
         if st.button("Continue with current universe mix", key="step5_continue_current_universe_v1", use_container_width=True):

@@ -1348,87 +1348,6 @@ def _render_recommended_candidate(candidate: dict, current_perf: dict, baseline_
         st.metric("Sharpe", f"{perf['sharpe']:.2f}", delta=f"{perf['sharpe'] - current['sharpe']:+.2f}")
 
 
-def _format_asset_preview(assets: list[str], *, limit: int = 30) -> str:
-    clean_assets = _asset_list(assets)
-    if not clean_assets:
-        return "No asset list available."
-    preview = ", ".join(asset_display_label(x) for x in clean_assets[:limit])
-    if len(clean_assets) > limit:
-        preview += f" ... +{len(clean_assets) - limit} more"
-    return preview
-
-
-def _render_universe_size_decision_expander(
-    candidate: dict,
-    baseline_size: int,
-    *,
-    payload: dict | None = None,
-    evaluations: list[dict] | None = None,
-    table: pd.DataFrame | None = None,
-    scope: str = "",
-) -> None:
-    """Render the user-facing decision guide for the accepted universe-size candidate."""
-    item = _coerce_mapping(candidate)
-    assets = _asset_list(item.get("assets", []))
-    target_size = _safe_int(item.get("universe_size"), len(assets))
-    size_delta = int(target_size) - int(baseline_size)
-    change_label = "No size change" if size_delta == 0 else f"{size_delta:+d} assets"
-    payload_map = _coerce_mapping(payload)
-    evals = list(evaluations or [])
-    table_df = table if isinstance(table, pd.DataFrame) else pd.DataFrame()
-
-    with st.expander("How to decide on this universe-size recommendation", expanded=False):
-        st.info(
-            "This keeps the current strategy preset, technical engine tuning and universe-mix baseline. "
-            "It only changes how many assets are held in the strategy."
-        )
-        st.success("This candidate passed the universe-size acceptance gate.")
-
-        gate_reason = str(item.get("gate_reason", "") or "")
-        if gate_reason:
-            st.caption(gate_reason)
-
-        if item.get("error"):
-            st.warning(str(item.get("error")))
-
-        summary_rows = [
-            {"Decision point": "Current size", "Recommendation": f"{int(baseline_size)} assets"},
-            {"Decision point": "Recommended size", "Recommendation": f"{int(target_size)} assets"},
-            {"Decision point": "Size change", "Recommendation": change_label},
-            {"Decision point": "What changes", "Recommendation": "Universe size only"},
-        ]
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-
-        st.caption("Recommended asset preview")
-        st.write(_format_asset_preview(assets, limit=30))
-
-        st.caption(
-            "Decision rule: apply this only if the tested size trade-off feels more appropriate. "
-            "A larger universe usually means broader diversification; a smaller one usually means a more concentrated strategy."
-        )
-
-        if evals or not table_df.empty or payload_map:
-            st.divider()
-            st.markdown("**Advanced universe-size diagnostics**")
-            st.caption(
-                f"real_engine_tests={_safe_int(payload_map.get('candidate_count', 0), 0)} · "
-                f"planned_candidates={_safe_int(payload_map.get('planned_candidate_count', len(evals)), len(evals))} · "
-                f"elapsed={_safe_float(payload_map.get('elapsed_sec', 0.0), 0.0):.2f}s · scope={str(payload_map.get('scope', scope))}"
-            )
-            st.caption(
-                f"baseline_size={int(baseline_size)} · tested_size={int(target_size)} · "
-                f"score_delta={_safe_float(item.get('score_delta'), 0.0):+.3f}"
-            )
-            if assets:
-                st.caption("Full selected asset list")
-                st.write(_format_asset_preview(assets, limit=100))
-                detail = build_universe_mix_detail(assets)
-                if isinstance(detail, pd.DataFrame) and not detail.empty:
-                    st.dataframe(detail, use_container_width=True, hide_index=True)
-            if not table_df.empty:
-                st.dataframe(table_df, use_container_width=True, hide_index=True)
-
-
 def render_size_improvement(run_result: dict) -> None:
     """Render the fourth Step 5 improvement phase: universe size."""
     run_map = _coerce_mapping(run_result)
@@ -1508,6 +1427,12 @@ def render_size_improvement(run_result: dict) -> None:
     ]
     coarse_label = ", ".join(map(str, coarse_sizes)) if coarse_sizes else "none"
     panel_note = str(payload.get("panel_note", "") or "")
+    size_search_window_note = (
+        f"Size-search window: current baseline {baseline_size} → {philosophy} guidance cap {cap_size} "
+        f"(deployment hard cap {deployment_hard_cap}). "
+        f"Coarse candidates: {coarse_label}. If one coarse size looks promising, up to two local refinements are tested nearby. "
+        "Baseline is not rerun."
+    )
 
     accepted_items = [dict(x) for x in evaluations if bool(_coerce_mapping(x).get("accepted", False))]
     table = _candidate_table(evaluations, perf, baseline_size)
@@ -1521,86 +1446,119 @@ def render_size_improvement(run_result: dict) -> None:
     )
 
     if not accepted_items:
-        st.success("Current universe size has converged: no tested alternative materially improved this run.")
-    elif size_was_skipped:
+        if size_was_skipped:
+            st.warning("Universe size skipped: current universe size kept for this run. The improvement flow is complete.")
+            if skipped_label:
+                st.caption(f"Skipped size recommendation: {skipped_label}.")
+        else:
+            st.success("Current universe size has converged: no tested alternative materially improved this run.")
+            st.caption(
+                "The current size is kept because the tested size alternatives did not pass the acceptance gate."
+            )
+
+        with st.expander("Why no universe-size change was recommended", expanded=False):
+            st.info(
+                "Decision guide: this keeps the current strategy preset, technical engine tuning and universe mix, "
+                "and only tests whether changing the number of assets improves the result. If no tested size improves "
+                "the overall trade-off enough to pass the acceptance gate, the safer decision is to keep the current basket size."
+            )
+            st.divider()
+
+            st.caption(
+                f"Current basket size: {int(baseline_size)} assets. "
+                f"Tested size alternatives are shown below."
+            )
+
+            clean_cols = [
+                "candidate",
+                "status",
+                "stage",
+                "size",
+                "Δ size",
+                "CAGR",
+                "Δ CAGR",
+                "Vol",
+                "Δ Vol",
+                "MaxDD",
+                "DD improvement",
+                "Sharpe",
+                "Δ Sharpe",
+            ]
+            if isinstance(table, pd.DataFrame) and not table.empty:
+                display_cols = [col for col in clean_cols if col in table.columns]
+                st.dataframe(table[display_cols], use_container_width=True, hide_index=True)
+            else:
+                st.caption("No candidate table was available for this size check.")
+
+            st.caption(
+                "No tested size passed the acceptance gate, so keeping the current universe size is the cleaner decision for this run. "
+                "This does not mean other sizes can never work; it means they did not materially improve this specific rerun-tested setup."
+            )
+
+            context_parts: list[str] = []
+            if panel_note:
+                context_parts.append(panel_note)
+            if size_search_window_note:
+                context_parts.append(size_search_window_note)
+            if context_parts:
+                with st.container(border=True):
+                    st.caption("Size-search context")
+                    for part in context_parts:
+                        st.caption(part)
+
+        if not size_was_skipped:
+            if st.button("Keep current size and finish", key="step5_keep_current_size_finish_v1", use_container_width=True):
+                _skip_current_size_candidate(scope, "current size", current_run_signature)
+        return
+
+    if size_was_skipped:
         st.warning("Universe size skipped: current universe size kept for this run. The improvement flow is complete.")
         if skipped_label:
             st.caption(f"Skipped size recommendation: {skipped_label}.")
-    else:
-        best_candidate = accepted_items[0]
-        _render_recommended_candidate(best_candidate, perf, baseline_size)
+        return
 
-        action_label = str(best_candidate.get("label", "recommended size") or "recommended size")
-        left, right = st.columns(2)
-        with left:
-            if st.button("Apply recommended size", key="step5_apply_best_size_candidate_v1", use_container_width=True):
-                _apply_candidate(best_candidate)
-        with right:
-            if st.button("Keep current size and finish", key="step5_skip_best_size_candidate_v1", use_container_width=True):
-                _skip_current_size_candidate(scope, action_label, current_run_signature)
+    best_candidate = accepted_items[0]
+    _render_recommended_candidate(best_candidate, perf, baseline_size)
 
-        _render_continue_with_current_result_button(run_map, key="step5_size_continue_current_result_v1")
+    action_label = str(best_candidate.get("label", "recommended size") or "recommended size")
+    left, right = st.columns(2)
+    with left:
+        if st.button("Apply recommended size", key="step5_apply_best_size_candidate_v1", use_container_width=True):
+            _apply_candidate(best_candidate)
+    with right:
+        if st.button("Keep current size and finish", key="step5_skip_best_size_candidate_v1", use_container_width=True):
+            _skip_current_size_candidate(scope, action_label, current_run_signature)
 
-        _render_universe_size_decision_expander(
-            best_candidate,
-            baseline_size,
-            payload=payload,
-            evaluations=evaluations,
-            table=table,
-            scope=scope,
+    _render_continue_with_current_result_button(run_map, key="step5_size_continue_current_result_v1")
+
+    with st.expander("Why this candidate passed", expanded=False):
+        st.success("This candidate passed the universe-size acceptance gate.")
+        st.caption(
+            f"This keeps the current preset and technical engine config, starts from the current {baseline_size}-asset universe, "
+            f"and only changes the tested universe size."
+        )
+        gate_reason = str(best_candidate.get("gate_reason", "") or "")
+        if gate_reason:
+            st.caption(gate_reason)
+        target_size = _safe_int(best_candidate.get("universe_size"), 0)
+        st.caption(
+            f"baseline_size={int(baseline_size)} · tested_size={int(target_size)} · "
+            f"score_delta={_safe_float(best_candidate.get('score_delta'), 0.0):+.3f}"
         )
 
-    if False and not (accepted_items and not size_was_skipped):
-        with st.expander("Advanced universe-size diagnostics", expanded=False):
-            st.caption(
-                f"real_engine_tests={_safe_int(payload.get('candidate_count', 0), 0)} · "
-                f"planned_candidates={_safe_int(payload.get('planned_candidate_count', len(evaluations)), len(evaluations))} · "
-                f"elapsed={_safe_float(payload.get('elapsed_sec', 0.0), 0.0):.2f}s · scope={str(payload.get('scope', scope))}"
-            )
-            if panel_note:
-                st.caption(panel_note)
-            if not accepted_items:
-                st.caption(
-                    "The diagnostics table shows the tested coarse/refinement sizes. If a size cannot be materialised "
-                    "from the cached panel it is labelled Not testable rather than rejected."
-                )
-            st.caption(
-                f"Size-search window: current baseline {baseline_size} → {philosophy} guidance cap {cap_size} "
-                f"(deployment hard cap {deployment_hard_cap}). "
-                f"Coarse candidates: {coarse_label}. If one coarse size looks promising, up to two local refinements are tested nearby. "
-                "Baseline is not rerun."
-            )
-            if candidate_plan_rows:
-                plan_rows = []
-                for row in candidate_plan_rows:
-                    row_map = _coerce_mapping(row)
-                    plan_rows.append(
-                        {
-                            "candidate size": _safe_int(row_map.get("size"), 0),
-                            "stage": str(row_map.get("stage", "") or ""),
-                        }
-                    )
-                st.dataframe(pd.DataFrame(plan_rows), use_container_width=True, hide_index=True)
-            if accepted_items and not size_was_skipped:
-                selected = _coerce_mapping(accepted_items[0])
-                selected_assets = _asset_list(selected.get("assets", []))
-                st.caption(
-                    f"baseline_size={int(baseline_size)} · tested_size={_safe_int(selected.get('universe_size'), baseline_size)} · "
-                    f"score_delta={_safe_float(selected.get('score_delta'), 0.0):+.3f}"
-                )
-                if selected_assets:
-                    st.caption("Full selected asset list")
-                    st.write(_format_asset_preview(selected_assets, limit=100))
-                    detail = build_universe_mix_detail(selected_assets)
-                    if isinstance(detail, pd.DataFrame) and not detail.empty:
-                        st.dataframe(detail, use_container_width=True, hide_index=True)
-            if not table.empty:
-                st.dataframe(table, use_container_width=True, hide_index=True)
+    with st.expander("Optimised universe assets", expanded=False):
+        assets = _asset_list(best_candidate.get("assets", []))
+        if assets:
+            preview = ", ".join(asset_display_label(x) for x in assets[:50])
+            if len(assets) > 50:
+                preview += f" ... +{len(assets) - 50} more"
+            st.write(preview)
+        detail = build_universe_mix_detail(assets)
+        if isinstance(detail, pd.DataFrame) and not detail.empty:
+            st.dataframe(detail, use_container_width=True, hide_index=True)
 
-    action_label = str(accepted_items[0].get("label", "recommended size") if accepted_items else "current size")
-    if not accepted_items and not size_was_skipped:
-        if st.button("Keep current size and finish", key="step5_keep_current_size_finish_v1", use_container_width=True):
-            _skip_current_size_candidate(scope, action_label, current_run_signature)
+    # Keep raw size-search diagnostics out of the main recommendation surface.
+    # Suggestion timing/details are available through the Step 5 run diagnostics panel.
 
 
 # Compatibility wrapper for older imports.

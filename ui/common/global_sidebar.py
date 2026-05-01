@@ -710,7 +710,10 @@ def _render_available_checks(step: int) -> None:
     elif step == 4:
         st.caption("Universe diagnostics are available after preparing the asset panel.")
     elif step == 5:
-        st.caption("Engine diagnostics, suggestion timings, and start-date robustness are available after a real run.")
+        st.caption(
+            "Engine diagnostics and suggestion timings are available after a real run. "
+            "Start-date robustness is best run after the optional improvement checks are completed."
+        )
     elif step == 6:
         st.caption("Scenario comparison and horizon comparison are available in the projection screen.")
     elif step == 7:
