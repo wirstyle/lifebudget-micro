@@ -15,6 +15,184 @@ from ui.step5.governance import resolve_governance_status
 
 
 
+
+SUGGESTION_DEPTH_MODE_KEY = "step5_suggestion_testing_depth_mode_v1"
+SUGGESTION_DEPTH_COUNT_KEYS: dict[str, str] = {
+    "preset": "step5_suggestion_count_preset_v1",
+    "auto_opt": "step5_suggestion_count_auto_opt_v1",
+    "universe": "step5_suggestion_count_universe_v1",
+    "size": "step5_suggestion_count_size_v1",
+}
+SUGGESTION_DEPTH_PRESETS: dict[str, dict[str, int]] = {
+    "Fast": {"preset": 1, "auto_opt": 1, "universe": 2, "size": 1},
+    "Balanced": {"preset": 1, "auto_opt": 2, "universe": 4, "size": 1},
+    "Thorough": {"preset": 2, "auto_opt": 3, "universe": 6, "size": 2},
+}
+SUGGESTION_DEPTH_DEFAULT = "Balanced"
+SUGGESTION_SECONDS_PER_TEST: dict[str, float] = {
+    "preset": 30.0,
+    "auto_opt": 30.0,
+    "universe": 22.0,
+    "size": 30.0,
+}
+SHOW_ADVANCED_SUGGESTION_DEPTH_KEY = "step5_show_advanced_suggestion_testing_controls_v1"
+
+
+def _clamp_suggestion_count(value: Any, *, default: int = 1, low: int = 1, high: int = 8) -> int:
+    try:
+        raw = int(value)
+    except Exception:
+        raw = int(default)
+    return int(max(low, min(high, raw)))
+
+
+def _format_runtime_estimate(seconds: float) -> str:
+    try:
+        seconds = float(seconds)
+    except Exception:
+        seconds = 30.0
+    if seconds <= 40:
+        return "~30s"
+    if seconds <= 70:
+        return "~1 min"
+    if seconds <= 105:
+        return "~90s"
+    if seconds <= 150:
+        return "~2 min"
+    minutes = seconds / 60.0
+    if minutes < 10:
+        rounded = round(minutes * 2.0) / 2.0
+        return f"~{rounded:g} min"
+    return f"~{round(minutes):.0f} min"
+
+
+def _ensure_suggestion_depth_defaults() -> None:
+    defaults = SUGGESTION_DEPTH_PRESETS[SUGGESTION_DEPTH_DEFAULT]
+    if SUGGESTION_DEPTH_MODE_KEY not in st.session_state:
+        st.session_state[SUGGESTION_DEPTH_MODE_KEY] = SUGGESTION_DEPTH_DEFAULT
+    for phase, key in SUGGESTION_DEPTH_COUNT_KEYS.items():
+        if key not in st.session_state:
+            st.session_state[key] = int(defaults.get(phase, 1))
+
+
+def _current_suggestion_counts() -> dict[str, int]:
+    defaults = SUGGESTION_DEPTH_PRESETS[SUGGESTION_DEPTH_DEFAULT]
+    out: dict[str, int] = {}
+    for phase, key in SUGGESTION_DEPTH_COUNT_KEYS.items():
+        out[phase] = _clamp_suggestion_count(
+            st.session_state.get(key, defaults.get(phase, 1)),
+            default=defaults.get(phase, 1),
+        )
+    return out
+
+
+def _apply_suggestion_depth_preset(mode: str) -> dict[str, int]:
+    if mode not in SUGGESTION_DEPTH_PRESETS:
+        return _current_suggestion_counts()
+    counts = dict(SUGGESTION_DEPTH_PRESETS[mode])
+    for phase, value in counts.items():
+        st.session_state[SUGGESTION_DEPTH_COUNT_KEYS[phase]] = int(value)
+    return counts
+
+
+def _render_pre_run_suggestion_depth_controls() -> None:
+    """Let users opt into deeper suggestion searches before the portfolio run."""
+    _ensure_suggestion_depth_defaults()
+    show_controls = bool(
+        st.checkbox(
+            "Show advanced suggestion testing controls",
+            key=SHOW_ADVANCED_SUGGESTION_DEPTH_KEY,
+            help=(
+                "Optional runtime control for the improvement suggestions that may be tested "
+                "after the portfolio run. Balanced depth is used by default."
+            ),
+        )
+    )
+
+    if not show_controls:
+        st.caption(
+            "After the portfolio run, optional improvement suggestions use Balanced testing depth by default. "
+            "Open this only if you want to trade more runtime for more candidate coverage."
+        )
+        return
+
+    with st.container(border=True):
+        st.caption("Higher depth tests more alternatives, but each extra candidate adds real engine runtime after the portfolio run.")
+        mode_options = ["Fast", "Balanced", "Thorough", "Custom"]
+        current_mode = str(st.session_state.get(SUGGESTION_DEPTH_MODE_KEY, SUGGESTION_DEPTH_DEFAULT) or SUGGESTION_DEPTH_DEFAULT)
+        if current_mode not in mode_options:
+            current_mode = SUGGESTION_DEPTH_DEFAULT
+            st.session_state[SUGGESTION_DEPTH_MODE_KEY] = current_mode
+
+        mode = st.selectbox(
+            "Testing depth",
+            options=mode_options,
+            index=mode_options.index(current_mode),
+            key=SUGGESTION_DEPTH_MODE_KEY,
+            help="Controls how many rerun-tested alternatives are evaluated in each optional suggestion phase.",
+        )
+
+        if mode in SUGGESTION_DEPTH_PRESETS:
+            counts = _apply_suggestion_depth_preset(mode)
+            st.caption(
+                f"{mode}: {counts['preset']} preset · {counts['auto_opt']} tuning · "
+                f"{counts['universe']} universe-mix · {counts['size']} size test(s)."
+            )
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.number_input(
+                    "Preset",
+                    min_value=1,
+                    max_value=4,
+                    step=1,
+                    key=SUGGESTION_DEPTH_COUNT_KEYS["preset"],
+                    help="Strategy preset alternatives to rerun-test.",
+                )
+            with c2:
+                st.number_input(
+                    "Engine tuning",
+                    min_value=1,
+                    max_value=6,
+                    step=1,
+                    key=SUGGESTION_DEPTH_COUNT_KEYS["auto_opt"],
+                    help="Technical tuning alternatives to rerun-test.",
+                )
+            with c3:
+                st.number_input(
+                    "Universe mix",
+                    min_value=1,
+                    max_value=8,
+                    step=1,
+                    key=SUGGESTION_DEPTH_COUNT_KEYS["universe"],
+                    help="Same-size universe compositions to rerun-test.",
+                )
+            with c4:
+                st.number_input(
+                    "Universe size",
+                    min_value=1,
+                    max_value=6,
+                    step=1,
+                    key=SUGGESTION_DEPTH_COUNT_KEYS["size"],
+                    help="Universe-size alternatives to rerun-test.",
+                )
+            counts = _current_suggestion_counts()
+
+        estimates = {
+            phase: counts[phase] * SUGGESTION_SECONDS_PER_TEST.get(phase, 30.0)
+            for phase in SUGGESTION_DEPTH_COUNT_KEYS
+        }
+        total_estimate = sum(estimates.values())
+        st.caption(
+            "Estimated extra runtime if all phases run: "
+            f"{_format_runtime_estimate(total_estimate)} "
+            f"({counts['preset']}/{counts['auto_opt']}/{counts['universe']}/{counts['size']} tests)."
+        )
+        st.caption(
+            "This is approximate and depends on the deployed environment, cache state, and panel size. "
+            "Timings are recorded later in Advanced run diagnostics and timings."
+        )
+
 def _resolve_overlay_label(simple_cfg: dict, advanced_cfg: dict) -> str:
     overlay_intensity = float(simple_cfg.get("overlay_intensity", 0.5) or 0.5)
     simplicity = float(simple_cfg.get("simplicity_vs_sophistication", 0.5) or 0.5)
@@ -503,6 +681,11 @@ def _render_ready_to_run_section(
                 st.success(f"Ready to run: {setup_status_summary}, and the selected universe plus market-data panel are loaded.")
             else:
                 st.success("Ready to run: the selected universe plus market-data panel are loaded.")
+
+        if panel_ready and gov_state != "blocked" and not current_result_is_fresh:
+            _render_pre_run_suggestion_depth_controls()
+        else:
+            _ensure_suggestion_depth_defaults()
 
         run_result = render_run_panel(
             simple_cfg,

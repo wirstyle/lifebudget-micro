@@ -209,6 +209,14 @@ def _render_continue_with_current_result_button(run_map: dict, *, key: str) -> N
             st.session_state["current_step"] = 6
             st.rerun()
 
+    n_oos = len(_extract_oos_returns_for_projection(run_map))
+    st.caption(
+        "Current result can already feed the Long-Term Scenario Explorer. "
+        "You can continue now, or finish the remaining optional checks first."
+    )
+    if n_oos <= 0:
+        st.caption("No OOS return series was found; the Long-Term Scenario Explorer can still use fallback profile assumptions.")
+
 
 def _coerce_cfg_payload(cfg_payload: Any) -> dict:
     payload = _coerce_mapping(cfg_payload)
@@ -857,6 +865,42 @@ def _candidate_context_caption(item: dict) -> str:
     return "Tests another philosophy-approved preset combination."
 
 
+def _preset_decision_guide_message(current_perf: dict, philosophy: Any) -> str:
+    """Explain how to decide whether to apply the current preset recommendation."""
+    profile = str(philosophy or "Balanced").strip() or "Balanced"
+    profile_key = profile.lower()
+    p = _normalise_perf(current_perf)
+    cagr = p.get("cagr", 0.0)
+    sharpe = p.get("sharpe", 0.0)
+    vol = p.get("annual_volatility", 0.0)
+    maxdd = abs(p.get("max_drawdown", 0.0))
+
+    if profile_key in {"defensive", "conservative"}:
+        philosophy_rule = (
+            "For a Defensive/Conservative profile, prioritise lower drawdown and lower volatility, "
+            "but do not accept a change that weakens Sharpe so much that the smoother path stops being worth it."
+        )
+    elif profile_key == "growth":
+        philosophy_rule = (
+            "For a Growth profile, the useful improvement is better Sharpe or lower drawdown without killing upside; "
+            "do not accept a safer-looking rerun if it removes too much of the CAGR case."
+        )
+    else:
+        philosophy_rule = (
+            "For a Balanced profile, judge the full trade-off: lower drawdown is useful, but not if Sharpe or CAGR "
+            "falls enough to make the strategy less balanced overall."
+        )
+
+    return (
+        "**Decision guide:** only apply a suggestion if the rerun-tested result improves the decision trade-off, "
+        "not just one isolated metric. "
+        f"Current result: CAGR {_format_pct(cagr)}, volatility {_format_pct(vol)}, MaxDD -{100.0 * maxdd:.2f}%, "
+        f"Sharpe {sharpe:.2f}. {philosophy_rule} "
+        "If this result already feels acceptable, the next step is to continue to the Long-Term Scenario Explorer; "
+        "benchmark, reliability, and improvement checks are optional review layers."
+    )
+
+
 def _render_recommended_candidate(candidate: dict, current_perf: dict) -> None:
     """Render the actionable preset candidate as a compact card.
 
@@ -1001,10 +1045,23 @@ def render_preset_improvement(run_result: dict) -> dict:
 
         _render_continue_with_current_result_button(run_map, key="step5_preset_continue_current_result_v1")
 
-    details_label = "Preset recommendation details" if accepted_items and not preset_was_skipped else "Preset test diagnostics"
+    details_label = "How to decide on this recommendation" if accepted_items and not preset_was_skipped else "Preset test diagnostics"
     with st.expander(details_label, expanded=False):
         if accepted_items and not preset_was_skipped:
             detail_candidate = _coerce_mapping(accepted_items[0])
+            philosophy = str(payload.get("philosophy", _current_simple_state().get("philosophy", "Balanced")) or "Balanced")
+
+            st.info(_preset_decision_guide_message(perf, philosophy))
+            st.caption(
+                "Review the optional suggestion shown above. Apply it only if the trade-off feels better for the selected risk profile; "
+                "otherwise keep the current setup or continue with the current result."
+            )
+            st.info(
+                "The improvement phases test these kinds of changes with the real engine before showing an Apply button. "
+                "Do not change knobs just because they sound better; compare the rerun-tested metrics."
+            )
+            st.divider()
+
             st.success("This candidate passed the preset acceptance gate.")
             st.caption(_candidate_context_caption(detail_candidate))
             gate_reason = str(detail_candidate.get("gate_reason", "") or "")

@@ -55,7 +55,7 @@ PRESET_SUGGESTION_TIMING_KEY = "step5_preset_suggestion_timing_v1"
 STEP5_REAL_RUN_RESULT_ANCHOR_ID = "step5-real-run-result-anchor"
 STEP5_IMPROVEMENT_CHECKS_ANCHOR_ID = "step5-improvement-checks-anchor"
 STEP5_RELIABILITY_ANCHOR_ID = "step5-reliability-robustness-anchor"
-STEP5_RELIABILITY_VISIBLE_KEY = "step5_reliability_and_robustness_visible_v1"
+STEP5_RELIABILITY_EXPANDED_KEY = "step5_reliability_and_robustness_expanded_v1"
 STEP5_SCROLL_TO_RELIABILITY_KEY = "step5_scroll_to_reliability_and_robustness_v1"
 
 
@@ -126,19 +126,14 @@ def _apply_suggestion_depth_preset(mode: str) -> dict[str, int]:
     return counts
 
 
-def _ensure_suggestion_depth_defaults() -> None:
-    """Initialise suggestion-depth state before the suggestion UI is rendered."""
+def _render_suggestion_depth_controls() -> None:
+    """Optional runtime/coverage control for the sequential suggestion tests."""
     defaults = SUGGESTION_DEPTH_PRESETS[SUGGESTION_DEPTH_DEFAULT]
     if SUGGESTION_DEPTH_MODE_KEY not in st.session_state:
         st.session_state[SUGGESTION_DEPTH_MODE_KEY] = SUGGESTION_DEPTH_DEFAULT
     for phase, key in SUGGESTION_DEPTH_COUNT_KEYS.items():
         if key not in st.session_state:
             st.session_state[key] = int(defaults.get(phase, 1))
-
-
-def _render_suggestion_depth_controls() -> None:
-    """Optional runtime/coverage control for the sequential suggestion tests."""
-    _ensure_suggestion_depth_defaults()
 
     with st.expander("Suggestion testing depth", expanded=False):
         st.caption("Higher depth tests more alternatives, but each extra candidate adds real engine runtime.")
@@ -1963,24 +1958,41 @@ def _reliability_confidence_label(run_map: dict, benchmark_payload: dict) -> str
 
 
 def _render_reliability_sidebar_snapshot(run_map: dict, benchmark_payload: dict) -> None:
-    """Render a compact in-flow sidebar toggle for the full reliability panel.
+    """Render a compact sidebar entry point for the full reliability panel.
 
-    By default the full reliability block stays hidden from the main post-run
-    surface. The sidebar button shows or hides it on demand.
+    The detailed reliability tables and robustness controls stay hidden by
+    default in the main page. The sidebar controls whether that review panel is
+    visible.
     """
     window_meta = _coerce_mapping(benchmark_payload.get("window_meta", {}) if isinstance(benchmark_payload, dict) else {})
     confidence = _reliability_confidence_label(run_map, benchmark_payload)
     benchmark_status = _benchmark_status_label(benchmark_payload)
-    eval_window = str(window_meta.get("evaluation_window", "—") or "—")
-    visible = bool(st.session_state.get(STEP5_RELIABILITY_VISIBLE_KEY, False))
+    assets_checked = _benchmark_asset_count(benchmark_payload)
 
-    with st.sidebar:
-        st.markdown("---")
-        st.markdown("### Validation")
-        st.caption(
-            f"Confidence: {confidence} · Benchmark check: {benchmark_status}"
-            + (f" · Window: {eval_window}" if eval_window != "—" else "")
-        )
+    eval_window = str(window_meta.get("evaluation_window", "—") or "—")
+    target_periods = _safe_int(window_meta.get("target_periods", 0), 0)
+    if target_periods <= 0:
+        target_periods = len(_extract_oos_returns(run_map))
+
+    visible = bool(st.session_state.get(STEP5_RELIABILITY_EXPANDED_KEY, False))
+
+    with st.sidebar.container(border=True):
+        st.markdown("### Reliability snapshot")
+
+        if confidence in {"Moderate", "Moderate-to-Strong"}:
+            st.success(f"Confidence: {confidence}.")
+        elif confidence == "Limited":
+            st.warning("Confidence: Limited.")
+        else:
+            st.info("Confidence: unavailable until a valid run result is available.")
+
+        st.markdown(f"**Benchmark check:** {benchmark_status}")
+        st.markdown(f"**Reference assets:** {assets_checked}")
+        if target_periods > 0:
+            st.markdown(f"**OOS months:** {target_periods}")
+        if eval_window != "—":
+            st.caption(f"Window: {eval_window}")
+        st.caption("Full validation details stay in the main post-run panel.")
 
         button_label = "Hide reliability & robustness" if visible else "Show reliability & robustness"
         if st.button(
@@ -1989,15 +2001,10 @@ def _render_reliability_sidebar_snapshot(run_map: dict, benchmark_payload: dict)
             use_container_width=True,
         ):
             next_visible = not visible
-            st.session_state[STEP5_RELIABILITY_VISIBLE_KEY] = next_visible
+            st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = next_visible
             st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = bool(next_visible)
             st.rerun()
 
-        st.caption(
-            "Hide this review to keep the Strategy Engine result compact."
-            if visible
-            else "Open the full reliability and robustness review in the main panel."
-        )
 
 def _maybe_scroll_to_reliability_panel() -> None:
     if not st.session_state.pop(STEP5_SCROLL_TO_RELIABILITY_KEY, False):
@@ -2014,7 +2021,6 @@ def _maybe_scroll_to_reliability_panel() -> None:
         """,
         height=0,
     )
-
 
 def render_post_run(run_result: dict) -> None:
     """Render the Gold Stable post-run surface.
@@ -2054,9 +2060,6 @@ def render_post_run(run_result: dict) -> None:
     panel_shape = run_map.get("panel_shape", None)
     oos_months = len(_extract_oos_returns(run_map))
 
-    bench_df, _, window_meta = _benchmark_context_rows(perf, run_map)
-    benchmark_payload = {"bench_df": bench_df, "window_meta": window_meta}
-    _render_reliability_sidebar_snapshot(run_map, benchmark_payload)
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("CAGR", _pct(_safe_float(perf.get("cagr", 0.0))))
@@ -2077,11 +2080,25 @@ def render_post_run(run_result: dict) -> None:
         st.divider()
         _render_compact_same_period_context(perf, run_map)
 
-    reliability_visible = bool(st.session_state.get(STEP5_RELIABILITY_VISIBLE_KEY, False))
+    bench_df, _, window_meta = _benchmark_context_rows(perf, run_map)
+    benchmark_payload = {"bench_df": bench_df, "window_meta": window_meta}
+    _render_reliability_sidebar_snapshot(run_map, benchmark_payload)
+
+    reliability_visible = bool(st.session_state.get(STEP5_RELIABILITY_EXPANDED_KEY, False))
     if reliability_visible:
         st.markdown(f'<div id="{STEP5_RELIABILITY_ANCHOR_ID}"></div>', unsafe_allow_html=True)
         _maybe_scroll_to_reliability_panel()
+
         with st.expander("Reliability and robustness", expanded=True):
+            if st.button(
+                "Hide reliability & robustness",
+                key="step5_main_hide_reliability_and_robustness",
+                use_container_width=True,
+            ):
+                st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = False
+                st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = False
+                st.rerun()
+
             render_result_reliability_assessment(run_map, benchmark_payload=benchmark_payload, inline_details=True)
             render_start_date_robustness_timing_block(run_map)
             st.info(
@@ -2100,8 +2117,6 @@ def render_post_run(run_result: dict) -> None:
     st.markdown(f'<div id="{STEP5_IMPROVEMENT_CHECKS_ANCHOR_ID}"></div>', unsafe_allow_html=True)
     _maybe_scroll_to_improvement_checks()
     st.markdown("## Optional improvement checks")
-
-    _ensure_suggestion_depth_defaults()
     _render_improvement_phase_row(run_map)
 
     preset_flow_completed = _preset_decision_completed_for_current_run(run_map)
@@ -2125,36 +2140,9 @@ def render_post_run(run_result: dict) -> None:
         else:
             render_auto_opt_improvement(run_map)
 
-    st.info(_decision_guide_message(perf, philosophy))
-    st.caption(
-        "Review the optional suggestion shown above. Once a recommendation appears, you can apply it, "
-        "keep the current setup, or continue without the remaining checks."
-    )
-
-    st.info(
-        "The improvement phases above test these kinds of changes with the real engine before showing an Apply button. "
-        "Do not change knobs just because they sound better; compare the rerun-tested metrics."
-    )
-
     _render_engine_levers_to_try(perf, philosophy, run_map, as_expander=True)
 
-    _render_suggestion_depth_controls()
-
-    st.markdown("---")
     n_oos = _store_projection_bridge_context(run_map)
-    step6_title = "Ready for Long-Term Scenario Explorer" if size_flow_completed else "Long-Term Scenario Explorer hand-off available"
-    step6_caption = (
-        "This is the hand-off into the Long-Term Scenario Explorer. The active strategy engine result is stored and can now feed the projection."
-        if size_flow_completed
-        else "Current result can already feed the Long-Term Scenario Explorer. You can continue now, or finish the remaining optional checks first."
-    )
-
-    with st.expander(step6_title, expanded=False):
-        st.caption(step6_caption)
-        if n_oos > 0:
-            st.success(f"{n_oos} monthly OOS returns stored for the Long-Term Scenario Explorer.")
-        else:
-            st.info("No OOS return series was found in this run payload; the Long-Term Scenario Explorer can still use fallback profile assumptions.")
 
     with st.expander("Advanced run diagnostics and timings", expanded=False):
         meta_parts = [
