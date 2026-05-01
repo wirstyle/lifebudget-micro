@@ -710,10 +710,7 @@ def _render_available_checks(step: int) -> None:
     elif step == 4:
         st.caption("Universe diagnostics are available after preparing the asset panel.")
     elif step == 5:
-        st.caption(
-            "Engine diagnostics and suggestion timings are available after a real run. "
-            "Start-date robustness is best run after the optional improvement checks are completed."
-        )
+        st.caption("Engine diagnostics, suggestion timings, and start-date robustness are available after a real run.")
     elif step == 6:
         st.caption("Scenario comparison and horizon comparison are available in the projection screen.")
     elif step == 7:
@@ -1452,6 +1449,213 @@ def _render_step5_sidebar(step: int) -> None:
 
     _render_step5_q_and_a()
     _render_step5_terms()
+
+
+def _render_step6_scenario_status() -> None:
+    """Focused Long-Term Scenario sidebar status.
+
+    Long-Term Scenario already contains the scenario controls and comparison chart on the
+    main page. The sidebar should summarise state without repeating every
+    diagnostic panel from the investment engine.
+    """
+    st.markdown("### Scenario status")
+    st.caption(
+        "Long-Term Scenario uses the current contribution plan plus either a tested Strategy Engine path "
+        "or an educational proxy/savings-only assumption."
+    )
+
+    investment_context = _investment_context()
+    snapshot = _planning_snapshot()
+    run_map = _latest_run_result()
+
+    weekly = _first_positive_value(
+        investment_context.get("weekly_equivalent"),
+        investment_context.get("weekly_contribution"),
+        investment_context.get("target_weekly"),
+        snapshot.get("target_a_weekly") if snapshot else 0.0,
+        snapshot.get("target_weekly") if snapshot else 0.0,
+        st.session_state.get("target_a_weekly"),
+        st.session_state.get("weekly_savings_target"),
+    )
+    monthly = _first_positive_value(
+        investment_context.get("monthly_contribution"),
+        investment_context.get("target_a_monthly"),
+        snapshot.get("target_a_monthly") if snapshot else 0.0,
+        snapshot.get("target_monthly") if snapshot else 0.0,
+        weekly * 52.0 / 12.0 if weekly > 0.0 else 0.0,
+    )
+
+    if monthly > 0.0:
+        st.caption(f"**Contribution:** {_money_plain(monthly)}/mo")
+    else:
+        st.caption("**Contribution:** resolved on the main scenario screen")
+
+    if weekly > 0.0:
+        st.caption(f"**Weekly equivalent:** {_money_weekly(weekly)}")
+
+    philosophy = str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
+    st.caption(f"**Projection profile:** {philosophy}")
+
+    if run_map:
+        perf = _coerce_mapping(run_map.get("performance_summary", {}))
+        st.caption("**Return path:** Historical Strategy Engine path")
+        st.caption(
+            "**Last engine run:** "
+            f"CAGR {_pct(perf.get('cagr', 0.0))} · "
+            f"Sharpe {_safe_float(perf.get('sharpe', 0.0), 0.0):.2f}"
+        )
+    else:
+        st.caption(f"**Return path:** Demo {philosophy} proxy")
+        st.caption("Strategy Engine has not been run yet, so the investment path is labelled as an educational proxy.")
+
+    st.caption(
+        "**Projection:** generated on this screen"
+        if _has_projection_result()
+        else "**Projection:** adjust the scenario on the main screen"
+    )
+
+
+def _render_step6_shortcuts() -> None:
+    st.markdown("### Safe shortcuts")
+
+    step5_enabled, step5_reason = _step_access_state(5, 6)
+    if st.button(
+        "← Back to Strategy Engine",
+        key="global_sidebar_step6_back_to_strategy_engine",
+        use_container_width=True,
+        disabled=not step5_enabled,
+        help=step5_reason,
+    ):
+        _go_to_step(5)
+
+    step7_enabled, step7_reason = _step_access_state(7, 6)
+    if st.button(
+        "Open Final Report →",
+        key="global_sidebar_step6_open_final_report",
+        use_container_width=True,
+        disabled=not step7_enabled,
+        help=step7_reason,
+    ):
+        _go_to_step(7)
+
+    st.caption("Heavy scenario calculations and exports stay on the main screen.")
+
+
+def _render_step6_projection_diagnostics() -> None:
+    with st.expander("Projection context", expanded=False):
+        panel_meta = _asset_panel_summary()
+        if panel_meta:
+            st.markdown("**Market-data panel**")
+            st.caption(
+                f"{panel_meta.get('assets', 0)} assets · {panel_meta.get('rows', 0)} rows · "
+                f"{panel_meta.get('source', 'Step 4 panel')}"
+            )
+
+        run_map = _latest_run_result()
+        if run_map:
+            st.divider()
+            st.markdown("**Last Strategy Engine run**")
+            perf = _coerce_mapping(run_map.get("performance_summary", {}))
+            st.caption(
+                f"CAGR {_pct(perf.get('cagr', 0.0))} · "
+                f"Vol {_pct(perf.get('annual_volatility', perf.get('volatility', 0.0)))} · "
+                f"MaxDD -{100.0 * abs(_safe_float(perf.get('max_drawdown', 0.0), 0.0)):.2f}% · "
+                f"Sharpe {_safe_float(perf.get('sharpe', 0.0), 0.0):.2f}"
+            )
+
+        investment_context = _investment_context()
+        oos_returns = investment_context.get("oos_returns_monthly", [])
+        if isinstance(oos_returns, list) and oos_returns:
+            st.divider()
+            st.markdown("**Projection bridge**")
+            st.caption(f"{len(oos_returns)} monthly OOS returns available for long-term scenarios.")
+
+        if not panel_meta and not run_map:
+            st.caption("Projection context will populate after Personal Finance, Personal Finance Setup, Risk Profile & Asset Universe, or Strategy Engine has produced inputs.")
+
+
+def _render_step6_q_and_a() -> None:
+    with st.expander("Scenario Q&A", expanded=False):
+        st.markdown("**What is this screen for?**")
+        st.caption(
+            "It translates a contribution plan and return-path assumption into possible long-term wealth ranges. "
+            "It is a scenario explorer, not a forecast."
+        )
+
+        st.markdown("**Why is this useful?**")
+        st.caption("1. It translates return behaviour into personal contribution outcomes.")
+        st.caption("2. It compares investment/proxy paths with a savings-only baseline.")
+        st.caption("3. It shows uncertainty through P10 / median / P90 ranges instead of one promised number.")
+
+        st.markdown("**How is this different from the Strategy Engine?**")
+        st.caption(
+            "The Strategy Engine asks how a selected strategy behaved on the historical market-data panel. "
+            "Long-Term Scenario asks what range of contribution outcomes could occur if future returns behaved similarly."
+        )
+
+        st.markdown("**Why can this run before the Strategy Engine?**")
+        st.caption(
+            "Before a tested engine path exists, the investment view can use a clearly labelled educational proxy. "
+            "Once the Strategy Engine has run, the scenario can use the tested return path instead."
+        )
+
+
+def _render_step6_terms() -> None:
+    with st.expander("Scenario terms", expanded=False):
+        st.markdown("**P10 / median / P90**")
+        st.caption(
+            "Scenario range markers: P10 is a lower outcome, median is the middle outcome, and P90 is a higher outcome. "
+            "They are not promised results."
+        )
+
+        st.markdown("**Savings-only baseline**")
+        st.caption(
+            "The same starting pot and contribution path with no investment return, volatility, drawdown or market risk."
+        )
+
+        st.markdown("**Educational investment proxy**")
+        st.caption(
+            "A labelled assumption used when the Strategy Engine has not produced a tested return path yet. "
+            "It keeps the scenario screen usable without pretending to be a real backtest."
+        )
+
+        st.markdown("**Loss vs contributions**")
+        st.caption(
+            "The share of simulations where the terminal value ends below the total amount contributed. "
+            "It is a scenario diagnostic, not a prediction."
+        )
+
+        st.markdown("**Goal probability**")
+        st.caption(
+            "The share of simulations that reach the optional wealth goal. Treat it as a secondary diagnostic unless the goal is meaningful."
+        )
+
+        st.markdown("**Model scope**")
+        st.caption(
+            "This prototype can adjust discretionary contributions automatically; essential spending is treated as fixed in the model."
+        )
+
+        st.markdown("**Contribution allocation**")
+        st.caption(
+            "Long-Term Scenario works at strategy-return level. It does not yet show month-by-month asset-level purchase percentages."
+        )
+
+
+def _render_step6_sidebar(step: int) -> None:
+    """Render a quieter sidebar for Long-Term Scenario."""
+    _render_step_navigation(step)
+    st.divider()
+
+    _render_step6_scenario_status()
+
+    st.divider()
+    _render_step6_shortcuts()
+
+    _render_step6_projection_diagnostics()
+    _render_step6_q_and_a()
+    _render_step6_terms()
+
+
 def render_global_sidebar() -> None:
     """Render a persistent sidebar across the whole Streamlit app.
 
@@ -1479,6 +1683,10 @@ def render_global_sidebar() -> None:
 
         if int(step) == 5:
             _render_step5_sidebar(step)
+            return
+
+        if int(step) == 6:
+            _render_step6_sidebar(step)
             return
 
         _render_step_navigation(step)

@@ -1143,7 +1143,7 @@ def _decision_guide_message(perf: dict, philosophy: Any) -> str:
         "not just one isolated metric. "
         f"Current result: CAGR {_pct(cagr)}, volatility {_pct(vol)}, MaxDD -{100.0 * maxdd:.2f}%, "
         f"Sharpe {sharpe:.2f}. {philosophy_rule} "
-        "If this result already feels acceptable, the next step is to continue to the Long-Term Scenario Explorer; "
+        "If this result already feels acceptable, the next step is to continue to the Long-Term Scenario; "
         "benchmark, reliability, and improvement checks are optional review layers."
     )
 
@@ -1345,7 +1345,7 @@ def _render_reliability_note() -> None:
         st.info(
             "These figures come from a historical walk-forward backtest using the selected asset panel. "
             "They are useful for comparing configurations inside the app, but they are not forecasts or guarantees. "
-            "Results depend on the date range, asset universe, data quality, and engine assumptions. Long-Term Scenario Explorer should be used to explore future uncertainty rather than treating this run as a prediction."
+            "Results depend on the date range, asset universe, data quality, and engine assumptions. Long-Term Scenario should be used to explore future uncertainty rather than treating this run as a prediction."
         )
 
 
@@ -2102,7 +2102,7 @@ def render_post_run(run_result: dict) -> None:
     - real engine metrics
     - compact validation context
     - optional improvement checks
-    - OOS-return bridge into Long-Term Scenario Explorer
+    - OOS-return bridge into Long-Term Scenario
     """
     run_map = _coerce_mapping(run_result)
     if not run_map:
@@ -2281,10 +2281,10 @@ def render_post_run(run_result: dict) -> None:
     st.markdown("---")
     nav_left, nav_right = st.columns(2)
     with nav_left:
-        if st.button("← Back to Risk Profile and Universe", key="step5_bridge_back_to_investment_setup", use_container_width=True):
+        if st.button("← Back to Risk Profile & Asset Universe", key="step5_bridge_back_to_investment_setup", use_container_width=True):
             st.session_state["current_step"] = 4
             st.rerun()
     with nav_right:
-        if st.button("Continue to Long-Term Scenario Explorer →", key="step5_bridge_continue_to_long_term", use_container_width=True):
+        if st.button("Continue to Long-Term Scenario →", key="step5_bridge_continue_to_long_term", use_container_width=True):
             st.session_state["current_step"] = 6
             st.rerun()

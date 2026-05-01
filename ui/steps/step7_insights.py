@@ -6,7 +6,7 @@ Proxy-aware final-polish version:
 - Investment / comparison insights can interpret either:
   1. tested Strategy Engine results, or
   2. a clearly labelled educational investment proxy.
-- The page only asks the user to return to the Scenario Explorer when the
+- The page only asks the user to return to the Long-Term Scenario when the
   relevant long-term projection has not been generated yet.
 """
 
@@ -199,7 +199,7 @@ def _evidence_label() -> str:
 
 def _render_missing_step6_result(message: str, *, button_key: str) -> None:
     st.info(message)
-    if st.button("← Back to Scenario Explorer", key=button_key):
+    if st.button("← Back to Long-Term Scenario", key=button_key):
         st.session_state[CURRENT_STEP] = 6
         st.session_state["current_step"] = 6
         st.rerun()
@@ -253,7 +253,7 @@ def _render_engine_metrics(engine: Dict[str, Any]) -> tuple[float, float, float]
 def _render_proxy_evidence_note(*, compare: bool = False) -> None:
     if _engine_result_is_real():
         st.success(
-            "Evidence level: **tested Strategy Engine result** interpreted through the long-term Scenario Explorer."
+            "Evidence level: **tested Strategy Engine result** interpreted through the long-term Long-Term Scenario."
         )
         return
 
@@ -302,7 +302,7 @@ def _render_report_summary(
         else:
             text = (
                 f"This report is designed to compare savings-only planning against {evidence}. "
-                "Generate both Scenario Explorer branches to complete the comparison readout."
+                "Generate both Long-Term Scenario branches to complete the comparison readout."
             )
         insight_card("Report summary", text, level="info")
         return
@@ -334,7 +334,7 @@ def _render_report_summary(
         cagr = _safe_float(engine.get("cagr", 0.0))
         dd_abs = abs(_safe_float(engine.get("max_drawdown", 0.0)))
         text = (
-            f"This report interprets a tested Strategy Engine result through the long-term Scenario Explorer. "
+            f"This report interprets a tested Strategy Engine result through the long-term Long-Term Scenario. "
             f"The strategy snapshot shows Sharpe **{sharpe:.2f}**, CAGR near **{_fmt_pct_from_fraction(cagr)}**, "
             f"and drawdown severity near **{_fmt_pct_from_fraction(dd_abs)}**. The modelled median terminal value is "
             f"**{_fmt_gbp0(median)}**, with a scenario range from **{_fmt_gbp0(p10)}** to **{_fmt_gbp0(p90)}**. "
@@ -356,27 +356,27 @@ def _render_recommended_next_actions(*, mode_label: str, compare: bool = False) 
     if compare:
         if _engine_result_is_real():
             st.write("• Use the comparison as a decision filter: higher median outcome only matters if the drawdown and uncertainty are acceptable.")
-            st.write("• Return to the Scenario Explorer to stress-test the result with a different horizon, contribution level, starting pot or goal.")
+            st.write("• Return to the Long-Term Scenario to stress-test the result with a different horizon, contribution level, starting pot or goal.")
             st.write("• Return to the Strategy Engine if the investment branch needs lower drawdown, a different universe, or a cleaner risk profile.")
         else:
             st.write("• Run the Investment Strategy Lab to replace the educational proxy with a tested Strategy Engine result.")
-            st.write("• Re-run the Scenario Explorer after the real strategy result exists so the comparison uses stronger evidence.")
+            st.write("• Re-run the Long-Term Scenario after the real strategy result exists so the comparison uses stronger evidence.")
             st.write("• Treat the current comparison as a report-flow demonstration, not as a basis for choosing the investment branch.")
         return
 
     if mode_label == "savings_only":
         st.write("• Keep the savings-only route if the projected range already meets the goal with acceptable effort and timeline.")
-        st.write("• Return to the Scenario Explorer to test a different contribution, horizon, starting pot or goal amount.")
+        st.write("• Return to the Long-Term Scenario to test a different contribution, horizon, starting pot or goal amount.")
         st.write("• Explore the investment pathway only if the savings-only route leaves a meaningful gap and market uncertainty is acceptable.")
         return
 
     if _engine_result_is_real():
         st.write("• Treat this as a candidate pathway only if the drawdown level and uncertainty are acceptable.")
         st.write("• Return to the Strategy Engine if the result needs lower drawdown, a smoother risk profile, or a different asset universe.")
-        st.write("• Return to the Scenario Explorer to test whether the same strategy still works under different contribution and horizon assumptions.")
+        st.write("• Return to the Long-Term Scenario to test whether the same strategy still works under different contribution and horizon assumptions.")
     else:
         st.write("• Run the Investment Strategy Lab to replace this proxy with tested strategy returns.")
-        st.write("• Re-run the Scenario Explorer after the Strategy Engine has produced a real return path.")
+        st.write("• Re-run the Long-Term Scenario after the Strategy Engine has produced a real return path.")
         st.write("• Treat this screen as an educational demonstration until then.")
 
 def _render_decision_support_note(*, compare: bool = False) -> None:
@@ -395,7 +395,7 @@ def _render_decision_support_note(*, compare: bool = False) -> None:
         if _engine_result_is_real():
             st.write("• The Strategy Engine generated a historical strategy return path from the selected universe and engine configuration.")
         else:
-            st.write("• The Scenario Explorer used a labelled educational proxy because no tested strategy return path was available.")
+            st.write("• The Long-Term Scenario used a labelled educational proxy because no tested strategy return path was available.")
         st.write("• The long-term scenario model translates contribution assumptions into projected ranges.")
         st.write("• These insights interpret plausibility, uncertainty, trade-offs and horizon sensitivity.")
         st.write("• P10 / median / P90 are scenario percentiles under the model assumptions, not guaranteed outcomes.")
@@ -437,7 +437,7 @@ def _render_horizon_rows(rows: Iterable[Dict[str, Any]]) -> None:
 def _render_savings_only_insights(proj: Dict[str, Any]) -> None:
     if not _has_projection(proj):
         _render_missing_step6_result(
-            "Open the Scenario Explorer and generate the savings-only scenario first. This page will then interpret the long-term savings range.",
+            "Open the Long-Term Scenario and generate the savings-only scenario first. This page will then interpret the long-term savings range.",
             button_key="step7_savings_missing_back",
         )
         return
@@ -581,7 +581,7 @@ def _render_strategy_interpretation(engine: Dict[str, Any]) -> None:
 def _render_investing_insights(proj: Dict[str, Any], cash_proj: Dict[str, Any], engine: Dict[str, Any], *, compare: bool) -> None:
     if not _has_projection(proj):
         _render_missing_step6_result(
-            "Open the Scenario Explorer and run the investment/proxy projection first. This page will then interpret the long-term investment pathway.",
+            "Open the Long-Term Scenario and run the investment/proxy projection first. This page will then interpret the long-term investment pathway.",
             button_key="step7_investment_missing_back",
         )
         return
@@ -661,7 +661,7 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> None:
             _render_investing_insights(proj, cash_proj, engine, compare=True)
             return
         _render_missing_step6_result(
-            "Run the comparison view in the Scenario Explorer first. It can use either the educational proxy or tested Strategy Engine returns.",
+            "Run the comparison view in the Long-Term Scenario first. It can use either the educational proxy or tested Strategy Engine returns.",
             button_key="step7_compare_missing_back",
         )
         return
@@ -676,7 +676,7 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> None:
 
     st.markdown("### Savings vs investment comparison")
     if valid.empty:
-        st.warning("No complete comparison rows were found. Re-run the Scenario Explorer comparison.")
+        st.warning("No complete comparison rows were found. Re-run the Long-Term Scenario comparison.")
         return
 
     valid["Difference"] = pd.to_numeric(valid["Difference"], errors="coerce")
@@ -741,10 +741,10 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> None:
 def _render_footer(*, complete_text: str) -> None:
     st.markdown("---")
     st.success(complete_text)
-    st.caption("You can return to the Scenario Explorer to change assumptions, or go back Home to choose another module.")
+    st.caption("You can return to the Long-Term Scenario to change assumptions, or return Home to choose another module.")
     left, right = st.columns(2)
     with left:
-        if st.button("← Back to Scenario Explorer", key=f"step7_back_to_step6_{complete_text.lower().replace(' ', '_')}"):
+        if st.button("← Back to Long-Term Scenario", key=f"step7_back_to_step6_{complete_text.lower().replace(' ', '_')}"):
             st.session_state[CURRENT_STEP] = 6
             st.session_state["current_step"] = 6
             st.rerun()

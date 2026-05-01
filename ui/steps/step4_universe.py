@@ -1271,13 +1271,13 @@ def render_step_4() -> None:
     st.markdown("---")
     left, right = st.columns([1.0, 1.8])
     with left:
-        if st.button("Back to Home", key="step4_back_to_home", use_container_width=True):
-            st.session_state[CURRENT_STEP] = 0
-            st.session_state["current_step"] = 0
+        if st.button("← Back to Personal Finance Setup", key="step4_back_to_personal_finance", use_container_width=True):
+            st.session_state[CURRENT_STEP] = 1
+            st.session_state["current_step"] = 1
             st.rerun()
     with right:
         continue_disabled = not bool(st.session_state.get(ASSET_PANEL_READY, False))
-        if st.button("Continue to Strategy Engine", key="step4_continue", disabled=continue_disabled, use_container_width=True):
+        if st.button("Continue to Strategy Engine →", key="step4_continue", disabled=continue_disabled, use_container_width=True):
             st.session_state["step4_universe_payload"] = payload
             st.session_state[CURRENT_STEP] = 5
             st.session_state["current_step"] = 5

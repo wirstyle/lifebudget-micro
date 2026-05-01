@@ -1,5 +1,5 @@
 """
-Step 6 — Long-term Projection
+Long-Term Scenario
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ def _long_term_shock_config(option: str) -> Dict[str, Any]:
 def _render_long_term_shock_control(*, key_prefix: str) -> Dict[str, Any]:
     with st.expander("Optional: long-term life shocks", expanded=False):
         st.caption(
-            "This is separate from the Step 3 short-term shock. Step 3 tests fragility over weeks; "
+            "This is separate from the Personal Finance Setup short-term shock. Personal Finance Setup tests fragility over weeks; "
             "this optional setting models occasional long-term setbacks as an expected contribution drag."
         )
         current = str(st.session_state.get(f"{key_prefix}_long_term_shock_option", "None") or "None")
@@ -110,7 +110,7 @@ def _render_long_term_shock_control(*, key_prefix: str) -> Dict[str, Any]:
             st.info(
                 f"Expected long-term drag: about **{_format_currency(float(cfg['monthly_expected_drag']))}/month** "
                 f"({_format_currency(float(cfg['annual_expected_drag']))}/year on average). "
-                "This is not copied from Step 3 and is not treated as an annual guaranteed shock."
+                "This is not copied from Personal Finance Setup and is not treated as an annual guaranteed shock."
             )
         else:
             st.caption("Default: no long-term life-shock adjustment.")
@@ -231,6 +231,31 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _step6_back_target() -> tuple[int, str]:
+    """Return the most useful previous-step target for Long-Term Scenario navigation.
+
+    If the user has a real Strategy Engine result, Long-Term Scenario is downstream of
+    Strategy Engine. If not, Long-Term Scenario is acting as a savings/proxy scenario screen and
+    the most useful previous step is the Personal Finance Setup.
+    """
+    has_engine_result = bool(
+        st.session_state.get(ENGINE_HAS_RUN, False)
+        or st.session_state.get("step5_last_run_result")
+        or st.session_state.get("step5_run_result")
+        or st.session_state.get("last_run_result")
+        or st.session_state.get("run_result")
+    )
+    if has_engine_result:
+        return 5, "← Back to Strategy Engine"
+    return 1, "← Back to Personal Finance Setup"
+
+
+def _go_to_step(step: int) -> None:
+    st.session_state[CURRENT_STEP] = int(step)
+    st.session_state["current_step"] = int(step)
+    st.rerun()
+
+
 def _summary_value(summary: Dict[str, Any], *keys: str, default: float = 0.0) -> float:
     for key in keys:
         if key in summary and summary.get(key) is not None:
@@ -322,12 +347,12 @@ def _positive_float(value: Any) -> float:
 
 
 def _resolve_projection_contribution(*, prefer_plan: bool = False) -> Dict[str, Any]:
-    """Resolve the monthly/weekly contribution used by Step 6.
+    """Resolve the monthly/weekly contribution used by Long-Term Scenario.
 
-    Step 6 can be reached from several places: Personal Finance, Investment
+    Long-Term Scenario can be reached from several places: Personal Finance, Investment
     Lab, or directly from Home. Older state keys may contain a stored zero, so
     this resolver checks every known source and only accepts positive values.
-    The final fallback matches the Step 4 hosted-demo default.
+    The final fallback matches the Risk Profile & Asset Universe hosted-demo default.
     """
     investment_context = _coerce_mapping(st.session_state.get("investment_context", {}))
     snapshot = _coerce_mapping(st.session_state.get(PLANNING_SNAPSHOT, {}))
@@ -341,9 +366,9 @@ def _resolve_projection_contribution(*, prefer_plan: bool = False) -> Dict[str, 
         ("Personal Finance baseline savings", snapshot.get("baseline_savings_weekly")),
     ]
     investment_weekly_candidates = [
-        ("Step 4 contribution bridge", investment_context.get("weekly_equivalent")),
-        ("Step 4 contribution bridge", investment_context.get("weekly_contribution")),
-        ("Step 4 contribution bridge", investment_context.get("target_weekly")),
+        ("Risk Profile & Asset Universe contribution bridge", investment_context.get("weekly_equivalent")),
+        ("Risk Profile & Asset Universe contribution bridge", investment_context.get("weekly_contribution")),
+        ("Risk Profile & Asset Universe contribution bridge", investment_context.get("target_weekly")),
         ("Investment contribution", st.session_state.get(INVESTMENT_WEEKLY_EQUIVALENT)),
     ]
     plan_monthly_candidates = [
@@ -352,8 +377,8 @@ def _resolve_projection_contribution(*, prefer_plan: bool = False) -> Dict[str, 
         ("Personal Finance target", snapshot.get("monthly_savings_target")),
     ]
     investment_monthly_candidates = [
-        ("Step 4 contribution bridge", investment_context.get("monthly_contribution")),
-        ("Step 4 contribution bridge", investment_context.get("target_a_monthly")),
+        ("Risk Profile & Asset Universe contribution bridge", investment_context.get("monthly_contribution")),
+        ("Risk Profile & Asset Universe contribution bridge", investment_context.get("target_a_monthly")),
         ("Investment contribution", st.session_state.get(INVESTMENT_MONTHLY_CONTRIBUTION)),
     ]
 
@@ -393,7 +418,7 @@ def _resolve_projection_contribution(*, prefer_plan: bool = False) -> Dict[str, 
 
 
 def _sync_projection_contribution_state(contribution: Dict[str, Any]) -> None:
-    """Keep common Step 6/Step 7 contribution aliases aligned."""
+    """Keep common Long-Term Scenario/Insights Summary contribution aliases aligned."""
     monthly = _safe_float(contribution.get("monthly"), 0.0)
     weekly = _safe_float(contribution.get("weekly"), 0.0)
     st.session_state[INVESTMENT_MONTHLY_CONTRIBUTION] = float(monthly)
@@ -425,13 +450,13 @@ def _default_step6_view() -> str:
 
 
 def _step6_has_real_engine_return_path() -> bool:
-    """Return True only when Step 5 has produced a usable strategy return path."""
+    """Return True only when Strategy Engine has produced a usable strategy return path."""
     investment_context = _coerce_mapping(st.session_state.get("investment_context", {}))
     return bool(st.session_state.get(ENGINE_HAS_RUN, False)) and _has_real_step5_return_path(investment_context)
 
 
 def _step6_projection_options() -> list[tuple[str, str]]:
-    """Label the two Step 6 modes as one scenario screen.
+    """Label the two Long-Term Scenario modes as one scenario screen.
 
     Savings-only remains available as the simple accumulation view. The
     investment/proxy mode is now framed as the comparison view: it keeps the
@@ -452,14 +477,14 @@ def _step6_projection_options() -> list[tuple[str, str]]:
 def _render_step6_evidence_note() -> None:
     if _step6_has_real_engine_return_path():
         st.success(
-            "Evidence mode: **tested Step 5 strategy returns** are available. "
+            "Evidence mode: **tested Strategy Engine returns** are available. "
             "Investment and comparison views use the engine-generated monthly return path."
         )
         return
 
     st.info(
         "Available now: **savings-only scenarios** and a clearly labelled **educational investment proxy**. "
-        "Run the Investment Strategy Lab later to replace the proxy with tested Step 5 strategy returns automatically."
+        "Run the Investment Strategy Lab later to replace the proxy with tested Strategy Engine returns automatically."
     )
 
 
@@ -482,8 +507,8 @@ def _render_step6_view_selector() -> str:
         key="step6_projection_view_radio_v1",
         help=(
             "Savings-only accumulation shows the contribution-only path. The comparison mode shows the "
-            "investment/proxy path alongside the savings-only baseline, using tested Step 5 returns when available "
-            "or a clearly labelled educational proxy before Step 5 has run."
+            "investment/proxy path alongside the savings-only baseline, using tested Strategy Engine returns when available "
+            "or a clearly labelled educational proxy before Strategy Engine has run."
         ),
     )
     selected_mode = _projection_view_from_label(selected)
@@ -498,76 +523,64 @@ def _render_step6_projection_interpretation_note(
     using_demo_proxy: bool = False,
     profile_value: str = DEFAULT_STEP6_DEMO_PROFILE,
     return_source_label: str = "",
+    comparison_table: pd.DataFrame | None = None,
+    goal_amount: float = 0.0,
+    metrics: dict[str, Any] | None = None,
 ) -> None:
-    """Keep Step 6 explanatory/proxy copy behind one optional reader."""
-    with st.expander("How to read this projection", expanded=False):
+    """Render one compact reader that also contains the horizon table and key detailed metrics."""
+    title = "How to read this projection and table"
+    with st.expander(title, expanded=False):
         if using_demo_proxy:
             st.info(
-                "Available now: **savings-only scenarios** and a clearly labelled "
-                "**educational investment proxy**. Run the Investment Strategy Lab later "
-                "to replace the proxy with tested Step 5 strategy returns automatically."
+                f"This view compares your savings-only baseline with a clearly labelled "
+                f"**educational investment proxy**. Because Strategy Engine has not been run, "
+                f"the investment path currently uses a transparent **{profile_value} proxy assumption**. "
+                f"Long-Term Scenario does not predict an exact future amount: it translates your "
+                f"**{_format_currency(monthly_contribution)}/month** contribution into possible low / middle / high "
+                f"outcome ranges under the selected return-path assumptions. Run Risk Profile & Asset Universe "
+                f"and the Strategy Engine later to replace the proxy with tested Strategy Engine returns automatically."
             )
+        else:
             st.info(
-                "This investment view is using a **labelled educational proxy**, not a tested engine result. "
-                f"It uses a transparent {profile_value} profile assumption so the Scenario Explorer can work before Step 5 has run. "
-                "Run Step 4 + Step 5 to replace the proxy with the real strategy return path automatically."
+                f"This view compares your savings-only baseline with the selected investment path. "
+                f"The investment path uses the completed Strategy Engine return series. "
+                f"Long-Term Scenario does not predict an exact future amount: it translates your "
+                f"**{_format_currency(monthly_contribution)}/month** contribution into possible low / middle / high "
+                f"outcome ranges under the selected return-path assumptions."
             )
-        else:
-            st.success("Using the completed Step 5 engine return path for this projection.")
 
-        st.caption(
-            f"This projection uses the Step 4 contribution bridge: **{_format_currency(monthly_contribution)}/month** "
-            f"(weekly equivalent: **{_format_currency(weekly_equivalent)}/week**). "
-            f"Return path source: **{return_source_label or 'Step 6 return path'}**."
-        )
-        if using_demo_proxy:
-            st.caption(
-                "Projection source: labelled educational proxy returns. This is not a tested Step 5 engine result; "
-                "it is used so the Scenario Explorer can work before Step 5 has run."
-            )
-        else:
-            st.caption(
-                "Projection source: historical strategy OOS returns generated by the Step 5 engine from the validated Step 4 market-data panel. "
-                "In deployment, this uses cached Yahoo-generated panels / daily-to-monthly rebuilds rather than live market-data downloads."
-            )
-        st.caption(
-            "Interpretation: these numbers are model-conditioned scenario ranges. They are useful for comparing configurations and horizons inside the app, "
-            "but they are not guaranteed future return, drawdown, Sharpe, or wealth outcomes."
-        )
+        if isinstance(comparison_table, pd.DataFrame) and not comparison_table.empty:
+            st.divider()
+            st.markdown("**Horizon comparison table**")
+            show_table(comparison_table, title=None)
+            if goal_amount <= 0.0 and "goal probability" in comparison_table.columns:
+                st.caption("Goal probability uses the optional wealth goal. Set a goal above £0 to populate that column.")
 
-        st.markdown(
-            """
-            **Step 5** answers: *how would this strategy have behaved on the historical market-data panel?*  
-            **Step 6** answers: *if future returns behaved similarly to that historical or proxy return path, what range of outcomes could my contributions produce?*
+        metrics_map = _coerce_mapping(metrics)
+        if metrics_map:
+            st.divider()
+            st.markdown("**Detailed projection metrics**")
+            detail_metrics = st.columns(4)
+            with detail_metrics[0]:
+                st.metric("Expected terminal wealth", _format_currency(metrics_map.get("expected_terminal", 0.0)))
+            with detail_metrics[1]:
+                st.metric(
+                    "P10–P90 range",
+                    f"{_format_currency(metrics_map.get('p10_terminal', 0.0))} ··· {_format_currency(metrics_map.get('p90_terminal', 0.0))}",
+                )
+            with detail_metrics[2]:
+                st.metric("Loss vs contributions", _format_probability(metrics_map.get("loss_probability", 0.0)))
+            with detail_metrics[3]:
+                goal_display = "—" if goal_amount <= 0.0 else _format_probability(metrics_map.get("goal_probability", 0.0))
+                st.metric("Goal probability", goal_display)
 
-            Step 6 should not be read as: **you will end with exactly this amount**. It should be read as:
-
-            **Under these assumptions, these are the possible low / middle / high outcome ranges.**
-
-            **Regulatory-style note:** figures refer to the past or to a labelled educational proxy. Past performance is not a reliable indicator of future results.
-
-            Why this is useful:
-
-            1. It translates return behaviour into personal contribution outcomes.
-            2. It compares investment/proxy paths with a savings-only baseline where selected.
-            3. It shows uncertainty through ranges such as P10 / median / P90, rather than one promised number.
-            """
-        )
-        st.caption(
-            "Model scope note: this prototype adjusts discretionary contributions automatically; essential spending is treated as fixed in the model."
-        )
-        st.caption(
-            f"Contribution allocation note: this Step 6 view currently works at strategy-return level. "
-            f"It assumes the monthly contribution of {_format_currency(monthly_contribution)}/month is invested into the selected strategy as a whole. "
-            "It does not yet display month-by-month asset-level purchase percentages; those would require exposing the engine's internal portfolio weights as a separate allocation schedule."
-        )
 
 def _profile_assumptions_for_demo_proxy(profile: str) -> Dict[str, float]:
-    """Return conservative educational profile assumptions for the Step 6 fallback.
+    """Return conservative educational profile assumptions for the Long-Term Scenario fallback.
 
     This is deliberately not presented as a real engine result. It only exists
-    so the Investment / Compare pathways can be demonstrated before a Step 5 run.
-    A real Step 5 engine path always takes priority when available.
+    so the Investment / Compare pathways can be demonstrated before a Strategy Engine run.
+    A real Strategy Engine engine path always takes priority when available.
     """
     name = str(profile or DEFAULT_STEP6_DEMO_PROFILE).strip().capitalize()
     if name == "Growth":
@@ -582,7 +595,7 @@ def _build_demo_monthly_return_proxy(profile: str, months: int = DEFAULT_STEP6_D
 
     The pattern is deterministic rather than random so repeated demos are stable.
     It approximates a broad profile-level return/volatility path, not the output
-    of the Step 5 engine.
+    of the Strategy Engine engine.
     """
     assumptions = _profile_assumptions_for_demo_proxy(profile)
     annual_return = float(assumptions["annual_return"])
@@ -603,7 +616,7 @@ def _build_demo_monthly_return_proxy(profile: str, months: int = DEFAULT_STEP6_D
 
 
 def _has_real_step5_return_path(investment_context: Dict[str, Any]) -> bool:
-    """Check whether Step 6 has a real Step 5 return path to project from."""
+    """Check whether Long-Term Scenario has a real Strategy Engine return path to project from."""
     candidates = [
         investment_context.get("oos_returns_monthly"),
         investment_context.get("oos_returns_simple"),
@@ -634,17 +647,17 @@ def _projection_context_with_optional_demo_proxy(
     *,
     profile: str,
 ) -> tuple[Dict[str, Any], bool, str]:
-    """Return a projection context using real Step 5 data or a labelled demo proxy.
+    """Return a projection context using real Strategy Engine data or a labelled demo proxy.
 
-    Real Step 5 results always win. If no engine return path exists yet, Step 6
+    Real Strategy Engine results always win. If no engine return path exists yet, Long-Term Scenario
     can still render the Investment and Compare views using a transparent,
     deterministic profile-level proxy. This avoids a dead end in demo navigation
     while keeping the distinction between demo assumption and real engine output.
     """
     ctx = dict(investment_context or {})
     if bool(st.session_state.get(ENGINE_HAS_RUN, False)) and _has_real_step5_return_path(ctx):
-        ctx["projection_return_source"] = "Historical Step 5 engine path"
-        return ctx, False, "Historical Step 5 engine path"
+        ctx["projection_return_source"] = "Historical Strategy Engine path"
+        return ctx, False, "Historical Strategy Engine path"
 
     ctx["oos_returns_monthly"] = _build_demo_monthly_return_proxy(profile)
     ctx["projection_return_source"] = f"Demo {str(profile or DEFAULT_STEP6_DEMO_PROFILE)} proxy"
@@ -930,7 +943,8 @@ def _build_horizon_table(
                 "p10": metrics["p10_terminal"],
                 "p50": metrics["median_terminal"],
                 "p90": metrics["p90_terminal"],
-                "probability of success": summary.get("probability_of_reaching_goal"),
+                "loss vs contributions": metrics.get("loss_probability"),
+                "goal probability": summary.get("probability_of_reaching_goal"),
                 "_sort": horizon_years,
             }
         )
@@ -1093,7 +1107,11 @@ def _build_horizon_comparison_altair_chart(chart_df: pd.DataFrame) -> alt.Chart 
     line_data = long_df.sort_values(["horizon_order", "month"], ascending=[False, True])
 
     base = alt.Chart(line_data).encode(
-        x=alt.X("month:Q", title="Month"),
+        x=alt.X(
+            "month:Q",
+            title="Month",
+            axis=alt.Axis(titlePadding=16, labelPadding=6),
+        ),
         y=alt.Y("value:Q", title=None),
         color=alt.Color("series:N", title=None),
         order=alt.Order("horizon_order:Q", sort="descending"),
@@ -1114,7 +1132,14 @@ def _build_horizon_comparison_altair_chart(chart_df: pd.DataFrame) -> alt.Chart 
         ],
     )
 
-    chart = (lines + points).properties(height=420)
+    chart = (
+        (lines + points)
+        .properties(
+            height=420,
+            padding={"top": 8, "right": 12, "bottom": 48, "left": 4},
+        )
+        .configure_axisX(titlePadding=16, labelPadding=6)
+    )
     return chart
 
 
@@ -1158,12 +1183,12 @@ def _build_investment_chart_with_optional_savings_baseline(
 
 def _render_investment_step6(*, show_header: bool = True, show_navigation: bool = True, render_savings_details_after_table: bool = False) -> None:
     if show_header:
-        section_header("Step 6 — Investment strategy projection")
+        section_header("Long-Term Scenario — Investment/proxy projection")
 
-    # Keep Step 6 available even before Step 5 has been run. If the real engine
+    # Keep Long-Term Scenario available even before Strategy Engine has been run. If the real engine
     # path is missing, this branch uses a clearly labelled educational proxy and
-    # automatically switches to the real Step 5 path once available.
-    # Keep Step 6 open by default in the polished demo. The old closed/open
+    # automatically switches to the real Strategy Engine path once available.
+    # Keep Long-Term Scenario open by default in the polished demo. The old closed/open
     # gate made the page look empty even after the engine had run.
     st.session_state[PROJECTION_OPEN] = True
 
@@ -1174,7 +1199,7 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
     weekly_equivalent = _safe_float(contribution.get("weekly"), 0.0)
     profile_value = str(st.session_state.get("investment_philosophy", DEFAULT_STEP6_DEMO_PROFILE) or DEFAULT_STEP6_DEMO_PROFILE)
 
-    # Default Step 6 to the projection path recommended for the selected
+    # Default Long-Term Scenario to the projection path recommended for the selected
     # philosophy. This is a one-time migration so users can still manually
     # change advanced settings afterwards without the app overwriting them on
     # every rerun.
@@ -1203,21 +1228,19 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
     weekly_equivalent = monthly_contribution * 12.0 / 52.0 if monthly_contribution > 0 else 0.0
 
     # The interpretation guide is shown after a projection/comparison exists.
-    # Before the run, Step 6 should stay focused on inputs and the single action.
+    # Before the run, Long-Term Scenario should stay focused on inputs and the single action.
 
 
     if monthly_contribution <= 0.0:
         st.info("The projection is inactive until your monthly contribution is above £0.")
         left, right = st.columns(2)
         with left:
-            if st.button("← Back to Home", key="step6_back_zero_contribution"):
-                st.session_state[CURRENT_STEP] = 0
-                st.session_state["current_step"] = 0
-                st.rerun()
+            back_target, back_label = _step6_back_target()
+            if st.button(back_label, key="step6_back_zero_contribution", use_container_width=True):
+                _go_to_step(back_target)
         with right:
-            if st.button("Continue to Insights Summary →", key="step6_continue_zero_contribution"):
-                st.session_state[CURRENT_STEP] = 7
-                st.rerun()
+            if st.button("Continue to Insights Summary →", key="step6_continue_zero_contribution", use_container_width=True):
+                _go_to_step(7)
         return
 
     horizon_default = max(1, min(50, _safe_int(st.session_state.get("investment_projection_horizon_years", 1), 1)))
@@ -1253,12 +1276,7 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
         if desired_auto_goal > 0.0 and abs(current_goal_value - desired_auto_goal) > 1.0:
             st.session_state[goal_key] = float(desired_auto_goal)
         st.session_state[auto_goal_key] = float(desired_auto_goal)
-    st.caption(
-        f"Projection profile inferred from your current setup: **{profile_value}** · "
-        f"Return path source: **{return_source_label}**"
-    )
-
-    # Investment/proxy is now the comparison-oriented Step 6 branch by default.
+    # Investment/proxy is now the comparison-oriented Long-Term Scenario branch by default.
     # Migrate older sessions once so the page opens in the intended state even
     # if previous widgets had stored unchecked/empty values.
     investment_defaults_key = "step6_investment_defaults_migrated_v2"
@@ -1355,7 +1373,7 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
     projection_compare_is_current = bool(preview_bundle.get("stored_projection_compare_is_current", False))
 
     def _run_and_store_horizon_comparison() -> bool:
-        """Generate the base projection and horizon comparison for the current Step 6 inputs."""
+        """Generate the base projection and horizon comparison for the current Long-Term Scenario inputs."""
         fresh_bundle = build_projection_workflow_bundle(
             runtime_payload,
             step5_run_result=st.session_state.get("step5_run_result", {}),
@@ -1386,15 +1404,25 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
     elif not selected_compare_horizons:
         comparison_status_message = "Select at least one horizon to compare."
     elif auto_generated_comparison:
-        comparison_status_message = "Horizon comparison updated automatically for the current Step 6 inputs."
+        comparison_status_message = "Horizon comparison updated automatically for the current Long-Term Scenario inputs."
     elif projection_compare_is_current:
-        comparison_status_message = "Horizon comparison updates automatically when Step 6 inputs change."
+        comparison_status_message = "Horizon comparison updates automatically when Long-Term Scenario inputs change."
     else:
         comparison_status_message = "Horizon comparison will update automatically once valid inputs are available."
 
     def _render_projection_comparison_settings() -> None:
-        """Render optional Step 6 comparison controls at the bottom of the page."""
-        with st.expander("Projection comparison settings", expanded=False):
+        """Render optional Long-Term Scenario comparison controls at the bottom of the page."""
+        # Keep this expander open after the advanced-settings checkbox triggers a Streamlit rerun.
+        # Without this, ticking "Show advanced..." immediately collapses the parent expander
+        # and makes the page jump back toward the top.
+        advanced_settings_key = "step6_show_advanced_projection_settings_v1"
+        settings_expanded = bool(st.session_state.get(advanced_settings_key, False))
+        with st.expander("Adjust projection comparison settings", expanded=settings_expanded):
+            st.markdown("**Basic comparison settings**")
+            st.caption(
+                "These optional inputs change the generated comparison. The current projection updates automatically when these values change."
+            )
+
             scenario_cols = st.columns(2)
             with scenario_cols[0]:
                 st.number_input(
@@ -1419,8 +1447,6 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
                 )
             else:
                 st.caption("Custom wealth goal is being used. Clear or change it manually if needed.")
-
-            st.caption("These optional inputs affect the generated comparison but are kept collapsed to reduce visual noise.")
 
             check_cols = st.columns(2)
             with check_cols[0]:
@@ -1454,106 +1480,119 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
                     help="Choose the long-term horizons to compare. The current single-horizon result is generated behind the scenes.",
                 )
 
-            with st.container(border=True):
-                st.markdown("#### Advanced projection settings")
-                st.number_input(
-                    "Monte Carlo paths",
-                    min_value=100,
-                    max_value=100000,
-                    step=100,
-                    key="investment_projection_mc_paths",
+            show_advanced_projection_settings = bool(
+                st.checkbox(
+                    "Show advanced Monte Carlo/path settings",
+                    value=settings_expanded,
+                    key=advanced_settings_key,
+                    help=(
+                        "Reveals simulation-path controls such as Monte Carlo paths, monthly vs hybrid daily path mode, "
+                        "synthetic trading days and daily path variation. Leave collapsed unless deliberately testing projection behaviour."
+                    ),
                 )
-                current_mode = str(st.session_state.get("investment_projection_simulation_granularity", "monthly") or "monthly")
-                simulation_mode_label = st.selectbox(
-                    "Projection path mode",
-                    options=["Monthly bootstrap", "Hybrid daily simulation"],
-                    index=0 if current_mode != "daily_hybrid" else 1,
-                    key="investment_projection_simulation_mode_label",
-                    help="Hybrid daily simulation preserves the sampled monthly return from the engine, but expands each month into a synthetic daily path for a richer path shape.",
-                )
-                rendered_granularity = "daily_hybrid" if simulation_mode_label == "Hybrid daily simulation" else "monthly"
-                st.session_state["investment_projection_simulation_granularity"] = rendered_granularity
+            )
 
-                if rendered_granularity == "daily_hybrid":
-                    rendered_daily_steps = _safe_int(
-                        st.number_input(
-                            "Synthetic trading days per month",
-                            min_value=5,
-                            max_value=31,
-                            step=1,
-                            key="investment_projection_daily_steps_per_month",
-                            help="Used only for the hybrid daily projection path. 21 is a sensible default.",
-                        ),
-                        21,
+            if show_advanced_projection_settings:
+                with st.container(border=True):
+                    st.markdown("#### Advanced Monte Carlo/path settings")
+                    st.number_input(
+                        "Monte Carlo paths",
+                        min_value=100,
+                        max_value=100000,
+                        step=100,
+                        key="investment_projection_mc_paths",
                     )
-                    rendered_daily_noise = _safe_float(
-                        st.slider(
-                            "Daily path variation within month",
-                            min_value=0.0,
-                            max_value=1.0,
-                            step=0.05,
-                            key="investment_projection_daily_path_noise_scale",
-                            help="Controls how much day-to-day movement is allowed inside each sampled month while preserving the final monthly return.",
-                        ),
-                        0.35,
+                    current_mode = str(st.session_state.get("investment_projection_simulation_granularity", "monthly") or "monthly")
+                    simulation_mode_label = st.selectbox(
+                        "Projection path mode",
+                        options=["Monthly bootstrap", "Hybrid daily simulation"],
+                        index=0 if current_mode != "daily_hybrid" else 1,
+                        key="investment_projection_simulation_mode_label",
+                        help="Hybrid daily simulation preserves the sampled monthly return from the engine, but expands each month into a synthetic daily path for a richer path shape.",
                     )
-                    st.caption(
-                        "Hybrid daily simulation: the engine still samples monthly OOS returns, but each sampled month is expanded into a synthetic daily path that exactly compounds back to the same monthly return."
-                    )
-                else:
-                    rendered_daily_steps = _safe_int(st.session_state.get("investment_projection_daily_steps_per_month", 21), 21)
-                    rendered_daily_noise = _safe_float(st.session_state.get("investment_projection_daily_path_noise_scale", 0.35), 0.35)
-                    st.caption(
-                        "Monthly bootstrap: Step 6 reuses the engine's realised monthly OOS return path directly."
+                    rendered_granularity = "daily_hybrid" if simulation_mode_label == "Hybrid daily simulation" else "monthly"
+                    st.session_state["investment_projection_simulation_granularity"] = rendered_granularity
+
+                    if rendered_granularity == "daily_hybrid":
+                        rendered_daily_steps = _safe_int(
+                            st.number_input(
+                                "Synthetic trading days per month",
+                                min_value=5,
+                                max_value=31,
+                                step=1,
+                                key="investment_projection_daily_steps_per_month",
+                                help="Used only for the hybrid daily projection path. 21 is a sensible default.",
+                            ),
+                            21,
+                        )
+                        rendered_daily_noise = _safe_float(
+                            st.slider(
+                                "Daily path variation within month",
+                                min_value=0.0,
+                                max_value=1.0,
+                                step=0.05,
+                                key="investment_projection_daily_path_noise_scale",
+                                help="Controls how much day-to-day movement is allowed inside each sampled month while preserving the final monthly return.",
+                            ),
+                            0.35,
+                        )
+                        st.caption(
+                            "Hybrid daily simulation: the engine still samples monthly OOS returns, but each sampled month is expanded into a synthetic daily path that exactly compounds back to the same monthly return."
+                        )
+                    else:
+                        rendered_daily_steps = _safe_int(st.session_state.get("investment_projection_daily_steps_per_month", 21), 21)
+                        rendered_daily_noise = _safe_float(st.session_state.get("investment_projection_daily_path_noise_scale", 0.35), 0.35)
+                        st.caption(
+                            "Monthly bootstrap: Long-Term Scenario reuses the engine's realised monthly OOS return path directly."
+                        )
+
+                    recommendation = _get_projection_path_recommendation(profile_value)
+                    coherence_status = _classify_projection_path_coherence(
+                        philosophy=profile_value,
+                        mode=rendered_granularity,
+                        days=rendered_daily_steps,
+                        variation=rendered_daily_noise,
                     )
 
-                recommendation = _get_projection_path_recommendation(profile_value)
-                coherence_status = _classify_projection_path_coherence(
-                    philosophy=profile_value,
-                    mode=rendered_granularity,
-                    days=rendered_daily_steps,
-                    variation=rendered_daily_noise,
-                )
+                    if coherence_status["status"] == "success":
+                        st.success(coherence_status["title"])
+                    elif coherence_status["status"] == "info":
+                        st.info(coherence_status["title"])
+                    else:
+                        st.warning(coherence_status["title"])
 
-                if coherence_status["status"] == "success":
-                    st.success(coherence_status["title"])
-                elif coherence_status["status"] == "info":
-                    st.info(coherence_status["title"])
-                else:
-                    st.warning(coherence_status["title"])
-
-                st.caption(coherence_status["message"])
-                st.info(
-                    "Projection coherence suggestion ({philosophy})\n\n"
-                    "Recommended:\n"
-                    "• {mode_label}\n"
-                    "• {days} synthetic trading days/month\n"
-                    "• {variation:.2f} daily path variation\n\n"
-                    "{rationale}".format(**recommendation)
-                )
-
-                if st.button(
-                    "Apply recommended projection settings",
-                    key="step6_apply_projection_recommendation",
-                    use_container_width=False,
-                ):
-                    queue_and_rerun(
-                        {
-                            "investment_projection_simulation_mode_label": str(recommendation["mode_label"]),
-                            "investment_projection_simulation_granularity": str(recommendation["mode"]),
-                            "investment_projection_daily_steps_per_month": int(recommendation["days"]),
-                            "investment_projection_daily_path_noise_scale": float(recommendation["variation"]),
-                        }
+                    st.caption(coherence_status["message"])
+                    st.info(
+                        "Projection coherence suggestion ({philosophy})\n\n"
+                        "Recommended:\n"
+                        "• {mode_label}\n"
+                        "• {days} synthetic trading days/month\n"
+                        "• {variation:.2f} daily path variation\n\n"
+                        "{rationale}".format(**recommendation)
                     )
+
+                    if st.button(
+                        "Apply recommended projection settings",
+                        key="step6_apply_projection_recommendation",
+                        use_container_width=False,
+                    ):
+                        queue_and_rerun(
+                            {
+                                "investment_projection_simulation_mode_label": str(recommendation["mode_label"]),
+                                "investment_projection_simulation_granularity": str(recommendation["mode"]),
+                                "investment_projection_daily_steps_per_month": int(recommendation["days"]),
+                                "investment_projection_daily_path_noise_scale": float(recommendation["variation"]),
+                            }
+                        )
 
             if historical_path_count > 0:
                 mode_text = "hybrid daily simulation" if str(runtime_payload.get("simulation_granularity", "monthly")) == "daily_hybrid" else "monthly bootstrap"
                 if using_demo_proxy:
                     st.caption(f"Return path: Demo proxy · {historical_path_count} monthly returns · {mode_text}.")
                 else:
-                    st.caption(f"Return path: Historical Step 5 engine path · {historical_path_count} monthly OOS returns · {mode_text}.")
+                    st.caption(f"Return path: Historical Strategy Engine path · {historical_path_count} monthly OOS returns · {mode_text}.")
             else:
-                st.warning("No return path detected in Step 6. Projection may fall back to profile / summary assumptions.")
+                st.warning("No return path detected in Long-Term Scenario. Projection may fall back to profile / summary assumptions.")
 
             st.caption(comparison_status_message)
 
@@ -1574,6 +1613,21 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
             st.metric("Median terminal wealth", _format_currency(metrics["median_terminal"]))
         with primary_metrics[3]:
             st.metric("Expected profit", _format_currency(metrics["expected_profit"]))
+
+        if compare_enabled:
+            horizon_bits = [f"{int(horizon_years)}y current"]
+            horizon_bits.extend(f"{int(x)}y" for x in selected_compare_horizons)
+            horizon_summary = " + ".join(dict.fromkeys(horizon_bits))
+        else:
+            horizon_summary = f"{int(horizon_years)}y current only"
+        baseline_summary = "savings-only baseline on" if show_savings_baseline else "savings-only baseline off"
+        goal_summary = "no wealth goal" if goal_amount <= 0.0 else f"{_format_currency(goal_amount)} goal"
+        st.caption(
+            "Projection setup: "
+            f"{_format_currency(current_savings)} starting pot · {goal_summary} · "
+            f"{horizon_summary} · {baseline_summary}."
+        )
+        _render_projection_comparison_settings()
 
         def _render_detailed_projection_metrics() -> None:
             with st.expander("Detailed projection metrics", expanded=False):
@@ -1641,17 +1695,24 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
                 "median final wealth",
                 "savings-only baseline",
                 "p10",
-                "p50",
                 "p90",
-                "probability of success",
+                "loss vs contributions",
+                "goal probability",
             ]
             display_table = display_table[[col for col in ordered_cols if col in display_table.columns]]
         for col in ("median final wealth", "savings-only baseline", "p10", "p50", "p90"):
             if col in display_table.columns:
                 display_table[col] = display_table[col].apply(_format_currency)
-        display_table["probability of success"] = display_table["probability of success"].apply(
-            lambda x: "—" if goal_amount <= 0.0 else _format_probability(x)
-        )
+        if "loss vs contributions" in display_table.columns:
+            display_table["loss vs contributions"] = display_table["loss vs contributions"].apply(_format_probability)
+        if "goal probability" in display_table.columns:
+            display_table["goal probability"] = display_table["goal probability"].apply(
+                lambda x: "—" if goal_amount <= 0.0 else _format_probability(x)
+            )
+        elif "probability of success" in display_table.columns:
+            display_table["probability of success"] = display_table["probability of success"].apply(
+                lambda x: "—" if goal_amount <= 0.0 else _format_probability(x)
+            )
 
         if not median_paths_chart_df.empty:
             comparison_chart = _build_horizon_comparison_altair_chart(median_paths_chart_df)
@@ -1667,23 +1728,6 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
         elif not terminal_horizon_chart_df.empty:
             st.line_chart(terminal_horizon_chart_df.set_index("horizon_years"))
 
-        with st.expander("Horizon comparison table", expanded=False):
-            show_table(display_table, title=None)
-
-            if goal_amount <= 0.0:
-                st.caption("Probability of success uses the optional wealth goal. Set a goal above £0 to populate that column.")
-
-    # Secondary controls and diagnostic/details sections live at the bottom so
-    # the main Step 6 reading order stays: inputs → key metrics → chart.
-    _render_projection_comparison_settings()
-
-    if projection_summary:
-        _render_detailed_projection_metrics()
-
-    if render_savings_details_after_table:
-        st.markdown("---")
-        _render_savings_only_step6(show_header=False, show_navigation=False, persist_result=False)
-
     if projection_summary or not horizon_table_df.empty:
         _render_step6_projection_interpretation_note(
             monthly_contribution=monthly_contribution,
@@ -1691,24 +1735,29 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
             using_demo_proxy=using_demo_proxy,
             profile_value=profile_value,
             return_source_label=return_source_label,
+            comparison_table=display_table if not display_table.empty else None,
+            goal_amount=goal_amount,
+            metrics=metrics if projection_summary else None,
         )
+
+    if render_savings_details_after_table:
+        st.markdown("---")
+        _render_savings_only_step6(show_header=False, show_navigation=False, persist_result=False)
 
     if show_navigation:
         left, right = st.columns(2)
         with left:
-            if st.button("← Back to Home", key="step6_back"):
-                st.session_state[CURRENT_STEP] = 0
-                st.session_state["current_step"] = 0
-                st.rerun()
+            back_target, back_label = _step6_back_target()
+            if st.button(back_label, key="step6_back", use_container_width=True):
+                _go_to_step(back_target)
         with right:
-            if st.button("Continue to Insights Summary →", key="step6_continue"):
-                st.session_state[CURRENT_STEP] = 7
-                st.rerun()
+            if st.button("Continue to Insights Summary →", key="step6_continue", use_container_width=True):
+                _go_to_step(7)
 
 
 
 # ============================================================
-# Branch-aware Step 6 wrapper: savings-only vs investment paths
+# Branch-aware Long-Term Scenario wrapper: savings-only vs investment paths
 # ============================================================
 
 STEP0_PATHWAY = "step0_planning_pathway"
@@ -1847,10 +1896,10 @@ def _resolve_savings_capacity_range(
 ) -> Dict[str, Any]:
     """Resolve conservative / expected / high savings capacity.
 
-    Preferred source is the Step 3 short-term Monte Carlo result. Step 3 already
-    models spending uncertainty over weeks, so Step 6 converts the final
+    Preferred source is the Personal Finance Setup short-term Monte Carlo result. Personal Finance Setup already
+    models spending uncertainty over weeks, so Long-Term Scenario converts the final
     conservative / expected / high cash balances into weekly and monthly saving
-    capacity bands. If Step 3 is not available, use a clearly labelled demo range
+    capacity bands. If Personal Finance Setup is not available, use a clearly labelled demo range
     around the current contribution rather than a single exact value.
     """
     snapshot = _coerce_mapping(st.session_state.get(PLANNING_SNAPSHOT, {}))
@@ -1885,13 +1934,13 @@ def _resolve_savings_capacity_range(
                 return {
                     "weekly": weekly,
                     "monthly": monthly,
-                    "source": "Step 3 Monte Carlo cash-flow range",
+                    "source": "Personal Finance Setup Monte Carlo cash-flow range",
                     "weeks": int(weeks),
                     "fallback_used": False,
                 }
         except Exception as exc:
-            # Keep Step 6 robust; the UI below will fall back to demo range.
-            st.caption(f"Step 3 range unavailable for Step 6 savings band: {exc}")
+            # Keep Long-Term Scenario robust; the UI below will fall back to demo range.
+            st.caption(f"Personal Finance Setup range unavailable for Long-Term Scenario savings band: {exc}")
 
     expected_monthly = max(_safe_float(fallback_monthly, 0.0) - monthly_shock_drag, 0.0)
     if expected_monthly <= 0.0:
@@ -1962,7 +2011,7 @@ def _build_savings_horizon_rows(
 
 def _render_savings_only_step6(*, show_header: bool = True, show_navigation: bool = True, persist_result: bool = True) -> None:
     if show_header:
-        section_header("Step 6 — Long-term savings pathway")
+        section_header("Long-Term Scenario — Savings-only pathway")
 
     contribution = _resolve_projection_contribution(prefer_plan=True)
     _sync_projection_contribution_state(contribution)
@@ -1971,7 +2020,7 @@ def _render_savings_only_step6(*, show_header: bool = True, show_navigation: boo
     source_label = str(contribution.get("source", "Demo default") or "Demo default")
     resolved_goal_amount, resolved_goal_source = _resolve_savings_goal_from_plan()
 
-    # Keep savings-only deliberately simple. Step 3 already handles short-term
+    # Keep savings-only deliberately simple. Personal Finance Setup already handles short-term
     # fragility; the old long-term shock control added a second, confusing layer
     # of assumptions by converting occasional costs into a monthly drag.
     shock_cfg = _long_term_shock_config("None")
@@ -1992,10 +2041,8 @@ def _render_savings_only_step6(*, show_header: bool = True, show_navigation: boo
             "No positive planned saving target was found from Steps 2–3. "
             "Go back and set a weekly target before using the savings-only pathway."
         )
-        if st.button("← Back to Home", key="step6_savings_no_target_back"):
-            st.session_state[CURRENT_STEP] = 0
-            st.session_state["current_step"] = 0
-            st.rerun()
+        if st.button("← Back to Personal Finance Setup", key="step6_savings_no_target_back", use_container_width=True):
+            _go_to_step(1)
         return
 
     if "savings_only_starting_value" not in st.session_state:
@@ -2008,7 +2055,7 @@ def _render_savings_only_step6(*, show_header: bool = True, show_navigation: boo
     # changing them reruns the page and updates the headline chart cleanly.
     starting_value = _safe_float(st.session_state.get("savings_only_starting_value", 0.0), 0.0)
     goal_amount = _safe_float(st.session_state.get("savings_only_goal_amount", 0.0), 0.0)
-    goal_source = "Step 6 scenario input" if goal_amount > 0.0 else "no explicit goal"
+    goal_source = "Long-Term Scenario scenario input" if goal_amount > 0.0 else "no explicit goal"
 
     horizons_df = _build_savings_horizon_rows(
         starting_value=starting_value,
@@ -2031,10 +2078,20 @@ def _render_savings_only_step6(*, show_header: bool = True, show_navigation: boo
     if starting_value > 0.0:
         prefix += f" and a starting balance of {_format_currency(starting_value)}"
 
-    with st.expander("Long-term savings outlook", expanded=False):
-        if expected_parts:
-            st.info(prefix + ", savings-only accumulation reaches about " + " · ".join(expected_parts) + ".")
+    primary_goal_horizon = int(max(SAVINGS_ONLY_HORIZONS))
+    final_primary = float(horizons_df.loc[horizons_df["_years"] == primary_goal_horizon, "Expected"].iloc[0])
+    high_primary = float(horizons_df.loc[horizons_df["_years"] == primary_goal_horizon, "High case"].iloc[0])
 
+    with st.expander("Savings-only baseline and feasibility", expanded=False):
+        st.info(
+            "This section explains the savings-only baseline used in the main horizon comparison above. "
+            "It is not another investment projection: it assumes no investment return, no market volatility and no drawdowns."
+        )
+
+        if expected_parts:
+            st.caption(prefix + ", savings-only accumulation reaches about " + " · ".join(expected_parts) + ".")
+
+        st.markdown("**Savings-only outlook**")
         cards = st.columns(len(SAVINGS_ONLY_HORIZONS))
         for idx, years in enumerate(SAVINGS_ONLY_HORIZONS):
             row = horizons_df.loc[horizons_df["_years"] == years].iloc[0]
@@ -2048,18 +2105,11 @@ def _render_savings_only_step6(*, show_header: bool = True, show_navigation: boo
         chart_df = chart_df.rename(columns={"_years": "Years"}).set_index("Years")
         st.line_chart(chart_df)
 
-    primary_goal_horizon = int(max(SAVINGS_ONLY_HORIZONS))
-    final_primary = float(horizons_df.loc[horizons_df["_years"] == primary_goal_horizon, "Expected"].iloc[0])
-    high_primary = float(horizons_df.loc[horizons_df["_years"] == primary_goal_horizon, "High case"].iloc[0])
-
-    with st.expander("Feasibility by horizon and goal check", expanded=False):
-        # Streamlit does not support nested expanders, so the former setup and
-        # summary expanders are now grouped here as simple bordered sections.
+        st.divider()
         with st.container(border=True):
             st.markdown("### Inputs and assumptions")
             st.caption(
-                "These values define the savings-only path. It assumes no investment return, "
-                "no market volatility and no drawdowns. "
+                "These values define the savings-only path. "
                 f"Saving range source: **{capacity_range.get('source', source_label)}**. "
                 f"Base monthly contribution: **{_format_currency(base_monthly_saving)}/month**."
             )
@@ -2100,7 +2150,7 @@ def _render_savings_only_step6(*, show_header: bool = True, show_navigation: boo
         show_table(display_df, title="Feasibility by horizon")
 
         st.caption(
-            "Step 3 tests whether the plan works over weeks. Step 6 extends the same saving behaviour over years, "
+            "Personal Finance Setup tests whether the plan works over weeks. Long-Term Scenario extends the same saving behaviour over years, "
             "so the focus here is long-term pathway feasibility rather than short-term cash-flow volatility."
         )
 
@@ -2131,24 +2181,20 @@ def _render_savings_only_step6(*, show_header: bool = True, show_navigation: boo
             f"savings_only_pathway_{weekly_saving}_{starting_value}_{goal_amount}_{primary_goal_horizon}"
         )
     else:
-        # In the combined Step 6 screen, keep the savings-only payload available
+        # In the combined Long-Term Scenario screen, keep the savings-only payload available
         # without overwriting the investment/proxy projection state used by the
-        # lower comparison section and Step 7 hand-off.
+        # lower comparison section and Insights Summary hand-off.
         st.session_state[CASH_ONLY_PROJECTION_RESULT] = result
 
     if show_navigation:
         st.markdown("---")
         left, right = st.columns(2)
         with left:
-            if st.button("← Back to Home", key="step6_savings_back"):
-                st.session_state[CURRENT_STEP] = 0
-                st.session_state["current_step"] = 0
-                st.rerun()
+            if st.button("← Back to Personal Finance Setup", key="step6_savings_back", use_container_width=True):
+                _go_to_step(1)
         with right:
-            if st.button("Continue to Insights Summary →", key="step6_savings_continue"):
-                st.session_state[CURRENT_STEP] = 7
-                st.session_state["current_step"] = 7
-                st.rerun()
+            if st.button("Continue to Insights Summary →", key="step6_savings_continue", use_container_width=True):
+                _go_to_step(7)
 
 
 
@@ -2159,8 +2205,8 @@ def render_step_6() -> None:
         _render_savings_only_step6()
         return
 
-    # Existing Step 6 investment flow. This branch intentionally still requires
-    # a Step 5 engine run because it depends on investment engine outputs.
+    # Existing Long-Term Scenario investment flow. This branch intentionally still requires
+    # a Strategy Engine engine run because it depends on investment engine outputs.
     _render_investment_step6()
 
 
@@ -2240,10 +2286,10 @@ def _build_compare_rows(
 
 def _render_compare_step6(*, show_header: bool = True) -> None:
     if show_header:
-        section_header("Step 6 — Long-term pathway comparison")
+        section_header("Long-Term Scenario — Pathway comparison")
 
-    # Compare mode can use a labelled demo proxy before Step 5 exists. Real
-    # Step 5 engine returns always override the proxy automatically.
+    # Compare mode can use a labelled demo proxy before Strategy Engine exists. Real
+    # Strategy Engine engine returns always override the proxy automatically.
     contribution = _resolve_projection_contribution(prefer_plan=True)
     _sync_projection_contribution_state(contribution)
     investment_context = _coerce_mapping(st.session_state.get("investment_context", {}))
@@ -2261,13 +2307,13 @@ def _render_compare_step6(*, show_header: bool = True) -> None:
     if using_demo_proxy:
         st.info(
             "Comparison mode is currently comparing savings-only against a **labelled educational investment proxy**. "
-            "This is useful for exploration, but it is not a tested engine result. After Step 4 + Step 5 are completed, "
+            "This is useful for exploration, but it is not a tested engine result. After Risk Profile & Asset Universe and the Strategy Engine are completed, "
             "the real engine return path overrides the proxy automatically."
         )
     else:
         st.info(
             "Compare mode uses the same starting pot, monthly contribution, horizon and goal for both pathways. "
-            "The only difference is return assumption: savings-only uses 0% market return; investing uses the Step 5 engine projection. "
+            "The only difference is return assumption: savings-only uses 0% market return; investing uses the Strategy Engine engine projection. "
             "Optional long-term shocks reduce the shared contribution before both pathways are compared."
         )
 
@@ -2447,40 +2493,33 @@ def _render_compare_step6(*, show_header: bool = True) -> None:
     st.markdown("---")
     left, right = st.columns(2)
     with left:
-        if st.button("← Back to Home", key="step6_compare_back"):
-            st.session_state[CURRENT_STEP] = 0
-            st.session_state["current_step"] = 0
-            st.rerun()
+        back_target, back_label = _step6_back_target()
+        if st.button(back_label, key="step6_compare_back", use_container_width=True):
+            _go_to_step(back_target)
     with right:
-        if st.button("Continue to Insights Summary →", key="step6_compare_continue"):
-            st.session_state[CURRENT_STEP] = 7
-            st.session_state["current_step"] = 7
-            st.rerun()
+        if st.button("Continue to Insights Summary →", key="step6_compare_continue", use_container_width=True):
+            _go_to_step(7)
 
 
 def render_step_6() -> None:
-    """Render Step 6 as one combined scenario screen.
+    """Render Long-Term Scenario as one combined scenario screen.
 
     The page now shows the savings-only accumulation view and the
     investment/proxy comparison view together. No projection-mode selector is
     shown, and no underlying content is deleted; the old branch renderers are
     reused in sequence.
     """
-    section_header("Long-Term Scenario Explorer")
+    section_header("Long-Term Scenario")
     st.info(
         "Educational scenario simulator, not financial advice or a forecast. "
-        "It turns your contribution plan into possible long-term wealth ranges; past performance is not a reliable indicator of future results."
+        "It turns your contribution plan into possible long-term wealth ranges. "
+        "This view keeps the investment/proxy pathway visible alongside the savings-only baseline, "
+        "so the two can be compared on the same screen. "
+        "Results are scenario ranges, not promised outcomes; past performance or proxy assumptions are not reliable indicators of future results."
     )
 
     contribution = _resolve_projection_contribution(prefer_plan=False)
     _sync_projection_contribution_state(contribution)
-
-    st.markdown("---")
-    st.markdown("### Investment scenario comparison")
-    st.caption(
-        "This section keeps the investment/proxy pathway visible alongside the savings-only baseline, "
-        "so the two views can be compared on the same screen."
-    )
 
     # With the selector removed, keep the comparison branch open by default.
     # Existing controls still let the user adjust horizons and advanced settings.
@@ -2492,4 +2531,4 @@ def render_step_6() -> None:
 
     # Evidence notes matter most for investment/proxy branches, but they now live
     # inside the How-to-read expander to keep the page visually clean.
-    _render_investment_step6(show_header=False, render_savings_details_after_table=True)
+    _render_investment_step6(show_header=False, render_savings_details_after_table=False)

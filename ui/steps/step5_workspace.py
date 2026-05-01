@@ -672,7 +672,7 @@ def _render_technical_engine_overrides(cfg_final: dict) -> dict:
     """Render optional technical overrides inside the fine-tune settings block."""
     show_overrides = bool(
         st.checkbox(
-            "Show technical engine overrides",
+            "Show advanced technical engine overrides",
             key="step5_show_technical_engine_overrides",
             help="Optional low-level engine parameters for diagnostics or controlled experimentation.",
         )
@@ -682,7 +682,7 @@ def _render_technical_engine_overrides(cfg_final: dict) -> dict:
         st.caption("Presets and posture sliders control the engine unless technical overrides are edited.")
         return {}
 
-    st.caption("Optional technical overrides. Leave unchanged unless deliberately testing engine behaviour.")
+    st.caption("Optional technical overrides. Leave unchanged unless deliberately testing engine behaviour. Not sure what a parameter means? Hover over the ? icon before changing it.")
     with st.container(border=True):
         return _render_basic_engine_controls(cfg_final)
 
@@ -823,7 +823,7 @@ def _render_workspace_summary(cfg_final: dict, asset_panel_df: Any, current_phil
         if panel_ready:
             st.success("Ready to run: the selected market-data panel is loaded and the current setup is coherent enough for execution.")
         else:
-            st.warning("Market data is missing or not ready. Return to Risk Profile and Universe before running the engine.")
+            st.warning("Market data is missing or not ready. Return to Risk Profile & Asset Universe before running the engine.")
         with st.expander("Show technical setup details", expanded=False):
             st.caption(
                 f"lookback_mu={cfg_final.get('lookback_mu', '—')} · "
@@ -895,9 +895,9 @@ def _render_ready_to_run_section(
     ctx = st.container(border=True) if bordered else st.container()
     with ctx:
         if not panel_ready:
-            st.warning("Market data is missing or not ready. Go back to Risk Profile and Universe before running the engine.")
+            st.warning("Market data is missing or not ready. Go back to Risk Profile & Asset Universe before running the engine.")
         elif gov_state == "blocked":
-            st.error("This setup is blocked by governance. Open the setup controls above or return to Risk Profile and Universe to repair it.")
+            st.error("This setup is blocked by governance. Open the setup controls above or return to Risk Profile & Asset Universe to repair it.")
         elif current_result_is_fresh:
             if bordered:
                 st.caption(
@@ -1110,12 +1110,12 @@ def render_step_5() -> None:
         st.markdown("---")
         nav_left, nav_right = st.columns(2)
         with nav_left:
-            if st.button("← Back to Risk Profile and Universe", key="step5_back_to_step4", use_container_width=True):
+            if st.button("← Back to Risk Profile & Asset Universe", key="step5_back_to_step4", use_container_width=True):
                 st.session_state["current_step"] = 4
                 st.rerun()
         with nav_right:
             if st.button(
-                "Continue to Long-Term Scenario Explorer →",
+                "Continue to Long-Term Scenario →",
                 key="step5_continue_to_step6",
                 use_container_width=True,
                 disabled=not bool(st.session_state.get("engine_has_run", False)),
