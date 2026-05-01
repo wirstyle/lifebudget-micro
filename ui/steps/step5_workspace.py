@@ -251,6 +251,13 @@ def _safe_int(value: Any, default: int) -> int:
         return int(default)
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
 def _stable_panel_fingerprint(panel_df: pd.DataFrame) -> str:
     if panel_df is None or not isinstance(panel_df, pd.DataFrame) or panel_df.empty:
         return "empty"
@@ -297,6 +304,224 @@ def _current_result_is_fresh_for_ready_card(cfg_final: dict, asset_panel_df: Any
     )
     return fresh, current_signature
 
+
+def _latest_run_performance_summary() -> dict:
+    run_map = _coerce_mapping(st.session_state.get("step5_last_run_result", {}))
+    perf = _coerce_mapping(run_map.get("performance_summary", {}))
+    if not perf:
+        return {}
+    return {
+        "cagr": _safe_float(perf.get("cagr", 0.0), 0.0),
+        "sharpe": _safe_float(perf.get("sharpe", 0.0), 0.0),
+        "annual_volatility": _safe_float(perf.get("annual_volatility", perf.get("volatility", 0.0)), 0.0),
+        "max_drawdown": abs(_safe_float(perf.get("max_drawdown", 0.0), 0.0)),
+    }
+
+
+def _technical_pct(value: Any) -> str:
+    try:
+        return f"{100.0 * float(value):.2f}%"
+    except Exception:
+        return "—"
+
+
+def _technical_current_result_text(perf: dict) -> str:
+    if not perf:
+        return "No completed run is available yet."
+    return (
+        f"Current run: CAGR {_technical_pct(perf.get('cagr', 0.0))}, "
+        f"Vol {_technical_pct(perf.get('annual_volatility', 0.0))}, "
+        f"MaxDD -{100.0 * abs(_safe_float(perf.get('max_drawdown', 0.0), 0.0)):.2f}%, "
+        f"Sharpe {_safe_float(perf.get('sharpe', 0.0), 0.0):.2f}."
+    )
+
+
+def _technical_improvement_focus(current_philosophy: str) -> str:
+    """Return a short, dynamic explanation of what improvement should mean now."""
+    perf = _latest_run_performance_summary()
+    if not perf:
+        return (
+            "Before a run, these controls are available for deliberate technical experiments. "
+            "After a run, this guide adapts to the latest CAGR, volatility, MaxDD, Sharpe, and philosophy."
+        )
+
+    profile = str(current_philosophy or "Balanced").strip().lower()
+    cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
+    sharpe = _safe_float(perf.get("sharpe", 0.0), 0.0)
+    vol = _safe_float(perf.get("annual_volatility", 0.0), 0.0)
+    maxdd = abs(_safe_float(perf.get("max_drawdown", 0.0), 0.0))
+
+    if profile == "growth":
+        if cagr < 0.06:
+            return (
+                "For this Growth setup, the priority is better return capture. The test should look for higher "
+                "CAGR or Sharpe, but reject changes that let MaxDD or volatility expand too far."
+            )
+        if maxdd >= 0.25 or vol >= 0.20:
+            return (
+                "For this Growth setup, upside is present but risk is becoming the constraint. The useful test is "
+                "whether Sharpe can improve while keeping most of the CAGR case intact."
+            )
+        if sharpe < 0.70:
+            return (
+                "For this Growth setup, the main opportunity is efficiency: improve Sharpe without making the "
+                "engine so defensive that it removes the growth case."
+            )
+        return (
+            "For this Growth setup, the result already has a reasonable growth profile. Only accept technical "
+            "changes if they improve Sharpe or drawdown without materially reducing CAGR."
+        )
+
+    if profile in {"defensive", "conservative"}:
+        if maxdd >= 0.12 or vol >= 0.12:
+            return (
+                "For this Defensive setup, the priority is lower volatility and MaxDD. A small CAGR sacrifice may "
+                "be acceptable only if the path becomes meaningfully smoother and Sharpe remains reasonable."
+            )
+        if sharpe < 0.60:
+            return (
+                "For this Defensive setup, risk is the priority, but the engine should still earn enough return per "
+                "unit of risk. The test should look for better Sharpe without adding much drawdown."
+            )
+        if cagr < 0.04:
+            return (
+                "For this Defensive setup, the path may be controlled but too conservative. The test should check "
+                "whether CAGR can improve without giving back the defensive risk profile."
+            )
+        return (
+            "For this Defensive setup, the result already looks controlled. Only accept changes that preserve low "
+            "volatility and MaxDD while improving Sharpe or modestly improving CAGR."
+        )
+
+    if maxdd >= 0.18 or vol >= 0.15:
+        return (
+            "For this Balanced setup, the main opportunity is improving the drawdown/Sharpe trade-off rather than "
+            "simply chasing higher CAGR."
+        )
+    if sharpe < 0.65:
+        return (
+            "For this Balanced setup, the main opportunity is Sharpe improvement: reduce noise, volatility, or "
+            "drawdown while keeping CAGR close to the current result."
+        )
+    if cagr < 0.06:
+        return (
+            "For this Balanced setup, the result may be too cautious or diluted. The test should check whether CAGR "
+            "can improve without materially worsening volatility or MaxDD."
+        )
+    return (
+        "For this Balanced setup, the result already looks broadly acceptable. Only accept technical changes if "
+        "the full trade-off improves, not just one isolated metric."
+    )
+
+
+def _technical_first_test_hint(current_philosophy: str) -> str:
+    """Summarise the first improvement hypothesis using latest metrics and philosophy.
+
+    Keep this deliberately high-level. The control-level actions are explained
+    separately in the metric bullets below, so this text should state the test
+    hypothesis rather than repeating parameter names.
+    """
+    perf = _latest_run_performance_summary()
+    if not perf:
+        return (
+            "test whether a small, reversible engine change improves the full trade-off across CAGR, Vol, "
+            "MaxDD, and Sharpe."
+        )
+
+    profile = str(current_philosophy or "Balanced").strip().lower()
+    cagr = _safe_float(perf.get("cagr", 0.0), 0.0)
+    sharpe = _safe_float(perf.get("sharpe", 0.0), 0.0)
+    vol = _safe_float(perf.get("annual_volatility", 0.0), 0.0)
+    maxdd = abs(_safe_float(perf.get("max_drawdown", 0.0), 0.0))
+
+    if profile == "growth":
+        if cagr < 0.06:
+            return (
+                "test whether the setup is missing too much upside, while rejecting any change that buys CAGR "
+                "through a disproportionate increase in Vol or MaxDD."
+            )
+        if maxdd >= 0.25 or vol >= 0.20:
+            return (
+                "test whether the growth case can be made less fragile, reducing risk while preserving most of "
+                "the existing CAGR case."
+            )
+        return (
+            "test whether the growth setup can improve Sharpe without simply adding more raw risk."
+        )
+
+    if profile in {"defensive", "conservative"}:
+        if maxdd >= 0.12 or vol >= 0.12:
+            return (
+                "test whether the path can become smoother, reducing Vol and MaxDD while keeping Sharpe acceptable."
+            )
+        if cagr < 0.04:
+            return (
+                "test whether the setup is too conservative and can recover some CAGR without giving back the "
+                "defensive risk profile."
+            )
+        return (
+            "test whether the defensive setup can improve Sharpe or modestly improve CAGR without weakening its "
+            "risk-control role."
+        )
+
+    if maxdd >= 0.18 or vol >= 0.15:
+        return (
+            "test whether a broader and smoother version of this setup can reduce Vol and MaxDD while keeping "
+            "Sharpe and CAGR close to the current result."
+        )
+    if sharpe < 0.65:
+        return (
+            "test whether noisy allocation behaviour is holding Sharpe down, without sacrificing too much CAGR."
+        )
+    if cagr < 0.06:
+        return (
+            "test whether return capture is too muted, while rejecting changes that improve CAGR only by taking "
+            "too much extra drawdown."
+        )
+    return (
+        "test only small technical variations and accept them only if the rerun improves the full trade-off."
+    )
+
+
+def _technical_metric_bullets(current_philosophy: str) -> list[str]:
+    profile = str(current_philosophy or "Balanced").strip().lower()
+    if profile == "growth":
+        return [
+            "**Sharpe:** test by increasing `weight_shrink`, `lookback_sigma`, `temperature`, and `inertia` so the growth setup becomes less noisy without removing too much upside.",
+            "**CAGR:** test by switching `signal_mode` to a more return-sensitive option, decreasing `lookback_mu`, decreasing `temperature`, or enabling `feature_mu_enabled` so stronger return signals can influence selection.",
+            "**Volatility:** test by increasing `top_k`, `lookback_sigma`, and `weight_shrink` to broaden selection and smooth risk estimates.",
+            "**MaxDD:** test by increasing `top_k`, `inertia`, `weight_shrink`, and `lookback_mu` to reduce concentration and slow unstable reallocations without fully turning defensive.",
+        ]
+    if profile in {"defensive", "conservative"}:
+        return [
+            "**Sharpe:** test by increasing `lookback_mu` and `weight_shrink`, or switching `signal_mode` to a cleaner/robuster option, so the smoother path still earns enough return per unit of risk.",
+            "**CAGR:** test by switching `signal_mode` to a slightly more return-sensitive option, decreasing `lookback_mu`, or enabling `feature_mu_enabled`, but only if the defensive risk profile survives.",
+            "**Volatility:** test by increasing `lookback_sigma`, `top_k`, `weight_shrink`, and `inertia` to smooth estimates, broaden allocation, and reduce noisy reallocations.",
+            "**MaxDD:** test by increasing `top_k`, `inertia`, `lookback_sigma`, and `weight_shrink` to lower concentration and slow down unstable portfolio changes.",
+        ]
+    return [
+        "**Sharpe:** test by increasing `top_k`, `weight_shrink`, `lookback_sigma`, and `inertia` so volatility or drawdown may fall while CAGR stays close to the current result.",
+        "**CAGR:** test by switching `signal_mode` to a more return-sensitive option, decreasing `lookback_mu`, decreasing `temperature`, or enabling `feature_mu_enabled` so stronger return signals can add upside.",
+        "**Volatility:** test by increasing `top_k`, `lookback_sigma`, and `weight_shrink` to broaden selection and smooth risk estimates.",
+        "**MaxDD:** test by increasing `top_k`, `inertia`, `lookback_mu`, and `weight_shrink` to reduce concentration and slow unstable reallocations.",
+    ]
+
+
+def _render_technical_improvement_guide(current_philosophy: str) -> None:
+    perf = _latest_run_performance_summary()
+    with st.container(border=True):
+        st.markdown("**Technical improvement guide**")
+        if perf:
+            st.caption(_technical_current_result_text(perf))
+        st.markdown(f"**Current improvement focus:** {_technical_improvement_focus(current_philosophy)}")
+        st.markdown(f"**Initial test hypothesis:** {_technical_first_test_hint(current_philosophy)}")
+        st.markdown("**What the controls mainly test:**")
+        for bullet in _technical_metric_bullets(current_philosophy):
+            st.markdown(f"- {bullet}")
+        st.caption(
+            "These are tests, not guarantees: the engine only recommends a change if the rerun-tested trade-off "
+            "passes the acceptance gate."
+        )
 
 def _render_basic_engine_controls(cfg_final: dict) -> dict:
     universe_size = _safe_int(st.session_state.get("universe_size", 25), 25)
@@ -420,12 +645,15 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
             )
         )
 
+    feature_mu_blend_display = feature_mu_blend if feature_mu_enabled else "inactive"
     st.caption(
         f"Effective basic controls → top_k={top_k} · lookback_mu={lookback_mu} · "
         f"lookback_sigma={lookback_sigma} · signal_mode={signal_mode} · "
         f"temperature={temperature} · weight_shrink={weight_shrink} · inertia={inertia} · "
-        f"feature_mu_enabled={feature_mu_enabled} · feature_mu_blend={feature_mu_blend}"
+        f"feature_mu_enabled={feature_mu_enabled} · feature_mu_blend={feature_mu_blend_display}"
     )
+
+    _render_technical_improvement_guide(str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced"))
 
     return {
         "top_k": int(top_k),

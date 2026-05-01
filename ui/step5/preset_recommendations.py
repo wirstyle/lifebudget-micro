@@ -825,6 +825,16 @@ def _apply_candidate(candidate: dict) -> None:
     st.rerun()
 
 
+def _display_family_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    labels = {
+        "recommended_restore": "Recommended restore",
+        "nearby_style": "Nearby style",
+        "broader_allowed": "Broader allowed preset",
+    }
+    return labels.get(raw, raw.replace("_", " ").title() if raw else "Preset test")
+
+
 def _candidate_table(evaluations: list[dict], current_perf: dict) -> pd.DataFrame:
     rows: list[dict] = []
     base = _normalise_perf(current_perf)
@@ -839,19 +849,17 @@ def _candidate_table(evaluations: list[dict], current_perf: dict) -> pd.DataFram
         # Positive means the drawdown became less severe; negative means it worsened.
         maxdd_improvement = base.get("max_drawdown", 0.0) - perf.get("max_drawdown", 0.0)
         rows.append({
-            "candidate": str(item.get("label", "Candidate") or "Candidate"),
-            "status": status,
-            "family": str(item.get("family", "") or ""),
+            "Candidate": str(item.get("label", "Candidate") or "Candidate"),
+            "Result": status,
+            "Test type": _display_family_label(item.get("family", "")),
             "CAGR": _format_pct(perf.get("cagr", 0.0)),
             "Δ CAGR": _format_delta_pct(perf.get("cagr", 0.0) - base.get("cagr", 0.0)),
             "Vol": _format_pct(perf.get("annual_volatility", 0.0)),
             "Δ Vol": _format_delta_pct(vol_delta),
             "MaxDD": f"-{100.0 * abs(perf.get('max_drawdown', 0.0)):.2f}%",
-            "Drawdown change": _format_delta_pct(maxdd_improvement),
+            "Δ MaxDD": _format_delta_pct(maxdd_improvement),
             "Sharpe": f"{perf.get('sharpe', 0.0):.2f}",
             "Δ Sharpe": f"{perf.get('sharpe', 0.0) - base.get('sharpe', 0.0):+.2f}",
-            "Δ Score": f"{_safe_float(item.get('score_delta'), 0.0):+.3f}",
-            "Seconds": f"{_safe_float(item.get('elapsed_sec'), 0.0):.2f}s",
         })
     return pd.DataFrame(rows)
 
@@ -863,6 +871,24 @@ def _candidate_context_caption(item: dict) -> str:
     if family == "nearby_style":
         return "Tests a nearby style under the current strategy template."
     return "Tests another philosophy-approved preset combination."
+
+
+def _candidate_decision_rationale(item: dict, philosophy: Any) -> str:
+    family = str(item.get("family", "") or "")
+    template = str(item.get("strategy_template", "the selected strategy template") or "the selected strategy template")
+    style = str(item.get("style_preset", "the tested style") or "the tested style")
+    gate_reason = str(item.get("gate_reason", "") or "").strip()
+
+    if family == "recommended_restore":
+        intro = f"It restores the philosophy-recommended preset: **{template} + {style}**."
+    elif family == "nearby_style":
+        intro = f"It tests a **{style}** style under the same **{template}** strategy template."
+    else:
+        intro = f"It tests the **{template} + {style}** preset as another allowed strategy setup."
+
+    if gate_reason:
+        return f"{intro} The acceptance gate passed it because: {gate_reason}"
+    return f"{intro} The acceptance gate passed it because the rerun-tested trade-off was better than the current setup."
 
 
 def _preset_decision_guide_message(current_perf: dict, philosophy: Any) -> str:
@@ -896,8 +922,8 @@ def _preset_decision_guide_message(current_perf: dict, philosophy: Any) -> str:
         "not just one isolated metric. "
         f"Current result: CAGR {_format_pct(cagr)}, volatility {_format_pct(vol)}, MaxDD -{100.0 * maxdd:.2f}%, "
         f"Sharpe {sharpe:.2f}. {philosophy_rule} "
-        "If this result already feels acceptable, the next step is to continue to the Long-Term Scenario Explorer; "
-        "benchmark, reliability, and improvement checks are optional review layers."
+        "Apply the recommendation only if the rerun-tested trade-off feels better for the selected risk profile. "
+        "If the current result already feels acceptable, keep the current setup or continue with the current result."
     )
 
 
@@ -1045,44 +1071,28 @@ def render_preset_improvement(run_result: dict) -> dict:
 
         _render_continue_with_current_result_button(run_map, key="step5_preset_continue_current_result_v1")
 
-    details_label = "How to decide on this recommendation" if accepted_items and not preset_was_skipped else "Preset test diagnostics"
+    details_label = "How to decide on this preset recommendation" if accepted_items and not preset_was_skipped else "Preset test diagnostics"
     with st.expander(details_label, expanded=False):
+        detail_candidate = _coerce_mapping(accepted_items[0]) if accepted_items and not preset_was_skipped else {}
+        philosophy = str(payload.get("philosophy", _current_simple_state().get("philosophy", "Balanced")) or "Balanced")
+
         if accepted_items and not preset_was_skipped:
-            detail_candidate = _coerce_mapping(accepted_items[0])
-            philosophy = str(payload.get("philosophy", _current_simple_state().get("philosophy", "Balanced")) or "Balanced")
-
             st.info(_preset_decision_guide_message(perf, philosophy))
-            st.caption(
-                "Review the optional suggestion shown above. Apply it only if the trade-off feels better for the selected risk profile; "
-                "otherwise keep the current setup or continue with the current result."
-            )
-            st.info(
-                "The improvement phases test these kinds of changes with the real engine before showing an Apply button. "
-                "Do not change knobs just because they sound better; compare the rerun-tested metrics."
-            )
             st.divider()
-
             st.success("This candidate passed the preset acceptance gate.")
-            st.caption(_candidate_context_caption(detail_candidate))
-            gate_reason = str(detail_candidate.get("gate_reason", "") or "")
-            if gate_reason:
-                st.caption(gate_reason)
-            if detail_candidate.get("error"):
-                st.warning(str(detail_candidate.get("error")))
-            st.caption(
-                f"template={detail_candidate.get('strategy_template', '—')} · "
-                f"style={detail_candidate.get('style_preset', '—')} · "
-                f"governance={detail_candidate.get('governance_state', '—')} · "
-                f"score_delta={_safe_float(detail_candidate.get('score_delta'), 0.0):+.3f}"
-            )
-            st.divider()
 
-        st.caption(
-            f"tested_candidates={len(evaluations)} · elapsed={_safe_float(payload.get('elapsed_sec', 0.0), 0.0):.2f}s · "
-            f"scope={str(payload.get('scope', scope))}"
-        )
+        if not (accepted_items and not preset_was_skipped):
+            st.markdown("**Candidate test summary**")
+            st.caption(
+                f"Tested candidates: {len(evaluations)} · elapsed: {_safe_float(payload.get('elapsed_sec', 0.0), 0.0):.2f}s"
+            )
         if not table.empty:
             st.dataframe(table, use_container_width=True, hide_index=True)
+
+        if accepted_items and not preset_was_skipped:
+            st.markdown(_candidate_decision_rationale(detail_candidate, philosophy))
+            if detail_candidate.get("error"):
+                st.warning(str(detail_candidate.get("error")))
 
     return flow_state
 

@@ -57,6 +57,9 @@ STEP5_IMPROVEMENT_CHECKS_ANCHOR_ID = "step5-improvement-checks-anchor"
 STEP5_RELIABILITY_ANCHOR_ID = "step5-reliability-robustness-anchor"
 STEP5_RELIABILITY_EXPANDED_KEY = "step5_reliability_and_robustness_expanded_v1"
 STEP5_SCROLL_TO_RELIABILITY_KEY = "step5_scroll_to_reliability_and_robustness_v1"
+STEP5_RUN_DIAGNOSTICS_ANCHOR_ID = "step5-run-diagnostics-anchor"
+STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY = "step5_run_diagnostics_expanded_v1"
+STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY = "step5_scroll_to_run_diagnostics_v1"
 
 
 SUGGESTION_DEPTH_MODE_KEY = "step5_suggestion_testing_depth_mode_v1"
@@ -209,7 +212,7 @@ def _render_suggestion_depth_controls() -> None:
         )
         st.caption(
             "The estimate is approximate and depends on the deployed environment, cache state and panel size. "
-            "Timings are recorded later in Advanced run diagnostics and timings."
+            "Timings are recorded later in Run timings and diagnostics."
         )
 
 
@@ -1957,26 +1960,36 @@ def _reliability_confidence_label(run_map: dict, benchmark_payload: dict) -> str
     return "Unavailable"
 
 
-def _render_reliability_sidebar_snapshot(run_map: dict, benchmark_payload: dict) -> None:
-    """Render a compact sidebar entry point for the full reliability panel.
+def _render_sidebar_diagnostics(run_map: dict, benchmark_payload: dict) -> None:
+    """Render the grouped sidebar diagnostics controls.
 
-    The detailed reliability tables and robustness controls stay hidden by
-    default in the main page. The sidebar controls whether that review panel is
-    visible.
+    Reliability and run timings are related audit layers, but they answer
+    different questions, so they share one sidebar group while keeping separate
+    Show/Hide toggles.
     """
+    run_map = _coerce_mapping(run_map)
+
+    # Reliability summary
     window_meta = _coerce_mapping(benchmark_payload.get("window_meta", {}) if isinstance(benchmark_payload, dict) else {})
     confidence = _reliability_confidence_label(run_map, benchmark_payload)
     benchmark_status = _benchmark_status_label(benchmark_payload)
     assets_checked = _benchmark_asset_count(benchmark_payload)
-
     eval_window = str(window_meta.get("evaluation_window", "—") or "—")
     target_periods = _safe_int(window_meta.get("target_periods", 0), 0)
     if target_periods <= 0:
         target_periods = len(_extract_oos_returns(run_map))
+    reliability_visible = bool(st.session_state.get(STEP5_RELIABILITY_EXPANDED_KEY, False))
 
-    visible = bool(st.session_state.get(STEP5_RELIABILITY_EXPANDED_KEY, False))
+    # Run timings summary
+    engine_timing = _coerce_mapping(run_map.get("engine_timing", {}))
+    total_engine = _safe_float(engine_timing.get("total_engine", 0.0), 0.0)
+    walk_forward = _safe_float(engine_timing.get("walk_forward_loop", 0.0), 0.0)
+    panel_rows = _safe_int(run_map.get("asset_panel_n_rows", 0), 0)
+    panel_assets = _safe_int(run_map.get("asset_panel_n_assets", 0), 0)
+    source = str(run_map.get("source", "micro_pipeline_real") or "micro_pipeline_real")
+    timings_visible = bool(st.session_state.get(STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY, False))
 
-    with st.sidebar.container(border=True):
+    with st.sidebar.expander("Diagnostics", expanded=True):
         st.markdown("### Reliability snapshot")
 
         if confidence in {"Moderate", "Moderate-to-Strong"}:
@@ -1994,15 +2007,39 @@ def _render_reliability_sidebar_snapshot(run_map: dict, benchmark_payload: dict)
             st.caption(f"Window: {eval_window}")
         st.caption("Full validation details stay in the main post-run panel.")
 
-        button_label = "Hide reliability & robustness" if visible else "Show reliability & robustness"
+        reliability_button_label = "Hide reliability & robustness" if reliability_visible else "Show reliability & robustness"
         if st.button(
-            button_label,
+            reliability_button_label,
             key="step5_sidebar_toggle_reliability_and_robustness",
             use_container_width=True,
         ):
-            next_visible = not visible
+            next_visible = not reliability_visible
             st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = next_visible
             st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = bool(next_visible)
+            st.rerun()
+
+        st.divider()
+
+        st.markdown("### Run timings")
+        st.caption("Technical timings and run metadata stay hidden from the main page unless opened.")
+
+        if total_engine > 0:
+            st.markdown(f"**Engine time:** {total_engine:.2f}s")
+        if walk_forward > 0:
+            st.caption(f"Walk-forward: {walk_forward:.2f}s")
+        if panel_rows > 0 or panel_assets > 0:
+            st.caption(f"Panel: {panel_assets} assets · {panel_rows:,} rows")
+        st.caption(f"Source: {source}")
+
+        timings_button_label = "Hide run timings" if timings_visible else "Show run timings"
+        if st.button(
+            timings_button_label,
+            key="step5_sidebar_toggle_run_timings",
+            use_container_width=True,
+        ):
+            next_visible = not timings_visible
+            st.session_state[STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY] = next_visible
+            st.session_state[STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY] = bool(next_visible)
             st.rerun()
 
 
@@ -2021,6 +2058,24 @@ def _maybe_scroll_to_reliability_panel() -> None:
         """,
         height=0,
     )
+
+
+def _maybe_scroll_to_run_diagnostics_panel() -> None:
+    if not st.session_state.pop(STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY, False):
+        return
+
+    components.html(
+        f"""
+        <script>
+            const target = window.parent.document.getElementById("{STEP5_RUN_DIAGNOSTICS_ANCHOR_ID}");
+            if (target) {{
+                setTimeout(() => target.scrollIntoView({{behavior: "smooth", block: "start"}}), 120);
+            }}
+        </script>
+        """,
+        height=0,
+    )
+
 
 def render_post_run(run_result: dict) -> None:
     """Render the Gold Stable post-run surface.
@@ -2082,7 +2137,7 @@ def render_post_run(run_result: dict) -> None:
 
     bench_df, _, window_meta = _benchmark_context_rows(perf, run_map)
     benchmark_payload = {"bench_df": bench_df, "window_meta": window_meta}
-    _render_reliability_sidebar_snapshot(run_map, benchmark_payload)
+    _render_sidebar_diagnostics(run_map, benchmark_payload)
 
     reliability_visible = bool(st.session_state.get(STEP5_RELIABILITY_EXPANDED_KEY, False))
     if reliability_visible:
@@ -2140,37 +2195,55 @@ def render_post_run(run_result: dict) -> None:
         else:
             render_auto_opt_improvement(run_map)
 
-    _render_engine_levers_to_try(perf, philosophy, run_map, as_expander=True)
+    # Technical improvement guidance now lives next to the technical engine controls
+    # inside Change or rerun setup. Keeping it there avoids a second post-run
+    # diagnostics expander after the recommendation flow.
 
     n_oos = _store_projection_bridge_context(run_map)
 
-    with st.expander("Advanced run diagnostics and timings", expanded=False):
-        meta_parts = [
-            f"source={source}",
-            f"asset_panel={panel_label}",
-            f"rows={panel_rows}",
-            f"assets={panel_assets}",
-        ]
-        if run_signature:
-            meta_parts.append(f"run_signature={run_signature}")
-        if config_fingerprint:
-            meta_parts.append(f"config_fp={config_fingerprint}")
-        if panel_shape:
-            meta_parts.append(f"panel_shape={panel_shape}")
-        st.caption(" · ".join(meta_parts))
-        if run_timestamp:
-            st.caption(f"run_timestamp={run_timestamp}")
-        _render_engine_timing_block(run_map)
-        if size_flow_completed:
-            st.caption(
-                "Suggestion timing below is historical for the completed improvement flow. "
-                "It is not re-run after Apply; the current result was promoted from the previously tested candidate."
-            )
-        _render_preset_suggestion_timing_block()
-        _render_auto_opt_suggestion_timing_block()
-        _render_universe_suggestion_timing_block()
-        _render_size_suggestion_timing_block()
-        _render_feature_mu_block(run_map)
+    run_diagnostics_visible = bool(st.session_state.get(STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY, False))
+    if run_diagnostics_visible:
+        st.markdown(f'<div id="{STEP5_RUN_DIAGNOSTICS_ANCHOR_ID}"></div>', unsafe_allow_html=True)
+        _maybe_scroll_to_run_diagnostics_panel()
+
+        with st.expander("Run timings and diagnostics", expanded=True):
+            if st.button(
+                "Hide run timings",
+                key="step5_main_hide_run_timings",
+                use_container_width=True,
+            ):
+                st.session_state[STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY] = False
+                st.session_state[STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY] = False
+                st.rerun()
+
+            meta_parts = [
+                f"source={source}",
+                f"asset_panel={panel_label}",
+                f"rows={panel_rows}",
+                f"assets={panel_assets}",
+            ]
+            if run_signature:
+                meta_parts.append(f"run_signature={run_signature}")
+            if config_fingerprint:
+                meta_parts.append(f"config_fp={config_fingerprint}")
+            if panel_shape:
+                meta_parts.append(f"panel_shape={panel_shape}")
+            st.caption(" · ".join(meta_parts))
+            if run_timestamp:
+                st.caption(f"run_timestamp={run_timestamp}")
+            _render_engine_timing_block(run_map)
+            if size_flow_completed:
+                st.caption(
+                    "Suggestion timing below is historical for the completed improvement flow. "
+                    "It is not re-run after Apply; the current result was promoted from the previously tested candidate."
+                )
+            _render_preset_suggestion_timing_block()
+            _render_auto_opt_suggestion_timing_block()
+            _render_universe_suggestion_timing_block()
+            _render_size_suggestion_timing_block()
+            _render_feature_mu_block(run_map)
+    else:
+        st.session_state.pop(STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY, None)
 
     st.markdown("---")
     nav_left, nav_right = st.columns(2)
