@@ -1960,106 +1960,14 @@ def _reliability_confidence_label(run_map: dict, benchmark_payload: dict) -> str
 
 
 def _render_sidebar_diagnostics(run_map: dict, benchmark_payload: dict, *, improvement_flow_completed: bool = True) -> None:
-    """Render the grouped sidebar diagnostics controls.
+    """Deprecated no-op.
 
-    Reliability and run timings are related audit layers, but they answer
-    different questions, so they share one sidebar group while keeping separate
-    Show/Hide toggles.
+    The Step 5 sidebar Diagnostics expander is owned by
+    ``ui.common.global_sidebar``. Keeping this function as a no-op preserves
+    compatibility with older local imports while preventing duplicate sidebar
+    expanders after a portfolio run.
     """
-    run_map = _coerce_mapping(run_map)
-
-    # Reliability summary
-    window_meta = _coerce_mapping(benchmark_payload.get("window_meta", {}) if isinstance(benchmark_payload, dict) else {})
-    confidence = _reliability_confidence_label(run_map, benchmark_payload)
-    benchmark_status = _benchmark_status_label(benchmark_payload)
-    assets_checked = _benchmark_asset_count(benchmark_payload)
-    eval_window = str(window_meta.get("evaluation_window", "—") or "—")
-    target_periods = _safe_int(window_meta.get("target_periods", 0), 0)
-    if target_periods <= 0:
-        target_periods = len(_extract_oos_returns(run_map))
-    reliability_visible = bool(st.session_state.get(STEP5_RELIABILITY_EXPANDED_KEY, False))
-    if not improvement_flow_completed and reliability_visible:
-        # Robustness should validate the final selected setup, not an intermediate
-        # result that may still change during optional improvement checks.
-        reliability_visible = False
-        st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = False
-        st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = False
-
-    # Run timings summary
-    engine_timing = _coerce_mapping(run_map.get("engine_timing", {}))
-    total_engine = _safe_float(engine_timing.get("total_engine", 0.0), 0.0)
-    walk_forward = _safe_float(engine_timing.get("walk_forward_loop", 0.0), 0.0)
-    panel_rows = _safe_int(run_map.get("asset_panel_n_rows", 0), 0)
-    panel_assets = _safe_int(run_map.get("asset_panel_n_assets", 0), 0)
-    source = str(run_map.get("source", "micro_pipeline_real") or "micro_pipeline_real")
-    timings_visible = bool(st.session_state.get(STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY, False))
-
-    with st.sidebar.expander("Diagnostics", expanded=True):
-        st.markdown("### Reliability snapshot")
-
-        if confidence in {"Moderate", "Moderate-to-Strong"}:
-            st.success(f"Confidence: {confidence}.")
-        elif confidence == "Limited":
-            st.warning("Confidence: Limited.")
-        else:
-            st.info("Confidence: unavailable until a valid run result is available.")
-
-        st.markdown(f"**Benchmark check:** {benchmark_status}")
-        st.markdown(f"**Reference assets:** {assets_checked}")
-        if target_periods > 0:
-            st.markdown(f"**OOS months:** {target_periods}")
-        if eval_window != "—":
-            st.caption(f"Window: {eval_window}")
-        st.caption("Full validation details stay in the main post-run panel.")
-        if not improvement_flow_completed:
-            st.info(
-                "Reliability and robustness is best run after the optional improvement checks are completed, "
-                "because accepted suggestions can still change the setup being tested."
-            )
-
-        reliability_button_label = "Hide reliability & robustness" if reliability_visible else "Show reliability & robustness"
-        if st.button(
-            reliability_button_label,
-            key="step5_sidebar_toggle_reliability_and_robustness",
-            use_container_width=True,
-            disabled=not improvement_flow_completed,
-            help=(
-                "Complete or skip all optional improvement checks before running reliability and robustness."
-                if not improvement_flow_completed
-                else "Show or hide the reliability and robustness panel for the final selected setup."
-            ),
-        ):
-            next_visible = not reliability_visible
-            st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = next_visible
-            st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = bool(next_visible)
-            st.rerun()
-
-        st.divider()
-
-        st.markdown("### Run timings")
-        st.caption("Technical timings and run metadata stay hidden from the main page unless opened.")
-        if not improvement_flow_completed:
-            st.caption("Timing diagnostics are available now, but suggestion timings are partial until all optional improvement checks are completed.")
-
-        if total_engine > 0:
-            st.markdown(f"**Engine time:** {total_engine:.2f}s")
-        if walk_forward > 0:
-            st.caption(f"Walk-forward: {walk_forward:.2f}s")
-        if panel_rows > 0 or panel_assets > 0:
-            st.caption(f"Panel: {panel_assets} assets · {panel_rows:,} rows")
-        st.caption(f"Source: {source}")
-
-        timings_button_label = "Hide run timings" if timings_visible else "Show run timings"
-        if st.button(
-            timings_button_label,
-            key="step5_sidebar_toggle_run_timings",
-            use_container_width=True,
-        ):
-            next_visible = not timings_visible
-            st.session_state[STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY] = next_visible
-            st.session_state[STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY] = bool(next_visible)
-            st.rerun()
-
+    return None
 
 def _maybe_scroll_to_reliability_panel() -> None:
     if not st.session_state.pop(STEP5_SCROLL_TO_RELIABILITY_KEY, False):
@@ -2167,11 +2075,10 @@ def render_post_run(run_result: dict) -> None:
         st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = False
         st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = False
 
-    _render_sidebar_diagnostics(
-        run_map,
-        benchmark_payload,
-        improvement_flow_completed=improvement_flow_completed,
-    )
+    # Sidebar diagnostics are rendered once by ui.common.global_sidebar.
+    # Do not render another st.sidebar Diagnostics expander here, otherwise
+    # Step 5 shows duplicate diagnostics and the post-run copy can reopen by
+    # default after a portfolio run.
 
     st.markdown(f'<div id="{STEP5_IMPROVEMENT_CHECKS_ANCHOR_ID}"></div>', unsafe_allow_html=True)
     _maybe_scroll_to_improvement_checks()

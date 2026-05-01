@@ -32,6 +32,13 @@ AUTO_OPT_SUGGESTION_TIMING_KEY = "step5_auto_opt_suggestion_timing_v1"
 UNIVERSE_SUGGESTION_TIMING_KEY = "step5_universe_suggestion_timing_v1"
 SIZE_SUGGESTION_TIMING_KEY = "step5_size_suggestion_timing_v1"
 
+# Main Step 5 diagnostics panel keys. Defined as strings to avoid importing
+# post_run.py from the global sidebar and accidentally creating circular UI
+# dependencies. The sidebar only toggles visibility; the main panel owns the
+# detailed render.
+STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY = "step5_run_diagnostics_expanded_v1"
+STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY = "step5_scroll_to_run_diagnostics_v1"
+
 # Personal Finance live-summary defaults. These mirror the first visible state
 # of the main Personal Finance Setup screen, so the sidebar is useful even on
 # the first render before the main screen has seeded widget-backed values.
@@ -459,6 +466,34 @@ def _timing_total(key: str) -> float:
     return _safe_float(payload.get("total_seconds", 0.0), 0.0)
 
 
+def _format_seconds(value: Any) -> str:
+    seconds = _safe_float(value, 0.0)
+    if seconds <= 0.0:
+        return "—"
+    if seconds < 60.0:
+        return f"{seconds:.2f}s"
+    minutes = seconds / 60.0
+    return f"{minutes:.1f} min"
+
+
+def _suggestion_timing_rows() -> list[tuple[str, float, int, int]]:
+    """Return Step 5 suggestion timing rows without importing suggestion modules."""
+    rows: list[tuple[str, float, int, int]] = []
+    for label, key in (
+        ("Preset", PRESET_SUGGESTION_TIMING_KEY),
+        ("Engine tuning", AUTO_OPT_SUGGESTION_TIMING_KEY),
+        ("Universe", UNIVERSE_SUGGESTION_TIMING_KEY),
+        ("Size", SIZE_SUGGESTION_TIMING_KEY),
+    ):
+        payload = _coerce_mapping(st.session_state.get(key, {}))
+        seconds = _safe_float(payload.get("total_seconds", 0.0), 0.0)
+        candidates = _safe_int(payload.get("candidate_count", 0), 0)
+        accepted = _safe_int(payload.get("accepted_count", 0), 0)
+        if seconds > 0.0 or candidates > 0:
+            rows.append((label, seconds, candidates, accepted))
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Sidebar rendering blocks
 # ---------------------------------------------------------------------------
@@ -883,9 +918,6 @@ def _render_help(step: int) -> None:
         elif step in {1, 2, 3}:
             st.divider()
             st.markdown("**Personal finance terms**")
-            st.caption("**Fixed essentials:** regular must-pay costs that do not change much week to week.")
-            st.caption("**Variable essentials:** necessary costs that can move around, such as groceries, utilities or transport.")
-            st.caption("**Discretionary spending:** flexible non-essential spending that can usually be adjusted first.")
             st.caption("**Free margin:** estimated money left after essential and discretionary weekly spending.")
             st.caption("**Savings target:** weekly amount tested against your current cash-flow estimate.")
             st.caption("**Feasibility:** short-term stress check, not a guarantee that real spending will match the scenario.")
@@ -920,24 +952,12 @@ def _render_home_sidebar_minimal() -> None:
 
 def _render_personal_finance_terms() -> None:
     with st.expander("Personal finance terms", expanded=False):
-        st.markdown("**Take-home income**")
-        st.caption("Estimated money available after tax and deductions, shown on a weekly basis.")
-        st.markdown("**Fixed essentials**")
-        st.caption("Regular must-pay costs such as rent, bills or subscriptions that do not change much week to week.")
-        st.markdown("**Variable essentials**")
-        st.caption("Necessary costs that can move around, such as groceries, utilities or transport.")
-        st.markdown("**Discretionary spending**")
-        st.caption("Flexible non-essential spending that can usually be adjusted first if the plan feels tight.")
         st.markdown("**Free margin**")
         st.caption("Estimated money left after essential and discretionary weekly spending.")
         st.markdown("**Savings target**")
         st.caption("Weekly amount tested against the current cash-flow estimate.")
         st.markdown("**Feasibility**")
         st.caption("Short-term stress check, not a guarantee that real spending will match the scenario.")
-        st.markdown("**Stress level**")
-        st.caption("Controls how wide the short-term uncertainty band is around the target plan.")
-        st.markdown("**Life event stress test**")
-        st.caption("Optional one-off cost used to test whether the short-term plan still has room for surprises.")
 
 
 def _render_personal_finance_q_and_a() -> None:
@@ -1024,8 +1044,6 @@ def _render_personal_finance_sidebar(step: int) -> None:
     _render_personal_finance_plan_snapshot()
 
     st.divider()
-    _render_personal_finance_next_action()
-
     _render_personal_finance_q_and_a()
     _render_personal_finance_terms()
 
@@ -1159,7 +1177,6 @@ def _render_step4_market_panel_status() -> None:
     st.markdown("### Market-data panel")
     panel_meta = _asset_panel_summary()
     frequency = str(st.session_state.get("asset_return_frequency", "monthly") or "monthly").lower()
-    tools_visible = bool(st.session_state.get("step4_show_market_data_tools", False))
 
     if panel_meta:
         assets = _safe_int(panel_meta.get("assets", 0), 0)
@@ -1170,35 +1187,29 @@ def _render_step4_market_panel_status() -> None:
             st.caption(f"**{_format_count(assets)} assets · {_format_count(rows)} rows**")
             st.caption(f"Returns: **{frequency}**")
             st.caption(f"Source: {source}")
-
-            button_label = "Hide diagnostics & downloads" if tools_visible else "Show diagnostics & downloads"
-            if st.button(
-                button_label,
-                key="global_sidebar_step4_toggle_market_data_tools",
-                use_container_width=True,
-                help="Show or hide the technical market-data preview, audit details, and CSV exports.",
-            ):
-                st.session_state["step4_show_market_data_tools"] = not tools_visible
-                st.rerun()
-            st.caption("For audit, preview, and CSV exports.")
             return
 
     st.warning("Market-data panel not ready yet.")
     st.caption("Use the main Risk Profile and Asset Universe screen to prepare or refresh the panel before running the Strategy Engine.")
 
 
-def _render_step4_next_action() -> None:
-    st.markdown("### Next")
-    if _has_asset_panel() or _has_step5_result():
+def _render_step4_market_data_tools_toggle() -> None:
+    with st.expander("Diagnostics", expanded=False):
+        st.caption(
+            "Optional market-data preview, audit details, and CSV export controls. "
+            "This only shows or hides diagnostics on the main screen; it does not refresh data or run the engine."
+        )
+
+        tools_visible = bool(st.session_state.get("step4_show_market_data_tools", False))
+        button_label = "Hide diagnostics & downloads" if tools_visible else "Show diagnostics & downloads"
         if st.button(
-            "Continue to Strategy Engine",
-            key="global_sidebar_step4_continue_to_strategy_engine",
+            button_label,
+            key="global_sidebar_step4_toggle_market_data_tools",
             use_container_width=True,
-            help="Open the Strategy Engine workspace.",
+            help="Show or hide the technical market-data preview, audit details, and CSV exports on the main screen.",
         ):
-            _go_to_step(5)
-    else:
-        st.caption("Prepare a valid market-data panel on the main screen, then continue to the Strategy Engine.")
+            st.session_state["step4_show_market_data_tools"] = not tools_visible
+            st.rerun()
 
 
 def _render_step4_q_and_a() -> None:
@@ -1256,11 +1267,9 @@ def _render_step4_sidebar(step: int) -> None:
     st.divider()
     _render_step4_market_panel_status()
 
-    st.divider()
-    _render_step4_next_action()
-
     _render_step4_q_and_a()
     _render_step4_help()
+    _render_step4_market_data_tools_toggle()
 
 
 
@@ -1361,21 +1370,6 @@ def _render_step5_run_status() -> None:
         st.caption(f"Test periods: **{periods}**")
 
 
-def _render_step5_next_action() -> None:
-    st.markdown("### Next")
-    if _has_step5_result():
-        step6_enabled, step6_reason = _step_access_state(6, 5)
-        if st.button(
-            "Continue to Scenario Explorer",
-            key="global_sidebar_step5_continue_to_scenario_explorer",
-            use_container_width=True,
-            disabled=not step6_enabled,
-            help=step6_reason,
-        ):
-            _go_to_step(6)
-    else:
-        st.caption("Run the portfolio on the main screen. After a successful run, the Scenario Explorer becomes available.")
-
 
 def _render_step5_q_and_a() -> None:
     with st.expander("Strategy Engine Q&A", expanded=False):
@@ -1450,6 +1444,131 @@ def _render_step5_terms() -> None:
 
         st.caption("Metric explanations are in the Strategy Engine Q&A above. These terms are not predictions or investment advice.")
 
+def _render_step5_diagnostics() -> None:
+    """Render the single collapsed Step 5 diagnostics expander after a real run."""
+    run_map = _latest_run_result()
+    if not run_map:
+        return
+
+    # Keep this as the only Step 5 sidebar diagnostics expander. It is rendered
+    # only after a real run, and it is always requested collapsed by default.
+    # post_run.py owns the full main-screen diagnostics panel.
+    with st.expander("Diagnostics", expanded=False):
+        perf = _coerce_mapping(run_map.get("performance_summary", {}))
+        risk = _coerce_mapping(run_map.get("risk_summary", {}))
+        panel_meta = _asset_panel_summary()
+        investment_context = _investment_context()
+        oos_returns = investment_context.get("oos_returns_monthly", [])
+
+        periods = _safe_int(perf.get("periods", 0), 0)
+        if periods <= 0 and isinstance(oos_returns, list):
+            periods = len(oos_returns)
+
+        assets = _safe_int(panel_meta.get("assets", run_map.get("asset_panel_n_assets", 0)), 0)
+        reference_assets = _safe_int(
+            risk.get("reference_assets", run_map.get("reference_assets", 0)),
+            0,
+        )
+
+        benchmark_passed = bool(
+            run_map.get("benchmark_check_passed", False)
+            or run_map.get("benchmark_passed", False)
+            or _safe_float(perf.get("sharpe", 0.0), 0.0) > 0.0
+        )
+
+        sharpe = _safe_float(perf.get("sharpe", 0.0), 0.0)
+        max_dd = abs(_safe_float(perf.get("max_drawdown", 0.0), 0.0))
+        if sharpe >= 0.75 and max_dd <= 0.25:
+            confidence = "Moderate-to-Strong"
+        elif sharpe >= 0.35:
+            confidence = "Moderate"
+        else:
+            confidence = "Low-to-Moderate"
+
+        st.markdown("**Reliability snapshot**")
+        st.success(f"Confidence: {confidence}.")
+        st.caption(f"**Benchmark check:** {'Passed' if benchmark_passed else 'Needs review'}")
+        if reference_assets > 0:
+            st.caption(f"**Reference assets:** {_format_count(reference_assets)}")
+        elif assets > 0:
+            st.caption(f"**Panel assets:** {_format_count(assets)}")
+        if periods > 0:
+            st.caption(f"**OOS months:** {_format_count(periods)}")
+
+        window_start = str(perf.get("start", run_map.get("window_start", "")) or "").strip()
+        window_end = str(perf.get("end", run_map.get("window_end", "")) or "").strip()
+        if window_start or window_end:
+            st.caption(f"Window: {window_start or '—'} → {window_end or '—'}")
+
+        engine_timing = _coerce_mapping(run_map.get("engine_timing", {}))
+        suggestion_rows = _suggestion_timing_rows()
+        timings_visible = bool(st.session_state.get(STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY, False))
+
+        st.divider()
+        st.markdown("**Timing snapshot**")
+        st.caption("Technical timings and run metadata stay hidden from the main page unless opened.")
+
+        total_engine = _safe_float(engine_timing.get("total_engine", 0.0), 0.0)
+        walk_forward = _safe_float(engine_timing.get("walk_forward_loop", 0.0), 0.0)
+        probabilistic = _safe_float(engine_timing.get("probabilistic_total", 0.0), 0.0)
+        n_oos_dates = _safe_int(engine_timing.get("n_oos_dates", periods), periods)
+
+        if total_engine > 0.0:
+            st.caption(f"**Engine run:** {_format_seconds(total_engine)}")
+        else:
+            st.caption("**Engine run:** timing not available in the stored result")
+        if walk_forward > 0.0:
+            st.caption(f"**Walk-forward:** {_format_seconds(walk_forward)}")
+        if probabilistic > 0.0:
+            st.caption(f"**Probabilistic:** {_format_seconds(probabilistic)}")
+        if n_oos_dates > 0:
+            st.caption(f"**OOS months timed:** {_format_count(n_oos_dates)}")
+
+        panel_rows = _safe_int(run_map.get("asset_panel_n_rows", panel_meta.get("rows", 0)), 0)
+        panel_assets = _safe_int(run_map.get("asset_panel_n_assets", panel_meta.get("assets", 0)), 0)
+        source = str(run_map.get("source", "micro_pipeline_real") or "micro_pipeline_real")
+        if panel_rows > 0 or panel_assets > 0:
+            st.caption(f"Panel: {panel_assets} assets · {_format_count(panel_rows)} rows")
+        st.caption(f"Source: {source}")
+
+        if suggestion_rows:
+            total_suggestion_seconds = sum(max(0.0, row[1]) for row in suggestion_rows)
+            st.caption(f"**Suggestion overhead:** {_format_seconds(total_suggestion_seconds)}")
+            for label, seconds, candidates, accepted in suggestion_rows:
+                suffix = ""
+                if candidates > 0:
+                    suffix = f" · {candidates} tested"
+                    if accepted > 0:
+                        suffix += f" · {accepted} passed"
+                st.caption(f"{label}: {_format_seconds(seconds)}{suffix}")
+
+        timing_button_label = "Hide run timings" if timings_visible else "Show run timings"
+        if st.button(
+            timing_button_label,
+            key="global_sidebar_step5_toggle_run_timings",
+            use_container_width=True,
+            help="Show or hide the detailed Run timings and diagnostics panel on the main Strategy Engine screen.",
+        ):
+            next_visible = not timings_visible
+            st.session_state[STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY] = next_visible
+            st.session_state[STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY] = bool(next_visible)
+            st.rerun()
+
+        st.divider()
+        st.caption("Full validation details stay in the main post-run panel.")
+        st.info(
+            "Reliability and robustness are best run after the optional improvement checks are completed, "
+            "because accepted suggestions can still change the setup being tested."
+        )
+        st.button(
+            "Show reliability & robustness",
+            key="global_sidebar_step5_reliability_disabled",
+            use_container_width=True,
+            disabled=True,
+            help="Run reliability and robustness checks from the main Strategy Engine screen.",
+        )
+
+
 def _render_step5_sidebar(step: int) -> None:
     """Render a focused sidebar for the Strategy Engine module.
 
@@ -1478,10 +1597,11 @@ def _render_step5_sidebar(step: int) -> None:
         _render_step5_run_status()
 
     st.divider()
-    _render_step5_next_action()
-
     _render_step5_q_and_a()
     _render_step5_terms()
+
+    if _has_step5_result():
+        _render_step5_diagnostics()
 
 
 def _render_step6_scenario_status() -> None:
