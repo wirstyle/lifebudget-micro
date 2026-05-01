@@ -1269,7 +1269,9 @@ def render_step_4() -> None:
     _render_panel_status_and_diagnostics(panel_error, selected_strategy)
     payload = build_step4_universe_payload_from_state()
     st.markdown("---")
-    left, right = st.columns([1.0, 1.8])
+    # Give the Back button enough horizontal space to keep its label on one line.
+    # The text stays unchanged; only the bottom navigation column ratio changes.
+    left, right = st.columns([1.35, 1.65])
     with left:
         if st.button("← Back to Personal Finance Setup", key="step4_back_to_personal_finance", use_container_width=True):
             st.session_state[CURRENT_STEP] = 1

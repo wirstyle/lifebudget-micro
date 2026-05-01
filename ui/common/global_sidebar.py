@@ -1135,18 +1135,11 @@ def _render_step4_navigation_block() -> None:
 
     st.markdown("**Investment Strategy Lab**")
     st.caption("Choose the risk profile and asset universe that will feed the Strategy Engine.")
-    st.info("**Risk Profile & Asset Universe**")
 
-    if _has_asset_panel() or _has_step5_result():
-        if st.button(
-            "Open Strategy Engine",
-            key="global_sidebar_step4_open_strategy_engine_top",
-            use_container_width=True,
-            help="Continue to the Strategy Engine workspace.",
-        ):
-            _go_to_step(5)
-    else:
-        st.caption("Strategy Engine becomes available once the market-data panel is ready.")
+    # Match the Scenario & Reports sidebar pattern: branch items are passive
+    # status labels, not navigation buttons. Home remains the only action here.
+    _render_branch_status_item(_step_nav_item(4), 4)
+    _render_branch_status_item(_step_nav_item(5), 4)
 
 
 def _render_step4_current_universe() -> None:
@@ -1174,7 +1167,7 @@ def _render_step4_funding_bridge() -> None:
 
 
 def _render_step4_market_panel_status() -> None:
-    st.markdown("### Market-data panel")
+    st.markdown("### Market-data status")
     panel_meta = _asset_panel_summary()
     frequency = str(st.session_state.get("asset_return_frequency", "monthly") or "monthly").lower()
 
@@ -1267,6 +1260,7 @@ def _render_step4_sidebar(step: int) -> None:
     st.divider()
     _render_step4_market_panel_status()
 
+    st.divider()
     _render_step4_q_and_a()
     _render_step4_help()
     _render_step4_market_data_tools_toggle()
@@ -1313,14 +1307,10 @@ def _render_step5_navigation_block() -> None:
     st.markdown("**Investment Strategy Lab**")
     st.caption("Run the selected universe through the Strategy Engine and review tested results.")
 
-    if st.button(
-        "Risk Profile & Asset Universe",
-        key="global_sidebar_step5_open_step4_top",
-        use_container_width=True,
-        help="Return to the universe and data setup.",
-    ):
-        _go_to_step(4)
-    st.info("**Strategy Engine**")
+    # Match the Scenario & Reports sidebar pattern: branch items are passive
+    # status labels, not navigation buttons. Home remains the only action here.
+    _render_branch_status_item(_step_nav_item(4), 5)
+    _render_branch_status_item(_step_nav_item(5), 5)
 
 
 def _render_step5_engine_setup() -> None:
@@ -1668,31 +1658,6 @@ def _render_step6_scenario_status() -> None:
     )
 
 
-def _render_step6_shortcuts() -> None:
-    st.markdown("### Safe shortcuts")
-
-    step5_enabled, step5_reason = _step_access_state(5, 6)
-    if st.button(
-        "← Back to Strategy Engine",
-        key="global_sidebar_step6_back_to_strategy_engine",
-        use_container_width=True,
-        disabled=not step5_enabled,
-        help=step5_reason,
-    ):
-        _go_to_step(5)
-
-    step7_enabled, step7_reason = _step_access_state(7, 6)
-    if st.button(
-        "Open Final Report →",
-        key="global_sidebar_step6_open_final_report",
-        use_container_width=True,
-        disabled=not step7_enabled,
-        help=step7_reason,
-    ):
-        _go_to_step(7)
-
-    st.caption("Heavy scenario calculations and exports stay on the main screen.")
-
 
 def _render_step6_projection_diagnostics() -> None:
     with st.expander("Projection context", expanded=False):
@@ -1800,9 +1765,6 @@ def _render_step6_sidebar(step: int) -> None:
     st.divider()
 
     _render_step6_scenario_status()
-
-    st.divider()
-    _render_step6_shortcuts()
 
     _render_step6_projection_diagnostics()
     _render_step6_q_and_a()

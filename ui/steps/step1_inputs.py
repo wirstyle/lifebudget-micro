@@ -1575,7 +1575,10 @@ def render_personal_finance_planner() -> None:
             st.session_state["current_step"] = 0
             st.rerun()
     with right_nav:
-        if st.button(button_label, key="personal_finance_continue_next_module", use_container_width=True, disabled=not can_continue):
+        next_button_label = str(button_label or "Continue").strip()
+        if not next_button_label.endswith("→"):
+            next_button_label = f"{next_button_label} →"
+        if st.button(next_button_label, key="personal_finance_continue_next_module", use_container_width=True, disabled=not can_continue):
             _auto_save_current_situation_snapshot()
             st.session_state[CURRENT_STEP] = int(next_step)
             st.session_state["current_step"] = int(next_step)
