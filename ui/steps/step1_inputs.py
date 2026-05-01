@@ -857,10 +857,6 @@ def _render_step1_quick_estimate_panel() -> dict[str, float]:
                 "Build fixed essentials breakdown",
                 key="step1_adv_show_fixed_breakdown_v1",
             )
-            show_equivalents = st.checkbox(
-                "Show period equivalents",
-                key="step1_adv_show_equivalents_v1",
-            )
         with toggle_cols[1]:
             show_variable_breakdown = st.checkbox(
                 "Build variable essentials breakdown",
@@ -1049,52 +1045,6 @@ def _render_step1_quick_estimate_panel() -> dict[str, float]:
             with c8:
                 st.selectbox("Discretionary period", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_DISCRETIONARY_PERIOD, "Weekly"))), key=STEP1_DISCRETIONARY_PERIOD)
 
-        if show_equivalents:
-            st.markdown("#### Period equivalents")
-            st.caption("Compact conversion table using the app convention of 52 weeks / 12 months.")
-            values_now = _step1_quick_weekly_values()
-            income_w = float(values_now.get("income", 0.0) or 0.0)
-            fixed_w = float(values_now.get("fixed", 0.0) or 0.0)
-            variable_w = float(values_now.get("variable", 0.0) or 0.0)
-            discretionary_w = float(values_now.get("discretionary", 0.0) or 0.0)
-            spending_w = fixed_w + variable_w + discretionary_w
-            margin_w = income_w - spending_w
-
-            rows = [
-                ("Income", income_w),
-                ("Essentials", fixed_w + variable_w),
-                ("Discretionary", discretionary_w),
-                ("Free margin", margin_w),
-            ]
-            body = "".join(
-                f"""
-                <tr>
-                    <td style="padding:0.42rem 0.55rem; font-weight:650;">{name}</td>
-                    <td style="padding:0.42rem 0.55rem; text-align:right;">£{weekly:,.0f}/w</td>
-                    <td style="padding:0.42rem 0.55rem; text-align:right;">£{weekly * 52.0 / 12.0:,.0f}/mo</td>
-                    <td style="padding:0.42rem 0.55rem; text-align:right;">£{weekly * 52.0:,.0f}/yr</td>
-                </tr>
-                """
-                for name, weekly in rows
-            )
-            st.markdown(
-                f"""
-                <div style="border:1px solid rgba(49,51,63,0.14); border-radius:12px; overflow:hidden; margin-top:0.35rem;">
-                    <table style="width:100%; border-collapse:collapse; font-size:0.88rem;">
-                        <thead style="background:#f8fafc; color:#475569;">
-                            <tr>
-                                <th style="padding:0.45rem 0.55rem; text-align:left;">Category</th>
-                                <th style="padding:0.45rem 0.55rem; text-align:right;">Weekly</th>
-                                <th style="padding:0.45rem 0.55rem; text-align:right;">Monthly</th>
-                                <th style="padding:0.45rem 0.55rem; text-align:right;">Yearly</th>
-                            </tr>
-                        </thead>
-                        <tbody>{body}</tbody>
-                    </table>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
 
         st.caption("Advanced edits are auto-saved before the target and feasibility cards update.")
 
@@ -1123,6 +1073,53 @@ def _render_cashflow_summary(values: dict[str, float], target_weekly: float) -> 
                 <div><div style="font-size:0.74rem;color:#64748b;">Spending</div><div style="font-weight:700;">£{spending:,.0f}/week</div></div>
                 <div><div style="font-size:0.74rem;color:#64748b;">Free margin</div><div style="font-weight:700;color:{margin_colour};">£{margin:,.0f}/week</div></div>
             </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+
+def _render_period_equivalents_table(values: dict[str, float]) -> None:
+    """Render the current weekly baseline as weekly/monthly/yearly equivalents."""
+    income_w = float(values.get("income", 0.0) or 0.0)
+    fixed_w = float(values.get("fixed", 0.0) or 0.0)
+    variable_w = float(values.get("variable", 0.0) or 0.0)
+    discretionary_w = float(values.get("discretionary", 0.0) or 0.0)
+    spending_w = fixed_w + variable_w + discretionary_w
+    margin_w = income_w - spending_w
+
+    rows = [
+        ("Income", income_w),
+        ("Essentials", fixed_w + variable_w),
+        ("Discretionary", discretionary_w),
+        ("Free margin", margin_w),
+    ]
+    body = "".join(
+        f"""
+        <tr>
+            <td style="padding:0.42rem 0.55rem; font-weight:650;">{name}</td>
+            <td style="padding:0.42rem 0.55rem; text-align:right;">£{weekly:,.0f}/w</td>
+            <td style="padding:0.42rem 0.55rem; text-align:right;">£{weekly * 52.0 / 12.0:,.0f}/mo</td>
+            <td style="padding:0.42rem 0.55rem; text-align:right;">£{weekly * 52.0:,.0f}/yr</td>
+        </tr>
+        """
+        for name, weekly in rows
+    )
+    st.markdown(
+        f"""
+        <div style="border:1px solid rgba(49,51,63,0.14); border-radius:12px; overflow:hidden; margin:0.5rem 0 1rem 0;">
+            <table style="width:100%; border-collapse:collapse; font-size:0.88rem;">
+                <thead style="background:#f8fafc; color:#475569;">
+                    <tr>
+                        <th style="padding:0.45rem 0.55rem; text-align:left;">Category</th>
+                        <th style="padding:0.45rem 0.55rem; text-align:right;">Weekly</th>
+                        <th style="padding:0.45rem 0.55rem; text-align:right;">Monthly</th>
+                        <th style="padding:0.45rem 0.55rem; text-align:right;">Yearly</th>
+                    </tr>
+                </thead>
+                <tbody>{body}</tbody>
+            </table>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1453,8 +1450,15 @@ def _render_feasibility_chart_card(snapshot: dict, *, target_weekly: float) -> N
 def _render_advanced_assumptions_and_diagnostics(snapshot: dict, values: dict[str, float]) -> None:
     from ui.services.step2_goal_service import UNCERTAINTY_OPTIONS
 
-    with st.expander("Advanced assumptions & diagnostics", expanded=False):
-        st.caption("Optional controls and explanations. The main dashboard above is enough for the normal demo flow.")
+    stress_level_help = {
+        "Quick estimate (default)": "Balanced default for a quick feasibility check.",
+        "Typical spending": "Allows for normal week-to-week variation in spending.",
+        "Unpredictable weeks": "Widens the range for irregular expenses or variable income.",
+        "Stress test": "Tests whether the plan still works under tougher short-term conditions.",
+    }
+
+    with st.expander("Optional stress-test settings", expanded=False):
+        st.caption("Use these controls only to test a different short-term horizon, uncertainty level, or one-off life event.")
 
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -1470,12 +1474,13 @@ def _render_advanced_assumptions_and_diagnostics(snapshot: dict, values: dict[st
             current_uncertainty = str(st.session_state.get(STEP2_UNCERTAINTY_PRESET, UNCERTAINTY_OPTIONS[0]) or UNCERTAINTY_OPTIONS[0])
             if current_uncertainty not in UNCERTAINTY_OPTIONS:
                 current_uncertainty = UNCERTAINTY_OPTIONS[0]
-            st.selectbox(
+            selected_uncertainty = st.selectbox(
                 "Stress level",
                 UNCERTAINTY_OPTIONS,
                 index=UNCERTAINTY_OPTIONS.index(current_uncertainty),
                 key=STEP2_UNCERTAINTY_PRESET,
             )
+            st.caption(stress_level_help.get(str(selected_uncertainty), stress_level_help["Quick estimate (default)"]))
         with c3:
             current_stress = _normalize_life_event_stress_preset(st.session_state.get("step3_stress_preset", "None"))
             st.session_state["step3_stress_preset"] = current_stress
@@ -1492,21 +1497,13 @@ def _render_advanced_assumptions_and_diagnostics(snapshot: dict, values: dict[st
             st.session_state[STEP2_RANDOM_RUN_NONCE] = int(st.session_state.get(STEP2_RANDOM_RUN_NONCE, 0) or 0) + 1
             st.rerun()
 
-        st.markdown("#### Details")
-        income = float(values.get("income", 0.0) or 0.0)
-        spending = float(values.get("spending", 0.0) or 0.0)
         margin = float(values.get("margin", 0.0) or 0.0)
-        st.write(f"- Monthly income estimate: **£{income * 52.0 / 12.0:,.0f}/mo**")
-        st.write(f"- Monthly spending estimate: **£{spending * 52.0 / 12.0:,.0f}/mo**")
-        st.write(f"- Weekly free margin: **£{margin:,.0f}/week**")
-
         if margin < 0:
             st.markdown("#### What should I check first?")
             st.write(
                 "Check income period, fixed essentials, and whether discretionary spending is realistic. "
                 "If the deficit is deliberate for a short period, continue with caution and use the stress test."
             )
-
 
 def render_personal_finance_planner() -> None:
     """Render Steps 1-3 as a compact dashboard.
@@ -1541,6 +1538,9 @@ def render_personal_finance_planner() -> None:
     snapshot = _apply_dashboard_life_event_stress_to_snapshot(snapshot, persist=True)
 
     existing_target = _personal_finance_target_value(snapshot)
+
+    # Useful conversion table: keep it visible, but without an extra heading.
+    _render_period_equivalents_table(values)
     _render_cashflow_summary(values, existing_target)
 
     # 2) Main action cards: target + feasibility.

@@ -883,6 +883,9 @@ def _render_help(step: int) -> None:
         elif step in {1, 2, 3}:
             st.divider()
             st.markdown("**Personal finance terms**")
+            st.caption("**Fixed essentials:** regular must-pay costs that do not change much week to week.")
+            st.caption("**Variable essentials:** necessary costs that can move around, such as groceries, utilities or transport.")
+            st.caption("**Discretionary spending:** flexible non-essential spending that can usually be adjusted first.")
             st.caption("**Free margin:** estimated money left after essential and discretionary weekly spending.")
             st.caption("**Savings target:** weekly amount tested against your current cash-flow estimate.")
             st.caption("**Feasibility:** short-term stress check, not a guarantee that real spending will match the scenario.")
@@ -917,12 +920,24 @@ def _render_home_sidebar_minimal() -> None:
 
 def _render_personal_finance_terms() -> None:
     with st.expander("Personal finance terms", expanded=False):
+        st.markdown("**Take-home income**")
+        st.caption("Estimated money available after tax and deductions, shown on a weekly basis.")
+        st.markdown("**Fixed essentials**")
+        st.caption("Regular must-pay costs such as rent, bills or subscriptions that do not change much week to week.")
+        st.markdown("**Variable essentials**")
+        st.caption("Necessary costs that can move around, such as groceries, utilities or transport.")
+        st.markdown("**Discretionary spending**")
+        st.caption("Flexible non-essential spending that can usually be adjusted first if the plan feels tight.")
         st.markdown("**Free margin**")
         st.caption("Estimated money left after essential and discretionary weekly spending.")
         st.markdown("**Savings target**")
         st.caption("Weekly amount tested against the current cash-flow estimate.")
         st.markdown("**Feasibility**")
         st.caption("Short-term stress check, not a guarantee that real spending will match the scenario.")
+        st.markdown("**Stress level**")
+        st.caption("Controls how wide the short-term uncertainty band is around the target plan.")
+        st.markdown("**Life event stress test**")
+        st.caption("Optional one-off cost used to test whether the short-term plan still has room for surprises.")
 
 
 def _render_personal_finance_q_and_a() -> None:
@@ -1667,6 +1682,8 @@ def _render_step6_sidebar(step: int) -> None:
     _render_step6_scenario_status()
 
     st.divider()
+    _render_step6_shortcuts()
+
     _render_step6_projection_diagnostics()
     _render_step6_q_and_a()
     _render_step6_terms()
