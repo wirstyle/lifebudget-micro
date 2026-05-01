@@ -1001,22 +1001,25 @@ def render_preset_improvement(run_result: dict) -> dict:
 
         _render_continue_with_current_result_button(run_map, key="step5_preset_continue_current_result_v1")
 
-        with st.expander("Why this candidate passed", expanded=False):
+    details_label = "Preset recommendation details" if accepted_items and not preset_was_skipped else "Preset test diagnostics"
+    with st.expander(details_label, expanded=False):
+        if accepted_items and not preset_was_skipped:
+            detail_candidate = _coerce_mapping(accepted_items[0])
             st.success("This candidate passed the preset acceptance gate.")
-            st.caption(_candidate_context_caption(best_candidate))
-            gate_reason = str(best_candidate.get("gate_reason", "") or "")
+            st.caption(_candidate_context_caption(detail_candidate))
+            gate_reason = str(detail_candidate.get("gate_reason", "") or "")
             if gate_reason:
                 st.caption(gate_reason)
-            if best_candidate.get("error"):
-                st.warning(str(best_candidate.get("error")))
+            if detail_candidate.get("error"):
+                st.warning(str(detail_candidate.get("error")))
             st.caption(
-                f"template={best_candidate.get('strategy_template', '—')} · "
-                f"style={best_candidate.get('style_preset', '—')} · "
-                f"governance={best_candidate.get('governance_state', '—')} · "
-                f"score_delta={_safe_float(best_candidate.get('score_delta'), 0.0):+.3f}"
+                f"template={detail_candidate.get('strategy_template', '—')} · "
+                f"style={detail_candidate.get('style_preset', '—')} · "
+                f"governance={detail_candidate.get('governance_state', '—')} · "
+                f"score_delta={_safe_float(detail_candidate.get('score_delta'), 0.0):+.3f}"
             )
+            st.divider()
 
-    with st.expander("Preset test diagnostics", expanded=False):
         st.caption(
             f"tested_candidates={len(evaluations)} · elapsed={_safe_float(payload.get('elapsed_sec', 0.0), 0.0):.2f}s · "
             f"scope={str(payload.get('scope', scope))}"

@@ -54,6 +54,9 @@ STEP5_SCROLL_TO_RESULT_AFTER_APPLY_KEY = "step5_scroll_to_real_run_result_after_
 PRESET_SUGGESTION_TIMING_KEY = "step5_preset_suggestion_timing_v1"
 STEP5_REAL_RUN_RESULT_ANCHOR_ID = "step5-real-run-result-anchor"
 STEP5_IMPROVEMENT_CHECKS_ANCHOR_ID = "step5-improvement-checks-anchor"
+STEP5_RELIABILITY_ANCHOR_ID = "step5-reliability-robustness-anchor"
+STEP5_RELIABILITY_VISIBLE_KEY = "step5_reliability_and_robustness_visible_v1"
+STEP5_SCROLL_TO_RELIABILITY_KEY = "step5_scroll_to_reliability_and_robustness_v1"
 
 
 SUGGESTION_DEPTH_MODE_KEY = "step5_suggestion_testing_depth_mode_v1"
@@ -123,14 +126,19 @@ def _apply_suggestion_depth_preset(mode: str) -> dict[str, int]:
     return counts
 
 
-def _render_suggestion_depth_controls() -> None:
-    """Optional runtime/coverage control for the sequential suggestion tests."""
+def _ensure_suggestion_depth_defaults() -> None:
+    """Initialise suggestion-depth state before the suggestion UI is rendered."""
     defaults = SUGGESTION_DEPTH_PRESETS[SUGGESTION_DEPTH_DEFAULT]
     if SUGGESTION_DEPTH_MODE_KEY not in st.session_state:
         st.session_state[SUGGESTION_DEPTH_MODE_KEY] = SUGGESTION_DEPTH_DEFAULT
     for phase, key in SUGGESTION_DEPTH_COUNT_KEYS.items():
         if key not in st.session_state:
             st.session_state[key] = int(defaults.get(phase, 1))
+
+
+def _render_suggestion_depth_controls() -> None:
+    """Optional runtime/coverage control for the sequential suggestion tests."""
+    _ensure_suggestion_depth_defaults()
 
     with st.expander("Suggestion testing depth", expanded=False):
         st.caption("Higher depth tests more alternatives, but each extra candidate adds real engine runtime.")
@@ -1589,9 +1597,8 @@ def _benchmark_row_for(bench_df: pd.DataFrame, needle: str) -> dict:
 def _render_compact_same_period_context(perf: dict, run_map: dict) -> None:
     """Show a small same-period benchmark context inside the result-reading expander.
 
-    The full benchmark tables remain in Benchmark sanity check. This block keeps
-    the main interpretation compact by showing only the strategy, S&P 500 and
-    Nasdaq-100 over the same evaluated period.
+    This block keeps the main interpretation compact by showing only the strategy,
+    S&P 500, Nasdaq-100 and Gold over the same evaluated period.
     """
     bench_df, _, _ = _benchmark_context_rows(perf, run_map)
     if not isinstance(bench_df, pd.DataFrame) or bench_df.empty:
@@ -1600,7 +1607,8 @@ def _render_compact_same_period_context(perf: dict, run_map: dict) -> None:
     strategy = _benchmark_row_for(bench_df, "Your strategy")
     sp500 = _benchmark_row_for(bench_df, "SPY")
     nasdaq = _benchmark_row_for(bench_df, "QQQ")
-    if not strategy or not sp500 or not nasdaq:
+    gold = _benchmark_row_for(bench_df, "GLD")
+    if not strategy or not sp500 or not nasdaq or not gold:
         return
 
     strategy_cagr = _parse_percent_label(strategy.get("CAGR"))
@@ -1627,14 +1635,14 @@ def _render_compact_same_period_context(perf: dict, run_map: dict) -> None:
         context_text = (
             "**Same-period context:** Over the same evaluated period, this strategy had lower CAGR "
             "than the S&P 500 and Nasdaq-100, but also lower volatility and a less severe max drawdown "
-            "than Nasdaq-100. This suggests a more risk-controlled profile rather than a pure growth "
-            "benchmark profile."
+            "than Nasdaq-100. Gold is included as a defensive diversifier reference. This suggests a more "
+            "risk-controlled profile rather than a pure growth benchmark profile."
         )
     else:
         context_text = (
-            "**Same-period context:** The table below compares this strategy with the S&P 500 and "
-            "Nasdaq-100 over the same evaluated period. Use it as context for the risk/return profile, "
-            "not as a replacement for the active strategy result."
+            "**Same-period context:** The table below compares this strategy with the S&P 500, "
+            "Nasdaq-100 and Gold over the same evaluated period. Use it as context for the "
+            "risk/return profile, not as a replacement for the active strategy result."
         )
 
     st.markdown(context_text)
@@ -1660,6 +1668,13 @@ def _render_compact_same_period_context(perf: dict, run_map: dict) -> None:
             "Vol": nasdaq.get("Vol", "—"),
             "MaxDD": nasdaq.get("MaxDD", "—"),
             "Sharpe": nasdaq.get("Sharpe", "—"),
+        },
+        {
+            "Reference": "Gold",
+            "CAGR": gold.get("CAGR", "—"),
+            "Vol": gold.get("Vol", "—"),
+            "MaxDD": gold.get("MaxDD", "—"),
+            "Sharpe": gold.get("Sharpe", "—"),
         },
     ]
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -1910,6 +1925,97 @@ def _render_benchmark_context(perf: dict, run_map: dict, *, inline_details: bool
 
     return {"bench_df": bench_df, "window_meta": window_meta}
 
+
+def _benchmark_asset_count(benchmark_payload: dict) -> int:
+    bench_df = benchmark_payload.get("bench_df") if isinstance(benchmark_payload, dict) else pd.DataFrame()
+    if not isinstance(bench_df, pd.DataFrame) or bench_df.empty or "Reference" not in bench_df.columns:
+        return 0
+    try:
+        refs = bench_df["Reference"].astype(str)
+        return int((~refs.str.contains("Your strategy", case=False, regex=False)).sum())
+    except Exception:
+        return max(0, int(len(bench_df)) - 1)
+
+
+def _benchmark_status_label(benchmark_payload: dict) -> str:
+    assets_checked = _benchmark_asset_count(benchmark_payload)
+    if assets_checked >= 3:
+        return "Passed"
+    if assets_checked > 0:
+        return "Limited"
+    return "Unavailable"
+
+
+def _reliability_confidence_label(run_map: dict, benchmark_payload: dict) -> str:
+    window_meta = _coerce_mapping(benchmark_payload.get("window_meta", {}) if isinstance(benchmark_payload, dict) else {})
+    target_periods = _safe_int(window_meta.get("target_periods", 0), 0)
+    if target_periods <= 0:
+        target_periods = len(_extract_oos_returns(run_map))
+    assets_checked = _benchmark_asset_count(benchmark_payload)
+
+    if target_periods >= 120 and assets_checked >= 3:
+        return "Moderate-to-Strong"
+    if target_periods >= 60 and assets_checked >= 2:
+        return "Moderate"
+    if target_periods > 0:
+        return "Limited"
+    return "Unavailable"
+
+
+def _render_reliability_sidebar_snapshot(run_map: dict, benchmark_payload: dict) -> None:
+    """Render a compact in-flow sidebar toggle for the full reliability panel.
+
+    By default the full reliability block stays hidden from the main post-run
+    surface. The sidebar button shows or hides it on demand.
+    """
+    window_meta = _coerce_mapping(benchmark_payload.get("window_meta", {}) if isinstance(benchmark_payload, dict) else {})
+    confidence = _reliability_confidence_label(run_map, benchmark_payload)
+    benchmark_status = _benchmark_status_label(benchmark_payload)
+    eval_window = str(window_meta.get("evaluation_window", "—") or "—")
+    visible = bool(st.session_state.get(STEP5_RELIABILITY_VISIBLE_KEY, False))
+
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### Validation")
+        st.caption(
+            f"Confidence: {confidence} · Benchmark check: {benchmark_status}"
+            + (f" · Window: {eval_window}" if eval_window != "—" else "")
+        )
+
+        button_label = "Hide reliability & robustness" if visible else "Show reliability & robustness"
+        if st.button(
+            button_label,
+            key="step5_sidebar_toggle_reliability_and_robustness",
+            use_container_width=True,
+        ):
+            next_visible = not visible
+            st.session_state[STEP5_RELIABILITY_VISIBLE_KEY] = next_visible
+            st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = bool(next_visible)
+            st.rerun()
+
+        st.caption(
+            "Hide this review to keep the Strategy Engine result compact."
+            if visible
+            else "Open the full reliability and robustness review in the main panel."
+        )
+
+def _maybe_scroll_to_reliability_panel() -> None:
+    if not st.session_state.pop(STEP5_SCROLL_TO_RELIABILITY_KEY, False):
+        return
+
+    components.html(
+        f"""
+        <script>
+            const target = window.parent.document.getElementById("{STEP5_RELIABILITY_ANCHOR_ID}");
+            if (target) {{
+                setTimeout(() => target.scrollIntoView({{behavior: "smooth", block: "start"}}), 120);
+            }}
+        </script>
+        """,
+        height=0,
+    )
+
+
 def render_post_run(run_result: dict) -> None:
     """Render the Gold Stable post-run surface.
 
@@ -1948,6 +2054,9 @@ def render_post_run(run_result: dict) -> None:
     panel_shape = run_map.get("panel_shape", None)
     oos_months = len(_extract_oos_returns(run_map))
 
+    bench_df, _, window_meta = _benchmark_context_rows(perf, run_map)
+    benchmark_payload = {"bench_df": bench_df, "window_meta": window_meta}
+    _render_reliability_sidebar_snapshot(run_map, benchmark_payload)
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("CAGR", _pct(_safe_float(perf.get("cagr", 0.0))))
@@ -1968,22 +2077,20 @@ def render_post_run(run_result: dict) -> None:
         st.divider()
         _render_compact_same_period_context(perf, run_map)
 
-    benchmark_payload = {"bench_df": pd.DataFrame(), "window_meta": {}}
-    with st.expander("Benchmark sanity check", expanded=False):
-        st.caption(
-            "Technical sanity check: same-period reference assets, evaluation-window details, and compact methodology. "
-            "The smaller three-row context table already appears in the interpretation expander above."
-        )
-        benchmark_payload = _render_benchmark_context(perf, run_map, inline_details=True)
-
-    with st.expander("Reliability and robustness", expanded=False):
-        render_result_reliability_assessment(run_map, benchmark_payload=benchmark_payload, inline_details=True)
-        render_start_date_robustness_timing_block(run_map)
-        st.info(
-            "These figures come from a historical walk-forward backtest using the selected asset panel. "
-            "They are useful for comparing configurations inside the app, but they are not forecasts or guarantees. "
-            "Results depend on the date range, asset universe, data quality, and engine assumptions."
-        )
+    reliability_visible = bool(st.session_state.get(STEP5_RELIABILITY_VISIBLE_KEY, False))
+    if reliability_visible:
+        st.markdown(f'<div id="{STEP5_RELIABILITY_ANCHOR_ID}"></div>', unsafe_allow_html=True)
+        _maybe_scroll_to_reliability_panel()
+        with st.expander("Reliability and robustness", expanded=True):
+            render_result_reliability_assessment(run_map, benchmark_payload=benchmark_payload, inline_details=True)
+            render_start_date_robustness_timing_block(run_map)
+            st.info(
+                "These figures come from a historical walk-forward backtest using the selected asset panel. "
+                "They are useful for comparing configurations inside the app, but they are not forecasts or guarantees. "
+                "Results depend on the date range, asset universe, data quality, and engine assumptions."
+            )
+    else:
+        st.session_state.pop(STEP5_SCROLL_TO_RELIABILITY_KEY, None)
 
     size_flow_completed = _size_decision_completed_for_current_run(run_map)
     universe_flow_completed = _universe_decision_completed_for_current_run(run_map)
@@ -1993,20 +2100,8 @@ def render_post_run(run_result: dict) -> None:
     st.markdown(f'<div id="{STEP5_IMPROVEMENT_CHECKS_ANCHOR_ID}"></div>', unsafe_allow_html=True)
     _maybe_scroll_to_improvement_checks()
     st.markdown("## Optional improvement checks")
-    st.info(_decision_guide_message(perf, philosophy))
-    st.caption(
-        "Review optional suggestions below. Once a recommendation appears, you can apply it, "
-        "keep the current setup, or continue without the remaining checks."
-    )
 
-    st.info(
-        "The improvement phases below test these kinds of changes with the real engine before showing an Apply button. "
-        "Do not change knobs just because they sound better; compare the rerun-tested metrics."
-    )
-
-    _render_engine_levers_to_try(perf, philosophy, run_map, as_expander=True)
-
-    _render_suggestion_depth_controls()
+    _ensure_suggestion_depth_defaults()
     _render_improvement_phase_row(run_map)
 
     preset_flow_completed = _preset_decision_completed_for_current_run(run_map)
@@ -2029,6 +2124,21 @@ def render_post_run(run_result: dict) -> None:
             _render_engine_tuning_waiting_for_preset()
         else:
             render_auto_opt_improvement(run_map)
+
+    st.info(_decision_guide_message(perf, philosophy))
+    st.caption(
+        "Review the optional suggestion shown above. Once a recommendation appears, you can apply it, "
+        "keep the current setup, or continue without the remaining checks."
+    )
+
+    st.info(
+        "The improvement phases above test these kinds of changes with the real engine before showing an Apply button. "
+        "Do not change knobs just because they sound better; compare the rerun-tested metrics."
+    )
+
+    _render_engine_levers_to_try(perf, philosophy, run_map, as_expander=True)
+
+    _render_suggestion_depth_controls()
 
     st.markdown("---")
     n_oos = _store_projection_bridge_context(run_map)
