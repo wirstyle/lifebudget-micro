@@ -487,23 +487,23 @@ def _technical_metric_bullets(current_philosophy: str) -> list[str]:
     profile = str(current_philosophy or "Balanced").strip().lower()
     if profile == "growth":
         return [
-            "**Sharpe:** test by increasing `weight_shrink`, `lookback_sigma`, `temperature`, and `inertia` so the growth setup becomes less noisy without removing too much upside.",
             "**CAGR:** test by switching `signal_mode` to a more return-sensitive option, decreasing `lookback_mu`, decreasing `temperature`, or enabling `feature_mu_enabled` so stronger return signals can influence selection.",
             "**Volatility:** test by increasing `top_k`, `lookback_sigma`, and `weight_shrink` to broaden selection and smooth risk estimates.",
             "**MaxDD:** test by increasing `top_k`, `inertia`, `weight_shrink`, and `lookback_mu` to reduce concentration and slow unstable reallocations without fully turning defensive.",
+            "**Sharpe:** test by increasing `weight_shrink`, `lookback_sigma`, `temperature`, and `inertia` so the growth setup becomes less noisy without removing too much upside.",
         ]
     if profile in {"defensive", "conservative"}:
         return [
-            "**Sharpe:** test by increasing `lookback_mu` and `weight_shrink`, or switching `signal_mode` to a cleaner/robuster option, so the smoother path still earns enough return per unit of risk.",
             "**CAGR:** test by switching `signal_mode` to a slightly more return-sensitive option, decreasing `lookback_mu`, or enabling `feature_mu_enabled`, but only if the defensive risk profile survives.",
             "**Volatility:** test by increasing `lookback_sigma`, `top_k`, `weight_shrink`, and `inertia` to smooth estimates, broaden allocation, and reduce noisy reallocations.",
             "**MaxDD:** test by increasing `top_k`, `inertia`, `lookback_sigma`, and `weight_shrink` to lower concentration and slow down unstable portfolio changes.",
+            "**Sharpe:** test by increasing `lookback_mu` and `weight_shrink`, or switching `signal_mode` to a cleaner/robuster option, so the smoother path still earns enough return per unit of risk.",
         ]
     return [
-        "**Sharpe:** test by increasing `top_k`, `weight_shrink`, `lookback_sigma`, and `inertia` so volatility or drawdown may fall while CAGR stays close to the current result.",
         "**CAGR:** test by switching `signal_mode` to a more return-sensitive option, decreasing `lookback_mu`, decreasing `temperature`, or enabling `feature_mu_enabled` so stronger return signals can add upside.",
         "**Volatility:** test by increasing `top_k`, `lookback_sigma`, and `weight_shrink` to broaden selection and smooth risk estimates.",
         "**MaxDD:** test by increasing `top_k`, `inertia`, `lookback_mu`, and `weight_shrink` to reduce concentration and slow unstable reallocations.",
+        "**Sharpe:** test by increasing `top_k`, `weight_shrink`, `lookback_sigma`, and `inertia` so volatility or drawdown may fall while CAGR stays close to the current result.",
     ]
 
 

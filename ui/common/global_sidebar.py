@@ -1319,10 +1319,10 @@ def _render_step5_run_status() -> None:
 
     perf = _coerce_mapping(run_map.get("performance_summary", {}))
     st.success("Latest result stored.")
-    st.caption(f"Sharpe: **{_safe_float(perf.get('sharpe', 0.0), 0.0):.2f}**")
     st.caption(f"CAGR: **{_pct(perf.get('cagr', 0.0))}**")
     st.caption(f"Volatility: **{_pct(perf.get('annual_volatility', perf.get('volatility', 0.0)))}**")
     st.caption(f"Max drawdown: **-{100.0 * abs(_safe_float(perf.get('max_drawdown', 0.0), 0.0)):.2f}%**")
+    st.caption(f"Sharpe: **{_safe_float(perf.get('sharpe', 0.0), 0.0):.2f}**")
     periods = _safe_int(perf.get("periods", 0), 0)
     if periods > 0:
         st.caption(f"Test periods: **{periods}**")

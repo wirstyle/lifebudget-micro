@@ -962,34 +962,60 @@ def render_auto_opt_improvement(run_result: dict) -> None:
 
         _render_continue_with_current_result_button(run_map, key="step5_auto_opt_continue_current_result_v1")
 
-        with st.expander("Why this candidate passed", expanded=False):
+        with st.expander("How to decide on this engine-tuning recommendation", expanded=False):
+            st.info(
+                "**Decision guide:** this keeps the same strategy preset, risk style, Step 4 universe and universe size. "
+                "It only adjusts small technical engine knobs. Apply it only if the rerun-tested trade-off feels better overall, "
+                "not because one isolated metric improved."
+            )
+            st.divider()
             st.success("This candidate passed the engine-tuning acceptance gate.")
-            caption = str(best_candidate.get("caption", "") or "")
+
+            if not table.empty:
+                clean_cols = [
+                    "candidate",
+                    "status",
+                    "CAGR",
+                    "Δ CAGR",
+                    "Vol",
+                    "Δ Vol",
+                    "MaxDD",
+                    "Drawdown change",
+                    "Sharpe",
+                    "Δ Sharpe",
+                ]
+                clean_cols = [col for col in clean_cols if col in table.columns]
+                st.dataframe(table[clean_cols], use_container_width=True, hide_index=True)
+
+            caption = str(best_candidate.get("caption", "") or "").strip()
+            gate_reason = str(best_candidate.get("gate_reason", "") or "").strip()
+            rationale_bits = []
             if caption:
-                st.caption(caption)
-            gate_reason = str(best_candidate.get("gate_reason", "") or "")
+                rationale_bits.append(caption.rstrip("."))
             if gate_reason:
-                st.caption(gate_reason)
+                rationale_bits.append(gate_reason.rstrip("."))
+            if rationale_bits:
+                st.write(". ".join(rationale_bits) + ".")
+            else:
+                st.write(
+                    "This tests a small technical variation around the current engine setup. "
+                    "The acceptance gate passed it because the overall trade-off improved without materially worsening Sharpe, drawdown or volatility."
+                )
+
             if best_candidate.get("error"):
                 st.warning(str(best_candidate.get("error")))
+
             technical_patch = _coerce_mapping(best_candidate.get("technical_patch", {}))
             if technical_patch:
-                rows = [{"knob": key, "recommended value": value} for key, value in technical_patch.items()]
+                st.markdown("**Recommended technical settings**")
+                rows = [
+                    {"Technical setting": key, "Recommended value": value}
+                    for key, value in technical_patch.items()
+                ]
                 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            st.caption(
-                f"template={best_candidate.get('strategy_template', '—')} · "
-                f"style={best_candidate.get('style_preset', '—')} · "
-                f"score_delta={_safe_float(best_candidate.get('score_delta'), 0.0):+.3f}"
-            )
 
-    with st.expander("Engine tuning diagnostics", expanded=False):
-        st.caption(
-            f"tested_candidates={len(evaluations)} · elapsed={_safe_float(payload.get('elapsed_sec', 0.0), 0.0):.2f}s · "
-            f"scope={str(payload.get('scope', scope))}"
-        )
-        st.caption("Safe tuning whitelist: " + ", ".join(SAFE_TUNING_FIELDS))
-        if not table.empty:
-            st.dataframe(table, use_container_width=True, hide_index=True)
+    # Advanced engine-tuning diagnostics intentionally stay out of the main decision surface.
+    # Timing/candidate diagnostics are available from the Step 5 run diagnostics area.
 
     if not accepted_items and not tuning_was_skipped:
         if st.button("Continue with current tuning", key="step5_continue_current_auto_opt_v1", use_container_width=True):

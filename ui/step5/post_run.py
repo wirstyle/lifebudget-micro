@@ -975,7 +975,6 @@ def _render_completed_improvement_flow(run_map: dict) -> None:
     st.caption(
         "Change the strategy setup, technical controls, selected universe, or run a new baseline if you want to start a fresh improvement cycle."
     )
-    _render_completed_improvement_timing_summary()
 
 
 def _render_resolved_phase_history(run_map: dict) -> None:
