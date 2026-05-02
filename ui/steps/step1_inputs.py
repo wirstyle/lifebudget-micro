@@ -596,31 +596,16 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
     free_margin = max(margin, 0.0)
     deficit = abs(min(margin, 0.0))
 
-    income_colour = "#f1f5f9"
-    fixed_colour = "#64748b"
-    variable_colour = "#94a3b8"
-    discretionary_colour = "#cbd5e1"
-    free_margin_colour = "#22c55e"
-    deficit_colour = "#ef4444"
-    margin_colour = free_margin_colour if margin >= 0 else deficit_colour
-    margin_label = "Free margin" if margin >= 0 else "Deficit"
-    margin_help = "Money left after spending" if margin >= 0 else "Spending above income"
-
-    total = max(
-        income,
-        fixed + variable + discretionary + free_margin,
-        fixed + variable + discretionary + deficit,
-        1.0,
-    )
+    total = max(income, fixed + variable + discretionary + free_margin, fixed + variable + discretionary + deficit, 1.0)
     segments = [
-        ("Fixed essentials", fixed, fixed_colour),
-        ("Variable essentials", variable, variable_colour),
-        ("Discretionary spending", discretionary, discretionary_colour),
+        ("Fixed", fixed, "#64748b"),
+        ("Variable", variable, "#94a3b8"),
+        ("Discretionary", discretionary, "#cbd5e1"),
     ]
     if free_margin > 0:
-        segments.append(("Free margin", free_margin, free_margin_colour))
+        segments.append(("Free margin", free_margin, "#22c55e"))
     if deficit > 0:
-        segments.append(("Deficit", deficit, deficit_colour))
+        segments.append(("Deficit", deficit, "#ef4444"))
 
     pieces = []
     for label, amount, colour in segments:
@@ -631,36 +616,23 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
             f'<div title="{label}: £{amount:,.0f}/week" style="width:{width:.2f}%; background:{colour}; height:22px;"></div>'
         )
 
-    def _legend_row(colour: str, title: str, detail: str, *, bordered: bool = False) -> str:
-        border = "border:1px solid #cbd5e1;" if bordered else ""
-        return (
-            '<div style="display:flex; align-items:center; gap:0.5rem; font-size:0.82rem; '
-            'color:#334155; line-height:1.35;">'
-            f'<span style="width:0.8rem; height:0.8rem; border-radius:0.22rem; background:{colour}; '
-            f'{border} display:inline-block; flex:0 0 auto;"></span>'
-            f'<span><b>{title}</b> · {detail}</span>'
-            '</div>'
-        )
-
-    legend_rows = [
-        _legend_row(fixed_colour, "Fixed essentials", "regular committed costs"),
-        _legend_row(variable_colour, "Variable essentials", "flexible essential costs"),
-        _legend_row(discretionary_colour, "Discretionary spending", "optional or lifestyle spending", bordered=True),
-        _legend_row(margin_colour, margin_label, margin_help),
-    ]
-
-    html = (
-        '<div style="border:1px solid rgba(49,51,63,0.14); border-radius:14px; padding:0.85rem; '
-        'background:#ffffff; box-shadow:0 1px 6px rgba(0,0,0,0.03);">'
-        f'<div style="display:flex; overflow:hidden; border-radius:999px; height:22px; background:{income_colour}; margin-bottom:0.8rem;">'
-        f'{"".join(pieces)}'
-        '</div>'
-        '<div style="display:flex; flex-direction:column; gap:0.55rem;">'
-        f'{"".join(legend_rows)}'
-        '</div>'
-        '</div>'
+    margin_colour = "#047857" if margin >= 0 else "#b91c1c"
+    st.markdown(
+        f"""
+        <div style="border:1px solid rgba(49,51,63,0.14); border-radius:14px; padding:0.85rem; background:#ffffff; box-shadow:0 1px 6px rgba(0,0,0,0.03);">
+            <div style="display:flex; overflow:hidden; border-radius:999px; height:22px; background:#f1f5f9; margin-bottom:0.65rem;">
+                {''.join(pieces)}
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:0.45rem 0.9rem; font-size:0.84rem; color:#334155;">
+                <span><b>Income:</b> £{income:,.0f}/week</span>
+                <span><b>Spending:</b> £{(fixed + variable + discretionary):,.0f}/week</span>
+                <span><b>Free margin:</b> <span style="color:{margin_colour}; font-weight:700;">£{margin:,.0f}/week</span></span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    st.markdown(html, unsafe_allow_html=True)
+
 
 def _auto_save_current_situation_snapshot() -> None:
     """Persist the current Step 1 estimate without asking for a confirm button."""
