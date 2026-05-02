@@ -1677,7 +1677,9 @@ def _render_step5_diagnostics() -> None:
             next_visible = not reliability_visible
             st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = next_visible
             st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = bool(next_visible)
-            st.rerun()
+            # Do not force an immediate st.rerun() here. Streamlit already reruns
+            # after the button event, and the sidebar renders before the main
+            # Step 5 panel, so post_run.py can consume this flag in the same pass.
 
 
 def _render_step5_sidebar(step: int) -> None:
