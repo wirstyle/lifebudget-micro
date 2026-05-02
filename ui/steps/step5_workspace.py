@@ -1077,6 +1077,18 @@ def render_step_5() -> None:
     gov = dict(gov_state or {})
 
     if has_fresh_stored_result:
+        active_run_map = _coerce_mapping(st.session_state.get("step5_last_run_result", {}))
+        active_cfg_payload = _active_result_config(active_run_map)
+        if active_cfg_payload:
+            cfg_final = dict(active_cfg_payload)
+
+        _sync_post_run_edit_controls_from_active_result(
+            run_map=active_run_map,
+            cfg_payload=cfg_final,
+            current_philosophy=current_philosophy,
+            fallback_signature=current_run_signature,
+        )
+
         active_setup_summary = _build_executed_setup_summary(
             cfg_final=cfg_final,
             asset_panel_df=asset_panel_df,
@@ -1084,63 +1096,46 @@ def render_step_5() -> None:
             simple_cfg=simple_cfg,
         )
 
-        with st.expander("Change or rerun setup", expanded=False):
+        with st.expander("Change setup or run a new test", expanded=False):
             if active_setup_summary:
                 st.markdown(f"**Active result:** {active_setup_summary}.")
             st.caption(
-                "Current setup already run. Open the controls below only if you want to change the preset, sliders, "
-                "or technical settings and run a new portfolio test."
+                "Open this section only if you want to change the setup and run a new portfolio test. "
+                "The metrics below remain tied to the active result shown here until a new run completes."
             )
 
-            setup_controls_visible = bool(st.session_state.get(STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY, False))
-            if not setup_controls_visible:
-                if st.button(
-                    "Edit setup or rerun controls",
-                    key="step5_open_change_or_rerun_controls",
-                    use_container_width=True,
-                ):
-                    st.session_state[STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY] = True
-                    st.rerun()
-                st.caption(
-                    "Keeping these controls closed prevents hidden setup widgets from changing the freshness state of the current result."
-                )
-            else:
-                if st.button(
-                    "Hide setup controls",
-                    key="step5_hide_change_or_rerun_controls",
-                    use_container_width=True,
-                ):
-                    st.session_state[STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY] = False
-                    st.rerun()
+            # Render the editable setup controls directly inside the expander.
+            # They are seeded from the executed/promoted active result above, so
+            # the user can continue refining from the result currently shown.
+            st.session_state[STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY] = True
+            technical_engine_overrides: dict[str, Any] = {}
 
-                technical_engine_overrides: dict[str, Any] = {}
+            def _post_run_technical_footer(simple_cfg_payload: dict) -> None:
+                footer_cfg, _footer_gov = _resolve_cfg_final(simple_cfg_payload, pre_run_advanced_cfg)
+                technical_engine_overrides.clear()
+                technical_engine_overrides.update(_render_technical_engine_overrides(footer_cfg))
 
-                def _post_run_technical_footer(simple_cfg_payload: dict) -> None:
-                    footer_cfg, _footer_gov = _resolve_cfg_final(simple_cfg_payload, pre_run_advanced_cfg)
-                    technical_engine_overrides.clear()
-                    technical_engine_overrides.update(_render_technical_engine_overrides(footer_cfg))
+            simple_cfg = render_simple_mode(
+                use_internal_expanders=False,
+                posture_footer_renderer=_post_run_technical_footer,
+            )
+            cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
+            cfg_final = {**dict(cfg_final or {}), **dict(technical_engine_overrides or {})}
 
-                simple_cfg = render_simple_mode(
-                    use_internal_expanders=False,
-                    posture_footer_renderer=_post_run_technical_footer,
-                )
-                cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
-                cfg_final = {**dict(cfg_final or {}), **dict(technical_engine_overrides or {})}
+            current_signature = _build_step5_input_signature(cfg_final, asset_panel_df)
+            st.session_state["step5_current_input_signature"] = current_signature
+            clear_retired_step5_state()
 
-                current_signature = _build_step5_input_signature(cfg_final, asset_panel_df)
-                st.session_state["step5_current_input_signature"] = current_signature
-                clear_retired_step5_state()
-
-                new_run_result = _render_ready_to_run_section(
-                    cfg_final=cfg_final,
-                    asset_panel_df=asset_panel_df,
-                    current_philosophy=current_philosophy,
-                    simple_cfg=simple_cfg,
-                    pre_run_advanced_cfg=pre_run_advanced_cfg,
-                    governance_status=gov,
-                    bordered=False,
-                    show_detail_expanders=False,
-                )
+            new_run_result = _render_ready_to_run_section(
+                cfg_final=cfg_final,
+                asset_panel_df=asset_panel_df,
+                current_philosophy=current_philosophy,
+                simple_cfg=simple_cfg,
+                pre_run_advanced_cfg=pre_run_advanced_cfg,
+                governance_status=gov,
+                bordered=False,
+                show_detail_expanders=False,
+            )
 
     else:
         st.info(

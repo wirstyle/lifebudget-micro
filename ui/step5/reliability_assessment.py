@@ -992,17 +992,25 @@ def _render_start_date_robustness_actions(run_map: dict) -> None:
     scope = _robustness_scope(run_map, panel_df, cfg_payload)
     saved_scope = str(st.session_state.get(START_DATE_ROBUSTNESS_SCOPE_KEY, "") or "")
     saved_payload = _coerce_mapping(st.session_state.get(START_DATE_ROBUSTNESS_STATE_KEY, {}))
+    has_current_robustness = bool(saved_payload and saved_scope == scope)
 
     if saved_scope != scope and saved_payload:
         st.info("The saved robustness check belongs to a previous result/configuration. Run the check again to update it for the current Strategy Engine result.")
 
+    run_label = "Re-run robustness check" if has_current_robustness else "Run robustness check"
+    run_help = (
+        "Refresh the start-date sensitivity check for this active Strategy Engine result."
+        if has_current_robustness
+        else "Tests the same Strategy Engine setup across alternative historical start dates from the selected market-data panel."
+    )
+
     c1, c2 = st.columns([1.2, 1.0])
     with c1:
         run_clicked = st.button(
-            "Run robustness check",
+            run_label,
             key="step5_run_start_date_robustness",
             use_container_width=True,
-            help="Tests the same Strategy Engine setup across alternative historical start dates from the selected market-data panel.",
+            help=run_help,
         )
     with c2:
         clear_clicked = st.button(
@@ -1013,6 +1021,8 @@ def _render_start_date_robustness_actions(run_map: dict) -> None:
             help="Remove the saved start-date robustness result for this Strategy Engine run.",
         )
 
+    if has_current_robustness:
+        st.caption("Robustness has already been tested for this active result. Re-run only if you want to refresh the sensitivity check.")
     st.caption("The robustness check uses the selected market-data panel already loaded in the app. It does not download new data and it does not predict future returns.")
 
     if clear_clicked:
