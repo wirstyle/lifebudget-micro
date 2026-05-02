@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-"""Step 5 result-reliability assessment.
+"""Strategy Engine result-reliability assessment.
 
-This module adds a lightweight confidence layer for the Step 5 result without
+This module adds a lightweight confidence layer for the Strategy Engine result without
 running extra engines or downloading new data. It deliberately validates what can
 be validated safely:
 - real market-data basis;
@@ -334,14 +334,14 @@ def _walk_forward_status(run_map: dict, benchmark_payload: dict) -> tuple[str, s
 
 def _data_basis_status(run_map: dict) -> tuple[str, str]:
     panel_df = _panel_df()
-    label = str(run_map.get("asset_panel_source_label", st.session_state.get("asset_panel_source_label", "Step 4 panel")) or "Step 4 panel")
+    label = str(run_map.get("asset_panel_source_label", st.session_state.get("asset_panel_source_label", "selected market-data panel")) or "selected market-data panel")
     rows = _safe_int(run_map.get("asset_panel_n_rows", len(panel_df) if isinstance(panel_df, pd.DataFrame) else 0), 0)
     assets = _safe_int(run_map.get("asset_panel_n_assets", panel_df["asset"].nunique() if isinstance(panel_df, pd.DataFrame) and "asset" in panel_df.columns else 0), 0)
     if rows > 0 and assets > 0:
         if "yahoo" in label.lower():
-            return "Strong", f"Uses real historical market-data snapshot returns from the Step 4 {label} panel ({rows:,} rows, {assets} assets). In deployed mode this is a fixed Yahoo-generated cached panel, not a live market-data pull."
-        return "Available", f"Uses the Step 4 market-data snapshot panel ({rows:,} rows, {assets} assets)."
-    return "Unavailable", "The Step 4 market-data panel could not be read for this reliability check."
+            return "Strong", f"Uses real historical returns from the selected market-data panel ({label}; {rows:,} rows, {assets} assets). In deployed mode this is a fixed Yahoo-generated cached panel, not a live market-data pull."
+        return "Available", f"Uses the selected market-data panel ({rows:,} rows, {assets} assets)."
+    return "Unavailable", "The selected market-data panel could not be read for this reliability check."
 
 
 def _same_period_status(benchmark_payload: dict) -> tuple[str, str]:
@@ -442,7 +442,7 @@ def _coerce_cfg_payload(cfg_payload: Any) -> dict:
 
 
 def _base_cfg_payload_from_run(run_map: dict) -> dict:
-    """Resolve the full engine configuration used by the current Step 5 run."""
+    """Resolve the full engine configuration used by the current Strategy Engine run."""
     run_map = _coerce_mapping(run_map)
     for raw in (
         run_map.get("config_dict"),
@@ -635,7 +635,7 @@ def _run_start_date_robustness(run_map: dict) -> dict:
     rows: list[dict] = []
 
     if panel_df.empty:
-        return {"scope": scope, "rows": [], "summary": {"status": "Unavailable", "message": "Step 4 panel is unavailable."}, "elapsed_sec": 0.0}
+        return {"scope": scope, "rows": [], "summary": {"status": "Unavailable", "message": "selected market-data panel is unavailable."}, "elapsed_sec": 0.0}
     if not cfg_payload:
         return {"scope": scope, "rows": [], "summary": {"status": "Unavailable", "message": "Engine configuration is unavailable."}, "elapsed_sec": 0.0}
 
@@ -747,7 +747,7 @@ def _render_start_date_robustness_check(run_map: dict, *, inline_details: bool =
     ctx = st.container() if inline_details else st.expander("Optional start-date robustness check", expanded=False)
     with ctx:
         st.write(
-            "This optional check reruns the same current strategy configuration using different historical start dates from the existing Step 4 panel. "
+            "This optional check reruns the same current strategy configuration using different historical start dates from the existing selected market-data panel. "
             "It checks whether the result depends too heavily on one specific historical window. It does not download new data and it does not predict future returns."
         )
         st.caption(
@@ -771,7 +771,7 @@ def _render_start_date_robustness_check(run_map: dict, *, inline_details: bool =
 
         if run_clicked:
             if panel_df.empty:
-                st.warning("Cannot run robustness check because the Step 4 asset panel is unavailable.")
+                st.warning("Cannot run robustness check because the selected market-data panel is unavailable.")
             elif not cfg_payload:
                 st.warning("Cannot run robustness check because the current engine configuration could not be resolved.")
             else:
@@ -890,7 +890,7 @@ def _robustness_timing_rows(payload: dict) -> list[dict]:
 
 
 def render_start_date_robustness_timing_block(run_map: dict | None = None) -> None:
-    """Render optional start-date robustness timing in Step 5 diagnostics."""
+    """Render optional start-date robustness timing in Strategy Engine diagnostics."""
     payload = _current_start_date_robustness_payload(run_map)
     if not payload:
         return
@@ -912,7 +912,7 @@ def render_start_date_robustness_timing_block(run_map: dict | None = None) -> No
         st.metric("Executed reruns", int(executed_count))
 
     st.caption(
-        "This is the extra time used by the optional Step 5 start-date robustness check. "
+        "This is the extra time used by the optional Strategy Engine start-date robustness check. "
         "It is separate from the main engine run and from the preset / engine-tuning suggestion tests. "
         "The current baseline row is reused, so it is not rerun."
     )
@@ -922,11 +922,8 @@ def render_start_date_robustness_timing_block(run_map: dict | None = None) -> No
             st.caption("Start-date robustness timing breakdown")
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: dict | None = None, inline_details: bool = False) -> None:
-    """Render a lightweight reliability assessment for the current Step 5 result."""
-    run_map = _coerce_mapping(run_map)
-    benchmark_payload = _coerce_mapping(benchmark_payload or {})
-
+def _reliability_component_rows(run_map: dict, benchmark_payload: dict) -> tuple[list[dict[str, str]], str, pd.DataFrame, dict]:
+    """Build the reliability component rows and benchmark-validation payload."""
     validation_df, validation_meta = _benchmark_validation_table(run_map, benchmark_payload)
     data_status, data_meaning = _data_basis_status(run_map)
     walk_status, walk_meaning = _walk_forward_status(run_map, benchmark_payload)
@@ -936,8 +933,9 @@ def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: di
         mean_abs_pp = validation_meta.get("mean_abs_pp")
         max_abs_pp = validation_meta.get("max_abs_pp")
         calc_meaning = (
-            f"Known benchmark assets were recomputed independently from the current panel. "
-            f"Mean metric difference was about {100.0 * _safe_float(mean_abs_pp, 0.0):.2f}pp; max difference was about {100.0 * _safe_float(max_abs_pp, 0.0):.2f}pp."
+            "Known benchmark assets were recomputed independently from the current panel. "
+            f"Mean metric difference was about {100.0 * _safe_float(mean_abs_pp, 0.0):.2f}pp; "
+            f"max difference was about {100.0 * _safe_float(max_abs_pp, 0.0):.2f}pp."
         )
     elif calc_status == "Review":
         calc_meaning = "Known benchmark assets were recomputed, but at least one metric difference deserves review."
@@ -959,30 +957,198 @@ def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: di
         {"Reliability component": "Future guarantee", "Status": future_status, "Meaning": future_meaning},
     ]
     overall = _overall_confidence([row["Status"] for row in components])
+    return components, overall, validation_df, validation_meta
+
+
+def _start_date_robustness_visible_summary(run_map: dict) -> tuple[dict, dict, str, str]:
+    """Return saved robustness payload plus display status/message."""
+    payload = _current_start_date_robustness_payload(run_map)
+    summary = _coerce_mapping(payload.get("summary", {})) if payload else {}
+    status = str(summary.get("status", "Not run yet") or "Not run yet")
+    message = str(summary.get("message", "") or "")
+    return payload, summary, status, message
+
+
+def _render_status_callout(status: str, message: str) -> None:
+    label = f"Start-date robustness: **{status}**"
+    text = f"{label} — {message}" if message else label
+    if status in {"Strong"}:
+        st.success(text)
+    elif status in {"Moderate-to-Strong", "Moderate"}:
+        st.info(text)
+    elif status in {"Sensitive"}:
+        st.warning(text)
+    elif status == "Not run yet":
+        st.caption("Start-date robustness has not been run yet for this result.")
+    else:
+        st.info(text)
+
+
+def _render_start_date_robustness_actions(run_map: dict) -> None:
+    """Render robustness action buttons outside the detailed evidence expander."""
+    run_map = _coerce_mapping(run_map)
+    panel_df = _clean_asset_panel_for_robustness(_panel_df())
+    cfg_payload = _base_cfg_payload_from_run(run_map)
+    scope = _robustness_scope(run_map, panel_df, cfg_payload)
+    saved_scope = str(st.session_state.get(START_DATE_ROBUSTNESS_SCOPE_KEY, "") or "")
+    saved_payload = _coerce_mapping(st.session_state.get(START_DATE_ROBUSTNESS_STATE_KEY, {}))
+
+    if saved_scope != scope and saved_payload:
+        st.info("The saved robustness check belongs to a previous result/configuration. Run the check again to update it for the current Strategy Engine result.")
+
+    c1, c2 = st.columns([1.2, 1.0])
+    with c1:
+        run_clicked = st.button(
+            "Run robustness check",
+            key="step5_run_start_date_robustness",
+            use_container_width=True,
+            help="Tests the same Strategy Engine setup across alternative historical start dates from the selected market-data panel.",
+        )
+    with c2:
+        clear_clicked = st.button(
+            "Clear robustness result",
+            key="step5_clear_start_date_robustness",
+            use_container_width=True,
+            disabled=not bool(saved_payload),
+            help="Remove the saved start-date robustness result for this Strategy Engine run.",
+        )
+
+    st.caption("The robustness check uses the selected market-data panel already loaded in the app. It does not download new data and it does not predict future returns.")
+
+    if clear_clicked:
+        st.session_state[START_DATE_ROBUSTNESS_STATE_KEY] = {}
+        st.session_state[START_DATE_ROBUSTNESS_SCOPE_KEY] = ""
+        st.rerun()
+
+    if run_clicked:
+        if panel_df.empty:
+            st.warning("Cannot run robustness check because the selected market-data panel is unavailable.")
+        elif not cfg_payload:
+            st.warning("Cannot run robustness check because the current engine configuration could not be resolved.")
+        else:
+            with st.spinner("Running start-date robustness check. This may take around 60–90 seconds..."):
+                payload = _run_start_date_robustness(run_map)
+            st.session_state[START_DATE_ROBUSTNESS_STATE_KEY] = dict(payload)
+            st.session_state[START_DATE_ROBUSTNESS_SCOPE_KEY] = str(payload.get("scope", scope) or scope)
+            st.rerun()
+
+
+def _render_start_date_robustness_details(payload: dict) -> None:
+    """Render saved start-date robustness evidence inside the single details expander."""
+    if not payload:
+        st.caption("Start-date robustness has not been run yet. Use the button above to test alternative historical start windows.")
+        return
+
+    summary = _coerce_mapping(payload.get("summary", {}))
+    downside_status = str(summary.get("downside_status", "") or "")
+    return_sensitivity_status = str(summary.get("return_sensitivity_status", "") or "")
+    if downside_status or return_sensitivity_status:
+        st.caption(
+            f"Robustness split: downside robustness={downside_status or '—'} · "
+            f"return sensitivity={return_sensitivity_status or '—'}."
+        )
+
+    elapsed = _safe_float(payload.get("elapsed_sec", 0.0), 0.0)
+    if summary.get("completed_windows"):
+        st.caption(
+            f"CAGR range: {_fmt_pct(summary.get('cagr_min'))} → {_fmt_pct(summary.get('cagr_max'))} · "
+            f"Sharpe range: {_safe_float(summary.get('sharpe_min'), 0.0):.2f} → {_safe_float(summary.get('sharpe_max'), 0.0):.2f} · "
+            f"MaxDD range: -{100.0 * _safe_float(summary.get('maxdd_min'), 0.0):.2f}% → -{100.0 * _safe_float(summary.get('maxdd_max'), 0.0):.2f}% · "
+            f"runtime={elapsed:.2f}s."
+        )
+
+    rows = list(payload.get("rows", []) or [])
+    if rows:
+        display_rows = []
+        for row in rows:
+            row_map = _coerce_mapping(row)
+            display_rows.append(
+                {
+                    "Start date": row_map.get("Start date", "—"),
+                    "Evaluated period": row_map.get("Evaluated period", "—"),
+                    "OOS months": row_map.get("OOS months", 0),
+                    "CAGR": row_map.get("CAGR", "—"),
+                    "Vol": row_map.get("Vol", "—"),
+                    "MaxDD": row_map.get("MaxDD", "—"),
+                    "Sharpe": row_map.get("Sharpe", "—"),
+                    "Reliability read": row_map.get("Reliability read", ""),
+                    "Status": row_map.get("Status", ""),
+                    "Seconds": row_map.get("Seconds", 0.0),
+                }
+            )
+        st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+
+    timing_rows = _robustness_timing_rows(payload)
+    if timing_rows:
+        total_seconds = _safe_float(payload.get("elapsed_sec", 0.0), 0.0)
+        checked_count = int(len(timing_rows))
+        executed_count = int(sum(1 for row in timing_rows if str(row.get("status", "")).lower() == "executed rerun"))
+        st.markdown("**Start-date robustness timing**")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Robustness test", f"{total_seconds:.2f}s" if total_seconds > 0 else "—")
+        with c2:
+            st.metric("Start dates checked", int(checked_count))
+        with c3:
+            st.metric("Executed reruns", int(executed_count))
+        st.dataframe(pd.DataFrame(timing_rows), use_container_width=True, hide_index=True)
+
+    st.caption(
+        "The selected configuration was not only evaluated on one fixed historical start date. "
+        "Alternative historical windows are used as a sensitivity check. Shorter windows should inform interpretation, not automatically invalidate the result."
+    )
+
+
+def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: dict | None = None, inline_details: bool = False) -> None:
+    """Render a compact reliability assessment for the current Strategy Engine result."""
+    run_map = _coerce_mapping(run_map)
+    benchmark_payload = _coerce_mapping(benchmark_payload or {})
+
+    components, overall, validation_df, validation_meta = _reliability_component_rows(run_map, benchmark_payload)
+    robustness_payload, robustness_summary, robustness_status, robustness_message = _start_date_robustness_visible_summary(run_map)
 
     st.markdown("### Result reliability assessment")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("Overall reliability", overall)
+    with c2:
+        st.metric("Start-date robustness", robustness_status)
+
     st.info(
-        f"**Overall confidence: {overall}.** "
-        "This result is based on a real historical market-data snapshot, but the strategy itself is a simulated walk-forward portfolio. "
-        "In deployment, the snapshot is a fixed Yahoo-generated cached panel for reproducibility rather than a live market-data pull. "
-        "It is not the live track record of a real fund and it is not a forecast."
+        f"**Overall confidence: {overall}.** The Strategy Engine result is based on a historical market-data snapshot and a simulated walk-forward portfolio. "
+        "It is useful for comparing configurations inside the app, but it is not a forecast, guarantee, or live fund track record."
     )
 
-    st.dataframe(pd.DataFrame(components), use_container_width=True, hide_index=True)
+    if robustness_payload:
+        _render_status_callout(robustness_status, robustness_message)
+        if robustness_summary:
+            completed = _safe_int(robustness_summary.get("completed_windows", 0), 0)
+            if completed > 0:
+                st.caption(
+                    f"Tested across {completed} valid alternative start windows. "
+                    f"CAGR range {_fmt_pct(robustness_summary.get('cagr_min'))} → {_fmt_pct(robustness_summary.get('cagr_max'))}; "
+                    f"Sharpe range {_safe_float(robustness_summary.get('sharpe_min'), 0.0):.2f} → {_safe_float(robustness_summary.get('sharpe_max'), 0.0):.2f}."
+                )
+    else:
+        st.caption("Start-date robustness has not been run yet. Run it if you want to test whether this result is sensitive to the chosen historical start window.")
 
-    st.markdown("**What is real here?**")
-    st.markdown(
-        "- **Benchmark assets** are real historical market assets from the Step 4 panel.\n"
-        "- **The strategy result** is a walk-forward backtest created from those real asset returns.\n"
-        "- **Step 6 projection** is a future uncertainty simulation based on the historical strategy return series."
-    )
+    _render_start_date_robustness_actions(run_map)
 
-    if inline_details:
+    with st.expander("Detailed evidence and validation", expanded=False):
+        st.markdown("**Reliability components**")
+        st.dataframe(pd.DataFrame(components), use_container_width=True, hide_index=True)
+
+        st.markdown("**What is real here?**")
+        st.markdown(
+            "- **Benchmark assets** are real historical market assets from the selected market-data panel.\n"
+            "- **The Strategy Engine result** is a walk-forward backtest created from those real asset returns.\n"
+            "- **The Long-Term Scenario** is a future uncertainty simulation based on the historical strategy return series."
+        )
+
         st.markdown("**Benchmark calculation validation**")
-    validation_ctx = st.container() if inline_details else st.expander("Benchmark calculation validation", expanded=False)
-    with validation_ctx:
         st.write(
-            "This check compares benchmark metrics shown by the app against an independent recomputation from the same Step 4 panel and the same evaluated period. "
+            "This check compares benchmark metrics shown by the app against an independent recomputation from the same selected market-data panel and the same evaluated period. "
             "It validates the metric calculation pipeline, not future predictive accuracy and not Yahoo data correctness."
         )
         if isinstance(validation_df, pd.DataFrame) and not validation_df.empty:
@@ -994,4 +1160,16 @@ def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: di
         else:
             st.info("Benchmark calculation validation is unavailable for this run.")
 
-    _render_start_date_robustness_check(run_map, inline_details=inline_details)
+        st.markdown("**Start-date robustness details**")
+        st.write(
+            "This check reruns the same Strategy Engine configuration using different historical start dates from the existing selected market-data panel. "
+            "It checks whether the result depends too heavily on one specific historical window."
+        )
+        _render_start_date_robustness_details(robustness_payload)
+
+        st.markdown("**Method notes and limits**")
+        st.info(
+            "These figures come from a historical walk-forward backtest using the selected asset panel. "
+            "They are useful for comparing configurations inside the app, but they are not forecasts or guarantees. "
+            "Results depend on the date range, asset universe, data quality, and engine assumptions."
+        )

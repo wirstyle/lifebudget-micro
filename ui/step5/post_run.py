@@ -46,7 +46,7 @@ from ui.step5.size_recommendations import (
     SIZE_SUGGESTION_TIMING_KEY,
     render_size_improvement,
 )
-from ui.step5.reliability_assessment import render_result_reliability_assessment, render_start_date_robustness_timing_block
+from ui.step5.reliability_assessment import render_result_reliability_assessment
 
 
 
@@ -373,7 +373,40 @@ def _store_projection_bridge_context(run_map: dict) -> int:
 
 
 
+def _engine_timing_detail_rows(run_map: dict) -> list[dict[str, Any]]:
+    """Return low-level engine timing rows for the unified diagnostics expander."""
+    engine_timing = _coerce_mapping(run_map.get("engine_timing", {}))
+    if not engine_timing:
+        return []
+
+    preferred_order = [
+        "prepare_panel",
+        "feature_pair_prep",
+        "walk_forward_loop",
+        "mu_sigma_total",
+        "probabilistic_total",
+        "feature_mu_total",
+        "signal_model_total",
+        "regime_filter_total",
+        "covariance_sigma_total",
+        "weight_build_total",
+        "post_weights_total",
+        "diagnostics_total",
+        "finalize_total",
+        "total_engine",
+    ]
+
+    detail_rows: list[dict[str, Any]] = []
+    for key in preferred_order:
+        if key in engine_timing:
+            value = engine_timing.get(key)
+            if isinstance(value, (int, float)):
+                detail_rows.append({"component": key, "seconds": float(value)})
+    return detail_rows
+
+
 def _render_engine_timing_block(run_map: dict) -> None:
+    """Render the main engine timing summary; detailed rows live in one diagnostics expander below."""
     engine_timing = _coerce_mapping(run_map.get("engine_timing", {}))
     if not engine_timing:
         return
@@ -398,122 +431,220 @@ def _render_engine_timing_block(run_map: dict) -> None:
 
     st.caption(f"Loop iterations={n_loop_iterations}. Timing is diagnostic only and can vary by environment.")
 
-    detail_rows = []
-    preferred_order = [
-        "prepare_panel",
-        "feature_pair_prep",
-        "walk_forward_loop",
-        "mu_sigma_total",
-        "probabilistic_total",
-        "feature_mu_total",
-        "signal_model_total",
-        "regime_filter_total",
-        "covariance_sigma_total",
-        "weight_build_total",
-        "post_weights_total",
-        "diagnostics_total",
-        "finalize_total",
-        "total_engine",
+
+def _candidate_timing_rows(timing: dict) -> list[dict[str, Any]]:
+    """Return clean candidate rows from a suggestion timing payload."""
+    rows = timing.get("candidate_seconds", [])
+    if not isinstance(rows, list):
+        return []
+
+    clean_rows: list[dict[str, Any]] = []
+    for row in rows:
+        row_map = _coerce_mapping(row)
+        clean_rows.append(
+            {
+                "candidate": str(row_map.get("candidate", "Candidate") or "Candidate"),
+                "status": _display_candidate_status(row_map.get("status", "")),
+                "seconds": _safe_float(row_map.get("seconds", 0.0), 0.0),
+            }
+        )
+    return clean_rows
+
+
+def _suggestion_phase_payloads() -> list[dict[str, Any]]:
+    """Return normalized timing payloads for the four optional improvement phases."""
+    raw_items = [
+        {
+            "phase": "Preset",
+            "detail_label": "Preset timing breakdown",
+            "metric_label": "Preset test",
+            "state_key": PRESET_SUGGESTION_TIMING_KEY,
+            "description": "Strategy-preset alternatives tested after the main portfolio run.",
+        },
+        {
+            "phase": "Engine tuning",
+            "detail_label": "Engine tuning timing breakdown",
+            "metric_label": "Tuning test",
+            "state_key": AUTO_OPT_SUGGESTION_TIMING_KEY,
+            "description": "Technical engine-knob alternatives tested around the selected strategy setup.",
+        },
+        {
+            "phase": "Universe mix",
+            "detail_label": "Universe mix timing breakdown",
+            "metric_label": "Universe test",
+            "state_key": UNIVERSE_SUGGESTION_TIMING_KEY,
+            "description": "Same-size asset-composition alternatives tested from the selected market-data panel.",
+        },
+        {
+            "phase": "Universe size",
+            "detail_label": "Universe size timing breakdown",
+            "metric_label": "Size test",
+            "state_key": SIZE_SUGGESTION_TIMING_KEY,
+            "description": "Universe-size alternatives tested after the universe-mix decision was resolved.",
+        },
     ]
 
-    for key in preferred_order:
-        if key in engine_timing:
-            value = engine_timing.get(key)
-            if isinstance(value, (int, float)):
-                detail_rows.append({"component": key, "seconds": float(value)})
+    out: list[dict[str, Any]] = []
+    for item in raw_items:
+        timing = _coerce_mapping(st.session_state.get(item["state_key"], {}))
+        seconds = _safe_float(timing.get("total_seconds", 0.0), 0.0)
+        tested = _safe_int(timing.get("candidate_count", 0), 0)
+        planned = _safe_int(timing.get("planned_candidate_count", tested), tested)
+        accepted = _safe_int(timing.get("accepted_count", 0), 0)
+        if seconds <= 0.0 and tested <= 0 and planned <= 0:
+            continue
+        out.append({**item, "timing": timing, "seconds": seconds, "tested": tested, "planned": planned, "accepted": accepted})
+    return out
 
-    if detail_rows:
-        with st.container(border=True):
-            st.caption("Engine timing breakdown")
-            st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+
+def _render_single_suggestion_timing_detail(payload: dict[str, Any], *, as_expander: bool = True) -> None:
+    """Render one phase timing breakdown, optionally inside its own expander."""
+    timing = _coerce_mapping(payload.get("timing", {}))
+    rows = _candidate_timing_rows(timing)
+    detail_label = str(payload.get("detail_label", "Suggestion timing breakdown"))
+
+    def _body() -> None:
+        st.caption(str(payload.get("description", "")))
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric(str(payload.get("metric_label", "Test")), f"{_safe_float(payload.get('seconds', 0.0), 0.0):.2f}s")
+        with c2:
+            st.metric("Candidates tested", int(_safe_int(payload.get("tested", 0), 0)))
+        with c3:
+            st.metric("Passed gate", int(_safe_int(payload.get("accepted", 0), 0)))
+
+        planned = _safe_int(payload.get("planned", payload.get("tested", 0)), 0)
+        tested = _safe_int(payload.get("tested", 0), 0)
+        if planned and planned != tested:
+            st.caption(f"Planned candidates={planned}; engine-tested candidates={tested}.")
+
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No candidate-level timing rows were stored for this phase.")
+
+    if as_expander:
+        with st.expander(detail_label, expanded=False):
+            _body()
+    else:
+        st.markdown(f"**{detail_label}**")
+        _body()
+
+
+def _render_suggestion_timing_overview() -> None:
+    """Render compact historical suggestion timings with detailed phase rows collapsed."""
+    payloads = _suggestion_phase_payloads()
+    if not payloads:
+        return
+
+    total = sum(max(0.0, _safe_float(item.get("seconds", 0.0), 0.0)) for item in payloads)
+    total_tested = sum(max(0, _safe_int(item.get("tested", 0), 0)) for item in payloads)
+    total_accepted = sum(max(0, _safe_int(item.get("accepted", 0), 0)) for item in payloads)
+
+    st.markdown("### Suggestion timing summary")
+    st.caption(
+        "Historical timing only: these suggestion tests are not re-run after Apply; "
+        "the current result may have been promoted from a previously tested candidate."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Suggestion overhead", f"{total:.2f}s")
+    with c2:
+        st.metric("Candidates tested", int(total_tested))
+    with c3:
+        st.metric("Passed gate", int(total_accepted))
+
+    summary_rows = []
+    for item in payloads:
+        tested = _safe_int(item.get("tested", 0), 0)
+        summary_rows.append(
+            {
+                "phase": str(item.get("phase", "")),
+                "total": f"{_safe_float(item.get('seconds', 0.0), 0.0):.2f}s",
+                "tested": int(tested),
+                "passed gate": int(_safe_int(item.get("accepted", 0), 0)),
+            }
+        )
+
+    if summary_rows:
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+
+def _render_technical_run_metadata_content(meta_parts: list[str], run_timestamp: Any) -> None:
+    """Render raw run metadata inside the unified timing breakdown expander."""
+    if meta_parts:
+        st.caption(" · ".join(str(part) for part in meta_parts if str(part).strip()))
+    if run_timestamp:
+        st.caption(f"run_timestamp={run_timestamp}")
+
+
+def _render_detailed_timing_breakdowns(run_map: dict, meta_parts: list[str], run_timestamp: Any) -> None:
+    """Group all detailed timing/debug tables under one collapsed expander."""
+    engine_rows = _engine_timing_detail_rows(run_map)
+    phase_payloads = _suggestion_phase_payloads()
+    has_metadata = bool(meta_parts or run_timestamp)
+
+    if not engine_rows and not phase_payloads and not has_metadata:
+        return
+
+    with st.expander("Detailed timing breakdowns", expanded=False):
+        if engine_rows:
+            st.markdown("**Engine timing breakdown**")
+            st.caption("Low-level engine timing components. Useful for debugging runtime bottlenecks, not for user-facing performance interpretation.")
+            st.dataframe(pd.DataFrame(engine_rows), use_container_width=True, hide_index=True)
+
+        if phase_payloads:
+            if engine_rows:
+                st.divider()
+            st.markdown("**Suggestion phase breakdowns**")
+            st.caption("Candidate-level timings for the optional improvement checks. Planned candidate counts are shown here only when they differ from the number actually engine-tested.")
+            for idx, payload in enumerate(phase_payloads):
+                if idx > 0:
+                    st.divider()
+                _render_single_suggestion_timing_detail(payload, as_expander=False)
+
+        if has_metadata:
+            if engine_rows or phase_payloads:
+                st.divider()
+            st.markdown("**Technical run metadata**")
+            _render_technical_run_metadata_content(meta_parts, run_timestamp)
 
 
 def _render_preset_suggestion_timing_block() -> None:
-    """Render timing for the automatic preset-suggestion test, if available."""
+    """Backward-compatible wrapper for older call sites."""
     timing = _coerce_mapping(st.session_state.get(PRESET_SUGGESTION_TIMING_KEY, {}))
-    if not timing:
-        return
-
-    total_seconds = _safe_float(timing.get("total_seconds", 0.0), 0.0)
-    candidate_count = _safe_int(timing.get("candidate_count", 0), 0)
-    accepted_count = _safe_int(timing.get("accepted_count", 0), 0)
-    if total_seconds <= 0 and candidate_count <= 0:
-        return
-
-    st.markdown("### Preset suggestion timing")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Preset test", f"{total_seconds:.2f}s")
-    with c2:
-        st.metric("Candidates tested", int(candidate_count))
-    with c3:
-        st.metric("Passed gate", int(accepted_count))
-
-    st.caption(
-        "This is the extra time used by the automatic strategy-preset suggestion test. "
-        "It is separate from the main portfolio engine run shown above."
-    )
-
-    rows = timing.get("candidate_seconds", [])
-    if isinstance(rows, list) and rows:
-        clean_rows = []
-        for row in rows:
-            row_map = _coerce_mapping(row)
-            clean_rows.append(
-                {
-                    "candidate": str(row_map.get("candidate", "Candidate") or "Candidate"),
-                    "status": _display_candidate_status(row_map.get("status", "")),
-                    "seconds": _safe_float(row_map.get("seconds", 0.0), 0.0),
-                }
-            )
-        if clean_rows:
-            with st.container(border=True):
-                st.caption("Preset suggestion timing breakdown")
-                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+    payload = {
+        "phase": "Preset",
+        "detail_label": "Preset timing breakdown",
+        "metric_label": "Preset test",
+        "description": "Strategy-preset alternatives tested after the main portfolio run.",
+        "timing": timing,
+        "seconds": _safe_float(timing.get("total_seconds", 0.0), 0.0),
+        "tested": _safe_int(timing.get("candidate_count", 0), 0),
+        "planned": _safe_int(timing.get("planned_candidate_count", timing.get("candidate_count", 0)), 0),
+        "accepted": _safe_int(timing.get("accepted_count", 0), 0),
+    }
+    if _safe_float(payload["seconds"], 0.0) > 0.0 or _safe_int(payload["tested"], 0) > 0:
+        _render_single_suggestion_timing_detail(payload)
 
 
 def _render_auto_opt_suggestion_timing_block() -> None:
-    """Render timing for the automatic engine-tuning test, if available."""
+    """Backward-compatible wrapper for older call sites."""
     timing = _coerce_mapping(st.session_state.get(AUTO_OPT_SUGGESTION_TIMING_KEY, {}))
-    if not timing:
-        return
-
-    total_seconds = _safe_float(timing.get("total_seconds", 0.0), 0.0)
-    candidate_count = _safe_int(timing.get("candidate_count", 0), 0)
-    accepted_count = _safe_int(timing.get("accepted_count", 0), 0)
-    if total_seconds <= 0 and candidate_count <= 0:
-        return
-
-    st.markdown("### Engine tuning suggestion timing")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Tuning test", f"{total_seconds:.2f}s")
-    with c2:
-        st.metric("Candidates tested", int(candidate_count))
-    with c3:
-        st.metric("Passed gate", int(accepted_count))
-
-    st.caption(
-        "This is the extra time used by the automatic engine-tuning suggestion test. "
-        "It is separate from the main portfolio engine run and the preset suggestion test."
-    )
-
-    rows = timing.get("candidate_seconds", [])
-    if isinstance(rows, list) and rows:
-        clean_rows = []
-        for row in rows:
-            row_map = _coerce_mapping(row)
-            clean_rows.append(
-                {
-                    "candidate": str(row_map.get("candidate", "Candidate") or "Candidate"),
-                    "status": _display_candidate_status(row_map.get("status", "")),
-                    "seconds": _safe_float(row_map.get("seconds", 0.0), 0.0),
-                }
-            )
-        if clean_rows:
-            with st.container(border=True):
-                st.caption("Engine tuning timing breakdown")
-                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+    payload = {
+        "phase": "Engine tuning",
+        "detail_label": "Engine tuning timing breakdown",
+        "metric_label": "Tuning test",
+        "description": "Technical engine-knob alternatives tested around the selected strategy setup.",
+        "timing": timing,
+        "seconds": _safe_float(timing.get("total_seconds", 0.0), 0.0),
+        "tested": _safe_int(timing.get("candidate_count", 0), 0),
+        "planned": _safe_int(timing.get("planned_candidate_count", timing.get("candidate_count", 0)), 0),
+        "accepted": _safe_int(timing.get("accepted_count", 0), 0),
+    }
+    if _safe_float(payload["seconds"], 0.0) > 0.0 or _safe_int(payload["tested"], 0) > 0:
+        _render_single_suggestion_timing_detail(payload)
 
 
 def _clear_auto_opt_suggestion_state() -> None:
@@ -796,92 +927,40 @@ def _render_universe_waiting_for_engine_tuning() -> None:
     return
 
 def _render_universe_suggestion_timing_block() -> None:
+    """Backward-compatible wrapper for older call sites."""
     timing = _coerce_mapping(st.session_state.get(UNIVERSE_SUGGESTION_TIMING_KEY, {}))
-    if not timing:
-        return
-
-    total_seconds = _safe_float(timing.get("total_seconds", 0.0), 0.0)
-    candidate_count = _safe_int(timing.get("candidate_count", 0), 0)
-    accepted_count = _safe_int(timing.get("accepted_count", 0), 0)
-    if total_seconds <= 0 and candidate_count <= 0:
-        return
-
-    st.markdown("### Universe suggestion timing")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Universe test", f"{total_seconds:.2f}s")
-    with c2:
-        st.metric("Candidates tested", int(candidate_count))
-    with c3:
-        st.metric("Passed gate", int(accepted_count))
-
-    st.caption(
-        "This is the extra time used by the automatic universe-mix suggestion. "
-        "It tests only a small number of same-size asset compositions from the selected market-data panel."
-    )
-
-    candidate_rows = timing.get("candidate_seconds", [])
-    if isinstance(candidate_rows, list) and candidate_rows:
-        clean_rows = []
-        for row in candidate_rows:
-            row_map = _coerce_mapping(row)
-            clean_rows.append(
-                {
-                    "candidate": str(row_map.get("candidate", "Candidate") or "Candidate"),
-                    "status": _display_candidate_status(row_map.get("status", "")),
-                    "seconds": _safe_float(row_map.get("seconds", 0.0), 0.0),
-                }
-            )
-        if clean_rows:
-            with st.container(border=True):
-                st.caption("Universe suggestion timing breakdown")
-                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+    payload = {
+        "phase": "Universe mix",
+        "detail_label": "Universe mix timing breakdown",
+        "metric_label": "Universe test",
+        "description": "Same-size asset-composition alternatives tested from the selected market-data panel.",
+        "timing": timing,
+        "seconds": _safe_float(timing.get("total_seconds", 0.0), 0.0),
+        "tested": _safe_int(timing.get("candidate_count", 0), 0),
+        "planned": _safe_int(timing.get("planned_candidate_count", timing.get("candidate_count", 0)), 0),
+        "accepted": _safe_int(timing.get("accepted_count", 0), 0),
+    }
+    if _safe_float(payload["seconds"], 0.0) > 0.0 or _safe_int(payload["tested"], 0) > 0:
+        _render_single_suggestion_timing_detail(payload)
 
 
 def _render_size_suggestion_timing_block() -> None:
+    """Backward-compatible wrapper for older call sites."""
     timing = _coerce_mapping(st.session_state.get(SIZE_SUGGESTION_TIMING_KEY, {}))
-    if not timing:
-        return
-
-    total_seconds = _safe_float(timing.get("total_seconds", 0.0), 0.0)
-    candidate_count = _safe_int(timing.get("candidate_count", 0), 0)
-    planned_count = _safe_int(timing.get("planned_candidate_count", candidate_count), candidate_count)
-    accepted_count = _safe_int(timing.get("accepted_count", 0), 0)
-    if total_seconds <= 0 and planned_count <= 0:
-        return
-
-    st.markdown("### Universe size suggestion timing")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("Size test", f"{total_seconds:.2f}s")
-    with c2:
-        st.metric("Engine-tested sizes", int(candidate_count))
-    with c3:
-        st.metric("Planned sizes", int(planned_count))
-    with c4:
-        st.metric("Passed gate", int(accepted_count))
-
-    st.caption(
-        "This is the extra time used by the automatic universe-size suggestion. "
-        "It tests coarse/refinement sizes after the universe-mix decision has been resolved."
-    )
-
-    candidate_rows = timing.get("candidate_seconds", [])
-    if isinstance(candidate_rows, list) and candidate_rows:
-        clean_rows = []
-        for row in candidate_rows:
-            row_map = _coerce_mapping(row)
-            clean_rows.append(
-                {
-                    "candidate": str(row_map.get("candidate", "Candidate") or "Candidate"),
-                    "status": _display_candidate_status(row_map.get("status", "")),
-                    "seconds": _safe_float(row_map.get("seconds", 0.0), 0.0),
-                }
-            )
-        if clean_rows:
-            with st.container(border=True):
-                st.caption("Universe size suggestion timing breakdown")
-                st.dataframe(pd.DataFrame(clean_rows), use_container_width=True, hide_index=True)
+    payload = {
+        "phase": "Universe size",
+        "detail_label": "Universe size timing breakdown",
+        "metric_label": "Size test",
+        "description": "Universe-size alternatives tested after the universe-mix decision was resolved.",
+        "timing": timing,
+        "seconds": _safe_float(timing.get("total_seconds", 0.0), 0.0),
+        "tested": _safe_int(timing.get("candidate_count", 0), 0),
+        "planned": _safe_int(timing.get("planned_candidate_count", timing.get("candidate_count", 0)), 0),
+        "accepted": _safe_int(timing.get("accepted_count", 0), 0),
+    }
+    planned = _safe_int(payload.get("planned", 0), 0)
+    if _safe_float(payload["seconds"], 0.0) > 0.0 or _safe_int(payload["tested"], 0) > 0 or planned > 0:
+        _render_single_suggestion_timing_detail(payload)
 
 
 def _render_completed_improvement_timing_summary() -> None:
@@ -2121,12 +2200,6 @@ def render_post_run(run_result: dict) -> None:
                 st.rerun()
 
             render_result_reliability_assessment(run_map, benchmark_payload=benchmark_payload, inline_details=True)
-            render_start_date_robustness_timing_block(run_map)
-            st.info(
-                "These figures come from a historical walk-forward backtest using the selected asset panel. "
-                "They are useful for comparing configurations inside the app, but they are not forecasts or guarantees. "
-                "Results depend on the date range, asset universe, data quality, and engine assumptions."
-            )
     else:
         st.session_state.pop(STEP5_SCROLL_TO_RELIABILITY_KEY, None)
 
@@ -2168,19 +2241,10 @@ def render_post_run(run_result: dict) -> None:
                 meta_parts.append(f"config_fp={config_fingerprint}")
             if panel_shape:
                 meta_parts.append(f"panel_shape={panel_shape}")
-            st.caption(" · ".join(meta_parts))
-            if run_timestamp:
-                st.caption(f"run_timestamp={run_timestamp}")
+
             _render_engine_timing_block(run_map)
-            if size_flow_completed:
-                st.caption(
-                    "Suggestion timing below is historical for the completed improvement flow. "
-                    "It is not re-run after Apply; the current result was promoted from the previously tested candidate."
-                )
-            _render_preset_suggestion_timing_block()
-            _render_auto_opt_suggestion_timing_block()
-            _render_universe_suggestion_timing_block()
-            _render_size_suggestion_timing_block()
+            _render_suggestion_timing_overview()
+            _render_detailed_timing_breakdowns(run_map, meta_parts, run_timestamp)
             _render_feature_mu_block(run_map)
     else:
         st.session_state.pop(STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY, None)
