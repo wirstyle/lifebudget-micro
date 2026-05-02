@@ -187,6 +187,14 @@ def _sync_step3_assumption_controls(snapshot: dict) -> dict:
     st.session_state[STEP2_PLANNING_HORIZON_WEEKS] = current_horizon
     st.session_state["step3_stress_preset"] = current_stress
 
+    # Seed widget-backed state before rendering widgets. Avoid also passing
+    # value/index defaults for these same keys, otherwise hosted Streamlit may
+    # display a warning about Session State + widget defaults.
+    current_uncertainty_display_seed = _UNCERTAINTY_LABELS.get(current_uncertainty, current_uncertainty)
+    display_options_seed = [_UNCERTAINTY_LABELS.get(option, option) for option in UNCERTAINTY_OPTIONS]
+    if st.session_state.get("step3_uncertainty_display") not in display_options_seed:
+        st.session_state["step3_uncertainty_display"] = current_uncertainty_display_seed
+
     with st.expander("Scenario assumptions (optional)", expanded=False):
         st.caption(
             "These controls affect the short-term feasibility test shown in this step. "
@@ -198,7 +206,6 @@ def _sync_step3_assumption_controls(snapshot: dict) -> dict:
                 "Short-term horizon (weeks)",
                 min_value=4,
                 max_value=52,
-                value=current_horizon,
                 step=1,
                 key=STEP2_PLANNING_HORIZON_WEEKS,
                 help="How many weeks ahead this short-term feasibility view should test.",
@@ -210,7 +217,6 @@ def _sync_step3_assumption_controls(snapshot: dict) -> dict:
         selected_uncertainty_display = st.selectbox(
             "Scenario stress level",
             uncertainty_display_options,
-            index=uncertainty_display_options.index(current_uncertainty_display),
             key="step3_uncertainty_display",
             help="Controls how cautious the short-term planning assumptions should feel.",
         )
@@ -220,7 +226,6 @@ def _sync_step3_assumption_controls(snapshot: dict) -> dict:
         selected_stress = st.selectbox(
             "Life event stress test",
             _STRESS_PRESET_OPTIONS,
-            index=_STRESS_PRESET_OPTIONS.index(current_stress),
             key="step3_stress_preset",
             help="Applies a simple one-off cost scenario without asking you to fill in a spreadsheet.",
         )

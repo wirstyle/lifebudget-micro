@@ -1457,6 +1457,24 @@ def _render_advanced_assumptions_and_diagnostics(snapshot: dict, values: dict[st
         "Stress test": "Tests whether the plan still works under tougher short-term conditions.",
     }
 
+    # Seed widget-backed state before rendering widgets, then do not also pass
+    # Streamlit a default value/index for the same keys. This avoids the hosted
+    # warning: "widget ... was created with a default value but also had its
+    # value set via the Session State API".
+    try:
+        current_horizon = int(st.session_state.get(STEP2_PLANNING_HORIZON_WEEKS, 12) or 12)
+    except Exception:
+        current_horizon = 12
+    st.session_state[STEP2_PLANNING_HORIZON_WEEKS] = max(4, min(52, current_horizon))
+
+    current_uncertainty = str(st.session_state.get(STEP2_UNCERTAINTY_PRESET, UNCERTAINTY_OPTIONS[0]) or UNCERTAINTY_OPTIONS[0])
+    if current_uncertainty not in UNCERTAINTY_OPTIONS:
+        current_uncertainty = UNCERTAINTY_OPTIONS[0]
+    st.session_state[STEP2_UNCERTAINTY_PRESET] = current_uncertainty
+
+    current_stress = _normalize_life_event_stress_preset(st.session_state.get("step3_stress_preset", "None"))
+    st.session_state["step3_stress_preset"] = current_stress
+
     with st.expander("Optional stress-test settings", expanded=False):
         st.caption("Use these controls only to test a different short-term horizon, uncertainty level, or one-off life event.")
 
@@ -1466,28 +1484,20 @@ def _render_advanced_assumptions_and_diagnostics(snapshot: dict, values: dict[st
                 "Short-term horizon (weeks)",
                 min_value=4,
                 max_value=52,
-                value=int(st.session_state.get(STEP2_PLANNING_HORIZON_WEEKS, 12) or 12),
                 step=1,
                 key=STEP2_PLANNING_HORIZON_WEEKS,
             )
         with c2:
-            current_uncertainty = str(st.session_state.get(STEP2_UNCERTAINTY_PRESET, UNCERTAINTY_OPTIONS[0]) or UNCERTAINTY_OPTIONS[0])
-            if current_uncertainty not in UNCERTAINTY_OPTIONS:
-                current_uncertainty = UNCERTAINTY_OPTIONS[0]
             selected_uncertainty = st.selectbox(
                 "Stress level",
                 UNCERTAINTY_OPTIONS,
-                index=UNCERTAINTY_OPTIONS.index(current_uncertainty),
                 key=STEP2_UNCERTAINTY_PRESET,
             )
             st.caption(stress_level_help.get(str(selected_uncertainty), stress_level_help["Quick estimate (default)"]))
         with c3:
-            current_stress = _normalize_life_event_stress_preset(st.session_state.get("step3_stress_preset", "None"))
-            st.session_state["step3_stress_preset"] = current_stress
             st.selectbox(
                 "Life event stress test",
                 _STRESS_PRESET_OPTIONS,
-                index=_STRESS_PRESET_OPTIONS.index(current_stress),
                 key="step3_stress_preset",
                 help="Applies a one-off cost around the middle of the selected horizon. It is not averaged across all weeks.",
             )
