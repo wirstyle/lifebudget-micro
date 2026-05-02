@@ -378,7 +378,7 @@ def _personal_finance_next_step_from_pathway() -> tuple[str, int]:
         return "Continue to Long-Term Scenarios", 6
     if pathway == "savings_plus_investing":
         return "Continue to Investment Lab", 4
-    return "Build comparison branch", 4
+    return "Continue to Risk Profile and Asset Universe →", 4
 
 
 
@@ -596,16 +596,26 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
     free_margin = max(margin, 0.0)
     deficit = abs(min(margin, 0.0))
 
+    income_colour = "#f1f5f9"
+    fixed_colour = "#64748b"
+    variable_colour = "#94a3b8"
+    discretionary_colour = "#cbd5e1"
+    free_margin_colour = "#22c55e"
+    deficit_colour = "#ef4444"
+    margin_colour = free_margin_colour if margin >= 0 else deficit_colour
+    margin_label = "Free margin" if margin >= 0 else "Deficit"
+    margin_help = "Money left after spending" if margin >= 0 else "Spending above income"
+
     total = max(income, fixed + variable + discretionary + free_margin, fixed + variable + discretionary + deficit, 1.0)
     segments = [
-        ("Fixed", fixed, "#64748b"),
-        ("Variable", variable, "#94a3b8"),
-        ("Discretionary", discretionary, "#cbd5e1"),
+        ("Fixed essentials", fixed, fixed_colour),
+        ("Variable essentials", variable, variable_colour),
+        ("Discretionary", discretionary, discretionary_colour),
     ]
     if free_margin > 0:
-        segments.append(("Free margin", free_margin, "#22c55e"))
+        segments.append(("Free margin", free_margin, free_margin_colour))
     if deficit > 0:
-        segments.append(("Deficit", deficit, "#ef4444"))
+        segments.append(("Deficit", deficit, deficit_colour))
 
     pieces = []
     for label, amount, colour in segments:
@@ -616,23 +626,49 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
             f'<div title="{label}: £{amount:,.0f}/week" style="width:{width:.2f}%; background:{colour}; height:22px;"></div>'
         )
 
-    margin_colour = "#047857" if margin >= 0 else "#b91c1c"
+    legend_items = [
+        f"""
+        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
+            <span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; background:{income_colour}; border:1px solid #cbd5e1; display:inline-block;"></span>
+            <span><b>Income capacity</b> · total weekly budget background</span>
+        </span>
+        """,
+        f"""
+        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
+            <span style="display:inline-flex; gap:0.12rem;">
+                <span style="width:0.56rem; height:0.74rem; border-radius:0.22rem 0 0 0.22rem; background:{fixed_colour}; display:inline-block;"></span>
+                <span style="width:0.56rem; height:0.74rem; border-radius:0 0.22rem 0.22rem 0; background:{variable_colour}; display:inline-block;"></span>
+            </span>
+            <span><b>Essentials</b> · fixed + variable essentials</span>
+        </span>
+        """,
+        f"""
+        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
+            <span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; background:{discretionary_colour}; border:1px solid #cbd5e1; display:inline-block;"></span>
+            <span><b>Discretionary</b> · flexible spending</span>
+        </span>
+        """,
+        f"""
+        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
+            <span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; background:{margin_colour}; display:inline-block;"></span>
+            <span><b>{margin_label}</b> · {margin_help}</span>
+        </span>
+        """,
+    ]
+
     st.markdown(
         f"""
         <div style="border:1px solid rgba(49,51,63,0.14); border-radius:14px; padding:0.85rem; background:#ffffff; box-shadow:0 1px 6px rgba(0,0,0,0.03);">
-            <div style="display:flex; overflow:hidden; border-radius:999px; height:22px; background:#f1f5f9; margin-bottom:0.65rem;">
+            <div style="display:flex; overflow:hidden; border-radius:999px; height:22px; background:{income_colour}; margin-bottom:0.65rem;">
                 {''.join(pieces)}
             </div>
-            <div style="display:flex; flex-wrap:wrap; gap:0.45rem 0.9rem; font-size:0.84rem; color:#334155;">
-                <span><b>Income:</b> £{income:,.0f}/week</span>
-                <span><b>Spending:</b> £{(fixed + variable + discretionary):,.0f}/week</span>
-                <span><b>Free margin:</b> <span style="color:{margin_colour}; font-weight:700;">£{margin:,.0f}/week</span></span>
+            <div style="display:flex; flex-wrap:wrap; gap:0.45rem 0.9rem; font-size:0.82rem; color:#334155; line-height:1.35;">
+                {''.join(legend_items)}
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
 
 def _auto_save_current_situation_snapshot() -> None:
     """Persist the current Step 1 estimate without asking for a confirm button."""
@@ -1436,8 +1472,14 @@ def _render_feasibility_chart_card(snapshot: dict, *, target_weekly: float) -> N
     with st.container(border=True):
         st.markdown("### Short-term path chart")
         st.caption(
-            "Baseline vs target plan over the selected short-term horizon. "
-            "The shaded band shows the 10–90% uncertainty range."
+            "This chart simulates your short-term cash-flow path under variable weekly spending. "
+            "Groceries, bills, discretionary spending and other flexible costs can move around your estimate, "
+            "so the app runs repeated scenarios rather than assuming every week is identical."
+        )
+        st.info(
+            "**How to read this:** the orange line shows the expected target-plan path. "
+            "The shaded band shows the 10–90% simulation range — normal worse/better cases, not absolute worst/best cases. "
+            "A wider band means the plan has less certainty or less spare room."
         )
         if shock_amount > 0.0 and shock_week > 0:
             st.caption(f"Life-event stress is modelled as a one-off £{shock_amount:,.0f} cost around week {shock_week}.")
@@ -1537,7 +1579,8 @@ def render_personal_finance_planner() -> None:
 
     st.info(
         "**Why this matters:** your weekly free margin becomes the contribution bridge used later by the investment "
-        "and long-term scenario modules. Rough numbers are enough for the demo; exact editing remains optional."
+        "and long-term scenario modules. The feasibility chart also stress-tests this plan with simple Monte Carlo "
+        "variation, so it can show whether the plan still works when flexible weekly costs move around."
     )
 
     # 1) Budget estimate full-width card.
