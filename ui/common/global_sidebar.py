@@ -1067,16 +1067,45 @@ def _render_home_sidebar_minimal() -> None:
 
 def _render_personal_finance_terms() -> None:
     with st.expander("Personal finance terms", expanded=False):
+        st.markdown("**Budget estimate**")
+        st.caption("A quick weekly view of income, spending and free margin. It is a planning baseline, not an exact bank statement.")
+
+        st.markdown("**Income**")
+        st.caption("Money coming in before weekly spending is subtracted. It can be estimated quickly or edited more exactly in detailed controls.")
+
+        st.markdown("**Essentials**")
+        st.caption("Necessary spending such as fixed bills and variable essentials. These are separated from flexible spending so pressure is easier to see.")
+
+        st.markdown("**Discretionary spending**")
+        st.caption("Flexible spending that can sometimes be reduced. The model treats this as the first place to test savings capacity.")
+
         st.markdown("**Free margin**")
-        st.caption("Estimated money left after essential and discretionary weekly spending.")
+        st.caption("Estimated money left after essential and discretionary weekly spending. This is the source of the savings/contribution bridge.")
+
         st.markdown("**Savings target**")
-        st.caption("Weekly amount tested against the current cash-flow estimate.")
-        st.markdown("**Feasibility**")
-        st.caption("Short-term stress check, not a guarantee that real spending will match the scenario.")
+        st.caption("Weekly amount tested against the current cash-flow estimate. It becomes the contribution assumption for later modules.")
+
+        st.markdown("**Cautious / Balanced / Stretch**")
+        st.caption("Preset target levels. Cautious uses less free margin, Balanced uses a middle share, and Stretch tests a more demanding savings habit.")
+
+        st.markdown("**Feasibility check**")
+        st.caption("Short-term stress check showing whether the savings target still looks workable under uncertainty. It is not a guarantee.")
+
+        st.markdown("**Conservative / Expected / High case**")
+        st.caption("Three short-term outcomes from the feasibility model: lower, central and higher cases for the selected horizon.")
+
+        st.markdown("**Short-term path chart**")
+        st.caption("Compares the baseline path with the savings-target path over the selected short-term horizon.")
+
+        st.markdown("**Uncertainty band**")
+        st.caption("The shaded 10–90% range around the target plan. Wider bands mean the short-term path is more sensitive to spending variability.")
+
+        st.markdown("**Life event stress test**")
+        st.caption("Optional one-off cost added to the short-term plan. It helps test whether the target leaves room for surprises.")
 
 
 def _render_personal_finance_q_and_a() -> None:
-    """Render a tiny onboarding Q&A for the Personal Finance module.
+    """Render a compact onboarding Q&A for the Personal Finance module.
 
     Keep this lightweight. The main screen owns the controls; the sidebar only
     explains how to use them and why the values matter downstream.
@@ -1087,15 +1116,37 @@ def _render_personal_finance_q_and_a() -> None:
             "No. This is a planning baseline for the prototype. Rough weekly estimates "
             "are enough for testing the flow; exact editing remains optional."
         )
+
         st.markdown("**Why does this screen use weekly values?**")
         st.caption(
-            "Weekly numbers make income, spending, free margin, and savings target easier "
+            "Weekly numbers make income, spending, free margin and savings target easier "
             "to compare on the same scale."
         )
+
+        st.markdown("**What is free margin?**")
+        st.caption(
+            "Free margin is the estimated weekly money left after spending. It is the amount the app uses to test whether a savings target is realistic."
+        )
+
+        st.markdown("**Why split essentials and discretionary spending?**")
+        st.caption(
+            "Essentials show the harder-to-change spending base. Discretionary spending shows the flexible part that may absorb savings targets or stress events."
+        )
+
+        st.markdown("**What does the feasibility check test?**")
+        st.caption(
+            "It tests whether the selected savings target still looks workable over the short-term horizon after uncertainty is applied."
+        )
+
+        st.markdown("**What do the stress-test controls change?**")
+        st.caption(
+            "They adjust the short-term horizon, uncertainty level and optional one-off life-event cost. They do not change investment results directly."
+        )
+
         st.markdown("**Why does this affect investing later?**")
         st.caption(
             "The savings target becomes the contribution bridge used by the investment "
-            "and long-term scenario modules."
+            "and Long-Term Scenario modules."
         )
 
 
@@ -2028,18 +2079,18 @@ def _step7_horizon_label() -> str:
     if not isinstance(compare_horizons, list):
         compare_horizons = []
 
-    bits: list[str] = []
+    labels: list[str] = []
     if current_horizon > 0:
-        bits.append(f"{current_horizon}y current")
+        labels.append(f"current {current_horizon}y")
     for horizon in compare_horizons:
         try:
             horizon_int = int(horizon)
         except Exception:
             continue
-        if horizon_int > 0:
-            bits.append(f"{horizon_int}y")
+        if horizon_int > 0 and horizon_int != current_horizon:
+            labels.append(f"{horizon_int}y")
 
-    deduped = list(dict.fromkeys(bits))
+    deduped = list(dict.fromkeys(labels))
     return " + ".join(deduped) if deduped else "available from Long-Term Scenario"
 
 
@@ -2063,6 +2114,9 @@ def _render_step7_current_report() -> None:
         st.success("Final report available.")
     else:
         st.warning("Generate the Long-Term Scenario first.")
+    st.caption(
+        "Summarises the selected plan, return path, and Long-Term Scenario comparison for decision support."
+    )
 
     bridge = _step4_funding_bridge_summary()
     monthly = _safe_float(bridge.get("monthly", 0.0), 0.0)
@@ -2078,7 +2132,7 @@ def _render_step7_current_report() -> None:
 
 
 def _render_step7_readiness() -> None:
-    with st.expander("Report readiness", expanded=False):
+    with st.expander("Report inputs", expanded=False):
         snapshot = _planning_snapshot()
         finance_summary = _personal_finance_sidebar_summary()
         finance_ready = bool(snapshot) or bool(finance_summary.get("has_any_values", False))
@@ -2149,7 +2203,7 @@ def _render_step7_shortcuts() -> None:
 
 
 def _render_step7_report_diagnostics() -> None:
-    with st.expander("Report diagnostics", expanded=False):
+    with st.expander("Technical diagnostics", expanded=False):
         st.markdown("**Projection source**")
         st.caption(f"return_path={_step7_return_path_label()}")
         st.caption(f"horizons={_step7_horizon_label()}")
@@ -2165,13 +2219,14 @@ def _render_step7_report_diagnostics() -> None:
         panel_meta = _asset_panel_summary()
         if panel_meta:
             st.divider()
-            st.markdown("**Market-data panel**")
+            st.markdown("**Selected market-data panel**")
             st.caption(
-                f"source={panel_meta.get('source', 'Step 4 panel')} · "
+                f"source={panel_meta.get('source', 'selected market-data panel')} · "
                 f"assets={panel_meta.get('assets', 0)} · rows={panel_meta.get('rows', 0)}"
             )
 
         run_map = _latest_run_result()
+        technical_ids: list[str] = []
         if run_map:
             st.divider()
             st.markdown("**Last Strategy Engine run**")
@@ -2184,9 +2239,15 @@ def _render_step7_report_diagnostics() -> None:
             run_sig = str(run_map.get("run_signature", "") or "")
             cfg_fp = str(run_map.get("config_fingerprint", "") or "")
             if run_sig:
-                st.caption(f"run_signature={run_sig}")
+                technical_ids.append(f"run_signature={run_sig}")
             if cfg_fp:
-                st.caption(f"config_fp={cfg_fp}")
+                technical_ids.append(f"config_fp={cfg_fp}")
+
+        if technical_ids:
+            st.divider()
+            st.markdown("**Technical IDs**")
+            for item in technical_ids:
+                st.caption(item)
 
         if not compare_payload and not panel_meta and not run_map:
             st.caption("Diagnostics populate after the scenario, market panel, or engine result exists.")
@@ -2196,29 +2257,23 @@ def _render_step7_report_help() -> None:
     with st.expander("Report Q&A & terms", expanded=False):
         st.markdown("**What is this report for?**")
         st.caption(
-            "It summarises the Long-Term Scenario output and frames the trade-off between savings-only planning, "
-            "educational proxy assumptions, and tested Strategy Engine paths when available."
+            "It summarises the selected plan, tested/proxy return path, and Long-Term Scenario comparison."
         )
 
         st.markdown("**Savings-only baseline**")
-        st.caption("The same contribution path with no investment return, volatility, drawdown or market risk.")
+        st.caption("Same contribution path, but no investment return, volatility, drawdown or market risk.")
 
         st.markdown("**Educational proxy**")
-        st.caption(
-            "A labelled assumption used before Strategy Engine has produced a tested return path. It supports the report flow, "
-            "but should not be read as backtest evidence."
-        )
+        st.caption("A labelled fallback used before a tested Strategy Engine path exists. It is not backtest evidence.")
 
         st.markdown("**Tested Strategy Engine path**")
-        st.caption("A historical out-of-sample return path generated by the Strategy Engine from the selected universe and configuration.")
+        st.caption("A historical out-of-sample return path generated from the selected universe and engine configuration.")
 
         st.markdown("**Scenario ranges**")
         st.caption("P10 / median / P90 are modelled ranges under assumptions, not promised future outcomes.")
 
         st.markdown("**Goal probability and loss vs contributions**")
-        st.caption(
-            "Goal probability checks whether simulated paths reach the selected goal. Loss vs contributions checks whether terminal value ends below total contributions."
-        )
+        st.caption("Goal probability checks whether paths reach the selected goal; loss vs contributions checks whether terminal value falls below total contributions.")
 
 
 def _render_step7_sidebar(step: int) -> None:

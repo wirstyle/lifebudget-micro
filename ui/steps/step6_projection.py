@@ -2518,6 +2518,21 @@ def render_step_6() -> None:
         "Results are scenario ranges, not promised outcomes; past performance or proxy assumptions are not reliable indicators of future results."
     )
 
+    with st.expander("Why compare savings-only with long-term investing?", expanded=False):
+        st.markdown(
+            "Savings-only planning is the stability baseline: it is simple, liquid and avoids market drawdowns, "
+            "but its growth is limited to what the user can contribute. Over long horizons, inflation, large life goals "
+            "and retirement needs can reduce the purchasing power of cash savings."
+        )
+        st.markdown(
+            "The investment/proxy path is not presented as a guaranteed better choice. It shows how a disciplined long-term "
+            "strategy could change the range of outcomes if the user can tolerate uncertainty, temporary losses and model risk."
+        )
+        st.caption(
+            "Use this comparison to understand trade-offs: cash-flow stability first, then long-term scenario testing. "
+            "The app does not recommend investing and does not predict future returns."
+        )
+
     contribution = _resolve_projection_contribution(prefer_plan=False)
     _sync_projection_contribution_state(contribution)
 

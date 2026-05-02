@@ -1519,7 +1519,7 @@ def render_personal_finance_planner() -> None:
     if success_message:
         show_toast_or_success(success_message, icon="✅", fallback_level="success")
 
-    st.markdown("# Personal Finance Setup")
+    st.markdown("## Personal Finance Setup")
     st.caption("Set a quick weekly baseline, choose a savings target, and check short-term feasibility.")
 
     st.info(
@@ -1575,10 +1575,7 @@ def render_personal_finance_planner() -> None:
             st.session_state["current_step"] = 0
             st.rerun()
     with right_nav:
-        next_button_label = str(button_label or "Continue").strip()
-        if not next_button_label.endswith("→"):
-            next_button_label = f"{next_button_label} →"
-        if st.button(next_button_label, key="personal_finance_continue_next_module", use_container_width=True, disabled=not can_continue):
+        if st.button(button_label, key="personal_finance_continue_next_module", use_container_width=True, disabled=not can_continue):
             _auto_save_current_situation_snapshot()
             st.session_state[CURRENT_STEP] = int(next_step)
             st.session_state["current_step"] = int(next_step)

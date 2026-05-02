@@ -555,7 +555,7 @@ def _render_engine_metrics(engine: Dict[str, Any]) -> tuple[float, float, float]
 def _render_proxy_evidence_note(*, compare: bool = False) -> None:
     if _engine_result_is_real():
         st.success(
-            "Evidence level: **tested Strategy Engine result** interpreted through the long-term Long-Term Scenario."
+            "Evidence level: **tested Strategy Engine result** interpreted through the Long-Term Scenario."
         )
         return
 
@@ -636,7 +636,7 @@ def _render_report_summary(
         cagr = _safe_float(engine.get("cagr", 0.0))
         dd_abs = abs(_safe_float(engine.get("max_drawdown", 0.0)))
         text = (
-            f"This report interprets a tested Strategy Engine result through the long-term Long-Term Scenario. "
+            f"This report interprets a tested Strategy Engine result through the Long-Term Scenario. "
             f"The strategy snapshot shows Sharpe **{sharpe:.2f}**, CAGR near **{_fmt_pct_from_fraction(cagr)}**, "
             f"and drawdown severity near **{_fmt_pct_from_fraction(dd_abs)}**. The modelled median terminal value is "
             f"**{_fmt_gbp0(median)}**, with a scenario range from **{_fmt_gbp0(p10)}** to **{_fmt_gbp0(p90)}**. "
@@ -650,6 +650,31 @@ def _render_report_summary(
             "Use this as an interface and scenario demonstration until the Investment Strategy Lab creates a tested strategy return path."
         )
         insight_card("Report summary", text, level="warning")
+
+
+def _render_long_term_planning_context(*, compare: bool = False) -> None:
+    """Explain the educational planning idea behind the final report.
+
+    This is deliberately framed as scenario analysis, not advice. It connects
+    savings capacity, inflation/purchasing-power risk, retirement planning and
+    long-term investing without claiming that investing is always better.
+    """
+    if compare:
+        text = (
+            "This report is designed to show why long-term planning often needs more than one view. "
+            "Savings-only planning gives a simpler and more stable baseline, but cash savings may struggle "
+            "to keep pace with long-term goals, inflation and retirement needs. The investment/proxy path "
+            "can show how compounding and longer horizons may change possible outcomes, but it also introduces "
+            "uncertainty, drawdowns and no guarantee of success."
+        )
+    else:
+        text = (
+            "Use this report as a planning lens: first understand contribution capacity, then compare what saving alone "
+            "can do against the available long-term scenario path. Higher modelled outcomes are not recommendations; "
+            "they are uncertain scenarios that must be judged against risk, time horizon and personal resilience."
+        )
+
+    insight_card("Why this planning comparison matters", text, level="info")
 
 
 def _render_recommended_next_actions(*, mode_label: str, compare: bool = False) -> None:
@@ -694,16 +719,15 @@ def _render_decision_support_note(*, compare: bool = False) -> None:
             level="warning",
         )
 
+        st.markdown("**Safe-use checklist**")
         if _engine_result_is_real():
-            st.write("• The Strategy Engine generated a historical strategy return path from the selected universe and engine configuration.")
+            st.write("• The Strategy Engine created a historical return path from the selected universe and engine configuration.")
         else:
-            st.write("• The Long-Term Scenario used a labelled educational proxy because no tested strategy return path was available.")
-        st.write("• The long-term scenario model translates contribution assumptions into projected ranges.")
-        st.write("• These insights interpret plausibility, uncertainty, trade-offs and horizon sensitivity.")
+            st.write("• The Long-Term Scenario used a labelled educational proxy because no tested Strategy Engine path was available.")
+        st.write("• The Long-Term Scenario translates contribution assumptions into projected ranges; it does not predict future wealth.")
         st.write("• P10 / median / P90 are scenario percentiles under the model assumptions, not guaranteed outcomes.")
         if compare:
             st.write("• The comparison is fair only when both branches use the same contribution, starting pot, goal and horizons.")
-
 
 def _render_horizon_rows(rows: Iterable[Dict[str, Any]]) -> None:
     rows = list(rows or [])
@@ -889,6 +913,8 @@ def _render_investing_insights(proj: Dict[str, Any], cash_proj: Dict[str, Any], 
         return
 
     _render_proxy_evidence_note(compare=compare)
+    if not compare:
+        _render_long_term_planning_context(compare=False)
     _render_report_summary(mode_label="investment", proj=proj, cash_proj=cash_proj, engine=engine, compare=compare)
     if _engine_result_is_real():
         _render_engine_metrics(engine)
@@ -955,9 +981,9 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> bool:
     proj = _extract_projection_summary(proj_payload)
     cash_proj = _extract_projection_summary(CASH_ONLY_PROJECTION_RESULT)
 
-    # Last-resort bridge for sessions where Step 6 has a valid current
+    # Last-resort bridge for sessions where Long-Term Scenario has a valid current
     # investment/proxy projection but did not persist the horizon-comparison
-    # rows in the legacy shape expected by Step 7.
+    # rows in the legacy shape expected by Final Report.
     if not rows and _has_projection(proj):
         years = (
             _projection_payload_horizon(proj_payload)
@@ -1017,18 +1043,17 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> bool:
         monthly = weekly * 52.0 / 12.0 if weekly > 0.0 else 0.0
 
     evidence = "tested Strategy Engine result" if _engine_result_is_real() else "educational investment proxy"
+    evidence_article = "a tested Strategy Engine result" if _engine_result_is_real() else "an educational investment proxy"
     horizon_label = str(last_row.get("Horizon", "the longest horizon shown"))
     horizons_text = " + ".join(str(x) for x in valid["Horizon"].astype(str).tolist()) if "Horizon" in valid.columns else "current horizon"
-
-    # Keep the evidence warning once, near the top. Repetition below is avoided.
-    _render_proxy_evidence_note(compare=True)
-    if _engine_result_is_real():
-        _render_engine_metrics(engine)
-
-    st.markdown("### Executive summary")
     longest_years = _safe_int(last_row.get("_years"), 0) or _horizon_years_from_label(horizon_label)
     horizon_prefix = f"{longest_years}y" if longest_years > 0 else "Longest-horizon"
 
+    # Keep the evidence warning once, near the top. Repetition below is avoided.
+    _render_proxy_evidence_note(compare=True)
+    _render_long_term_planning_context(compare=True)
+
+    st.markdown("### Executive summary")
     metric_cols = st.columns(4 if monthly > 0 else 3)
     col_idx = 0
     if monthly > 0:
@@ -1041,6 +1066,29 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> bool:
         st.metric(f"{horizon_prefix} investment/proxy", _fmt_gbp0(investing_terminal))
     with metric_cols[col_idx + 2]:
         st.metric(f"{horizon_prefix} difference", _fmt_gbp0(diff_terminal))
+
+    if diff_terminal > 0:
+        bottom_line = (
+            f"Bottom line: at **{horizon_label}**, the investment/proxy path has a higher modelled median outcome than savings-only "
+            f"(**{_fmt_gbp0(investing_terminal)}** vs **{_fmt_gbp0(savings_terminal)}**). "
+            "That upside only matters if the uncertainty, drawdown exposure and assumptions are acceptable."
+        )
+        bottom_level = "info"
+    else:
+        bottom_line = (
+            f"Bottom line: at **{horizon_label}**, the investment/proxy path does not clearly improve the central outcome over savings-only. "
+            "Under these assumptions, the simpler route may be harder to dismiss."
+        )
+        bottom_level = "warning"
+    insight_card("Bottom line", bottom_line, level=bottom_level)
+
+    if abs(diff_terminal) > max(10000.0, 5.0 * max(abs(investing_terminal), 1.0)):
+        st.warning(
+            "This comparison shows a very large gap between branches. Check that both branches use comparable horizons, contributions, starting pots and goal assumptions."
+        )
+
+    if _engine_result_is_real():
+        _render_engine_metrics(engine)
 
     st.markdown("### Setup snapshot")
     s1, s2, s3 = st.columns(3)
@@ -1061,22 +1109,8 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> bool:
         )
         st.caption(" ".join(setup_bits))
     with s3:
-        st.markdown("**Long-term scenario**")
+        st.markdown("**Long-Term Scenario**")
         st.caption(f"Horizon comparison: {horizons_text}.")
-
-    summary_text = (
-        f"This final report compares the savings-only baseline against a {evidence}. "
-        f"At **{horizon_label}**, the savings-only path reaches **{_fmt_gbp0(savings_terminal)}**, "
-        f"while the investment/proxy median reaches **{_fmt_gbp0(investing_terminal)}**, "
-        f"a modelled central difference of **{_fmt_gbp0(diff_terminal)}**. "
-        "That upside should be read alongside uncertainty, drawdown exposure and model risk."
-    )
-    insight_card("Executive interpretation", summary_text, level="info")
-
-    if abs(diff_terminal) > max(10000.0, 5.0 * max(abs(investing_terminal), 1.0)):
-        st.warning(
-            "This comparison shows a very large gap between branches. Check that both branches use comparable horizons, contributions, starting pots and goal assumptions."
-        )
 
     st.markdown("### Final comparison")
     positive_rows = valid[pd.to_numeric(valid["Difference"], errors="coerce") > 0]
@@ -1104,7 +1138,7 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> bool:
     st.markdown("### Horizon interpretation")
     _render_horizon_rows(valid.to_dict("records"))
 
-    st.markdown("### Final interpretation")
+    st.markdown("### Decision interpretation")
     insight_card(
         "Upside vs simplicity",
         "Savings-only is simpler and avoids market volatility, but has limited upside. The investment/proxy path may improve the central outcome, but it depends on return assumptions and introduces uncertainty.",
@@ -1115,6 +1149,20 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> bool:
         "A higher central scenario is not automatically a better decision. It needs to be judged against drawdown exposure, model risk, evidence quality and whether the user could stay invested through bad periods.",
         level="info",
     )
+    if diff_terminal > 0:
+        decision_text = (
+            "Decision status: continue testing assumptions rather than treating the investment/proxy result as a final answer. "
+            "The modelled upside is meaningful, but the decision still depends on risk tolerance, contribution realism and horizon sensitivity."
+        )
+        decision_level = "info"
+    else:
+        decision_text = (
+            "Decision status: the comparison does not yet provide a strong reason to accept extra investment uncertainty. "
+            "Refine the assumptions or test a cleaner Strategy Engine setup before drawing conclusions."
+        )
+        decision_level = "warning"
+    insight_card("Decision status", decision_text, level=decision_level)
+
     if _engine_result_is_real():
         next_step_text = (
             "Use the Long-Term Scenario to stress-test the result with different contributions, goals and horizons. "
@@ -1145,7 +1193,6 @@ def _render_compare_branch_insights(engine: Dict[str, Any]) -> bool:
 
     _render_decision_support_note(compare=True)
     return True
-
 
 def _render_footer(*, complete_text: str, show_strategy_lab: bool = False) -> None:
     """Final navigation for the report page.
