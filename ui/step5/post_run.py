@@ -580,7 +580,12 @@ def _render_technical_run_metadata_content(meta_parts: list[str], run_timestamp:
 
 
 def _render_detailed_timing_breakdowns(run_map: dict, meta_parts: list[str], run_timestamp: Any) -> None:
-    """Group all detailed timing/debug tables under one collapsed expander."""
+    """Render detailed timing/debug tables inside the existing diagnostics panel.
+
+    This function is called from inside the main "Run timings and diagnostics"
+    expander. Streamlit does not allow nested expanders, so the detailed
+    breakdowns are rendered as a bordered section instead of a second expander.
+    """
     engine_rows = _engine_timing_detail_rows(run_map)
     phase_payloads = _suggestion_phase_payloads()
     has_metadata = bool(meta_parts or run_timestamp)
@@ -588,7 +593,13 @@ def _render_detailed_timing_breakdowns(run_map: dict, meta_parts: list[str], run
     if not engine_rows and not phase_payloads and not has_metadata:
         return
 
-    with st.expander("Detailed timing breakdowns", expanded=False):
+    with st.container(border=True):
+        st.markdown("### Detailed timing breakdowns")
+        st.caption(
+            "Expanded diagnostics for the current run. These are already inside the "
+            "Run timings and diagnostics panel, so they are shown as a section rather than a nested expander."
+        )
+
         if engine_rows:
             st.markdown("**Engine timing breakdown**")
             st.caption("Low-level engine timing components. Useful for debugging runtime bottlenecks, not for user-facing performance interpretation.")
