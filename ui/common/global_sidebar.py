@@ -578,6 +578,37 @@ def _step5_result_is_current_for_sidebar() -> bool:
     return bool(run_map)
 
 
+def _toggle_step5_run_timings() -> None:
+    """Toggle the main Step 5 run-timings panel from the sidebar.
+
+    Streamlit button callbacks run before the script body is rendered, so the
+    sidebar label updates immediately from Show -> Hide (or Hide -> Show) on
+    the rerun caused by the click, without needing a manual st.rerun().
+    """
+    next_visible = not bool(st.session_state.get(STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY, False))
+    st.session_state[STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY] = bool(next_visible)
+    st.session_state[STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY] = bool(next_visible)
+
+
+def _toggle_step5_reliability() -> None:
+    """Toggle the main Step 5 reliability panel from the sidebar.
+
+    Keep this independent from the run-timings toggle. The callback pattern is
+    important: it updates session_state before the sidebar is rendered again,
+    so the label changes immediately from Show -> Hide without relying on a
+    later unrelated rerun.
+    """
+    can_open = bool(_step5_improvement_flow_completed() and _step5_result_is_current_for_sidebar())
+    if not can_open:
+        st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = False
+        st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = False
+        return
+
+    next_visible = not bool(st.session_state.get(STEP5_RELIABILITY_EXPANDED_KEY, False))
+    st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = bool(next_visible)
+    st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = bool(next_visible)
+
+
 # ---------------------------------------------------------------------------
 # Sidebar rendering blocks
 # ---------------------------------------------------------------------------
@@ -1617,16 +1648,13 @@ def _render_step5_diagnostics() -> None:
                 st.caption(f"{label}: {_format_seconds(seconds)}{suffix}")
 
         timing_button_label = "Hide run timings" if timings_visible else "Show run timings"
-        if st.button(
+        st.button(
             timing_button_label,
             key="global_sidebar_step5_toggle_run_timings",
             use_container_width=True,
             help="Show or hide the detailed Run timings and diagnostics panel on the main Strategy Engine screen.",
-        ):
-            next_visible = not timings_visible
-            st.session_state[STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY] = next_visible
-            st.session_state[STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY] = bool(next_visible)
-            st.rerun()
+            on_click=_toggle_step5_run_timings,
+        )
 
         st.divider()
         st.caption("Full validation details stay in the main post-run panel.")
@@ -1659,7 +1687,7 @@ def _render_step5_diagnostics() -> None:
 
         reliability_button_disabled = bool(not improvement_flow_completed or not result_is_current)
         reliability_button_label = "Hide reliability & robustness" if reliability_visible else "Show reliability & robustness"
-        if st.button(
+        st.button(
             reliability_button_label,
             key="global_sidebar_step5_toggle_reliability_and_robustness",
             use_container_width=True,
@@ -1673,13 +1701,8 @@ def _render_step5_diagnostics() -> None:
                     else "Show or hide the reliability and robustness panel for the final selected setup."
                 )
             ),
-        ):
-            next_visible = not reliability_visible
-            st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = next_visible
-            st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = bool(next_visible)
-            # Do not force an immediate st.rerun() here. Streamlit already reruns
-            # after the button event, and the sidebar renders before the main
-            # Step 5 panel, so post_run.py can consume this flag in the same pass.
+            on_click=_toggle_step5_reliability,
+        )
 
 
 def _render_step5_sidebar(step: int) -> None:

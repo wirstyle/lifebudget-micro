@@ -40,6 +40,7 @@ STEP5_CURRENT_RESULT_IS_FRESH_KEY = "step5_current_result_is_fresh_v1"
 STEP5_POST_RUN_IS_STALE_KEY = "step5_post_run_is_stale"
 STEP5_RELIABILITY_EXPANDED_KEY = "step5_reliability_and_robustness_expanded_v1"
 STEP5_SCROLL_TO_RELIABILITY_KEY = "step5_scroll_to_reliability_and_robustness_v1"
+STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY = "step5_change_or_rerun_controls_visible_v1"
 
 
 def _clamp_suggestion_count(value: Any, *, default: int = 1, low: int = 1, high: int = 8) -> int:
@@ -307,6 +308,46 @@ def _current_result_is_fresh_for_ready_card(cfg_final: dict, asset_panel_df: Any
         and last_config_fp == current_config_fp
     )
     return fresh, current_signature
+
+
+def _stored_result_matches_current_active_state(asset_panel_df: Any) -> tuple[bool, str, dict]:
+    """Check freshness using the stored executed config, not pre-render widgets.
+
+    Step 5's setup widgets may not be mounted after a successful run. Reading
+    their defaults too early can make a valid stored result look stale,
+    especially after suggestion phases promote rerun-tested candidates. For the
+    post-run view, the authoritative config is the one stored with the last
+    executed/promoted result. We still recompute the signature against the
+    *current* active universe/panel state, so genuine Step 4/universe changes
+    continue to invalidate the result.
+    """
+    run_map = _coerce_mapping(st.session_state.get("step5_last_run_result", {}))
+    if not run_map:
+        return False, "", {}
+
+    stored_cfg = (
+        _coerce_mapping(run_map.get("config", {}))
+        or _coerce_mapping(run_map.get("config_dict", {}))
+        or _coerce_mapping(st.session_state.get("last_engine_config", {}))
+        or _coerce_mapping(st.session_state.get("step5_last_cfg_final", {}))
+    )
+    if not stored_cfg:
+        return False, "", {}
+
+    current_signature = _resolve_run_signature_for_ready_card(stored_cfg, asset_panel_df)
+    current_config_fp = _resolve_config_fingerprint_for_ready_card(stored_cfg)
+    last_signature = str(st.session_state.get("step5_last_run_signature", "") or run_map.get("run_signature", "") or "")
+    last_config_fp = str(st.session_state.get("step5_last_config_fingerprint", "") or run_map.get("config_fingerprint", "") or "")
+
+    fresh = bool(
+        current_signature
+        and current_config_fp
+        and last_signature
+        and last_config_fp
+        and last_signature == current_signature
+        and last_config_fp == current_config_fp
+    )
+    return fresh, current_signature, dict(stored_cfg)
 
 
 def _latest_run_performance_summary() -> dict:
@@ -976,9 +1017,18 @@ def render_step_5() -> None:
     simple_cfg_state = resolve_simple_mode_state()
     cfg_state, gov_state = _resolve_cfg_final(simple_cfg_state, pre_run_advanced_cfg)
     cfg_state = {**dict(cfg_state or {}), **_resolve_basic_engine_state(cfg_state)}
-    current_result_is_fresh, current_run_signature = _current_result_is_fresh_for_ready_card(cfg_state, asset_panel_df)
     stored_run_result = st.session_state.get("step5_last_run_result")
-    has_fresh_stored_result = bool(stored_run_result is not None and current_result_is_fresh)
+    stored_state_is_fresh, stored_current_signature, stored_cfg = _stored_result_matches_current_active_state(asset_panel_df)
+    current_result_is_fresh, current_run_signature = _current_result_is_fresh_for_ready_card(cfg_state, asset_panel_df)
+
+    # Prefer the executed/promoted config stored with the result when deciding
+    # whether a post-run result is still current. This prevents collapsed setup
+    # widgets or passive diagnostics/timing toggles from making a valid result
+    # look stale before the user actually edits the setup.
+    has_fresh_stored_result = bool(stored_run_result is not None and (stored_state_is_fresh or current_result_is_fresh))
+    if stored_state_is_fresh:
+        current_run_signature = stored_current_signature
+        cfg_state = dict(stored_cfg or cfg_state or {})
     st.session_state[STEP5_CURRENT_RESULT_IS_FRESH_KEY] = bool(has_fresh_stored_result)
     st.session_state[STEP5_POST_RUN_IS_STALE_KEY] = bool(stored_run_result is not None and not has_fresh_stored_result)
 
@@ -1011,35 +1061,49 @@ def render_step_5() -> None:
             if active_setup_summary:
                 st.markdown(f"**Active result:** {active_setup_summary}.")
             st.caption(
-                "Current setup already run. Change the preset, sliders, or technical controls to enable a new portfolio test."
+                "Current setup already run. Open the controls below only if you want to change the preset, sliders, "
+                "or technical settings and run a new portfolio test."
             )
-            technical_engine_overrides: dict[str, Any] = {}
 
-            def _post_run_technical_footer(simple_cfg_payload: dict) -> None:
-                footer_cfg, _footer_gov = _resolve_cfg_final(simple_cfg_payload, pre_run_advanced_cfg)
-                technical_engine_overrides.clear()
-                technical_engine_overrides.update(_render_technical_engine_overrides(footer_cfg))
+            setup_controls_visible = bool(st.session_state.get(STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY, False))
+            if not setup_controls_visible:
+                if st.button(
+                    "Edit setup or rerun controls",
+                    key="step5_open_change_or_rerun_controls",
+                    use_container_width=True,
+                ):
+                    st.session_state[STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY] = True
+                    st.rerun()
+                st.caption(
+                    "Keeping these controls closed prevents hidden setup widgets from changing the freshness state of the current result."
+                )
+            else:
+                if st.button(
+                    "Hide setup controls",
+                    key="step5_hide_change_or_rerun_controls",
+                    use_container_width=True,
+                ):
+                    st.session_state[STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY] = False
+                    st.rerun()
 
-            simple_cfg = render_simple_mode(
-                use_internal_expanders=False,
-                posture_footer_renderer=_post_run_technical_footer,
-            )
-            cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
-            cfg_final = {**dict(cfg_final or {}), **dict(technical_engine_overrides or {})}
+                technical_engine_overrides: dict[str, Any] = {}
 
-            # Re-check freshness after the collapsed setup controls have rendered.
-            # Streamlit executes expander contents even while collapsed, so mounting
-            # the runner here unconditionally can publish a stale current signature
-            # even though the visible page is still showing a fresh stored result.
-            # Only show the rerun button when the setup actually differs.
-            current_result_still_fresh, current_signature = _current_result_is_fresh_for_ready_card(cfg_final, asset_panel_df)
-            current_config_fp = _resolve_config_fingerprint_for_ready_card(cfg_final)
-            st.session_state["step5_current_input_signature"] = current_signature
-            st.session_state["step5_current_run_signature"] = current_signature
-            st.session_state["step5_current_config_fingerprint"] = current_config_fp
+                def _post_run_technical_footer(simple_cfg_payload: dict) -> None:
+                    footer_cfg, _footer_gov = _resolve_cfg_final(simple_cfg_payload, pre_run_advanced_cfg)
+                    technical_engine_overrides.clear()
+                    technical_engine_overrides.update(_render_technical_engine_overrides(footer_cfg))
 
-            if not current_result_still_fresh:
+                simple_cfg = render_simple_mode(
+                    use_internal_expanders=False,
+                    posture_footer_renderer=_post_run_technical_footer,
+                )
+                cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
+                cfg_final = {**dict(cfg_final or {}), **dict(technical_engine_overrides or {})}
+
+                current_signature = _build_step5_input_signature(cfg_final, asset_panel_df)
+                st.session_state["step5_current_input_signature"] = current_signature
                 clear_retired_step5_state()
+
                 new_run_result = _render_ready_to_run_section(
                     cfg_final=cfg_final,
                     asset_panel_df=asset_panel_df,
@@ -1089,11 +1153,20 @@ def render_step_5() -> None:
             bordered=False,
         )
 
-    # render_run_panel publishes the canonical signature when it is mounted.
-    current_signature = str(
-        st.session_state.get("step5_current_run_signature", current_signature)
-        or current_signature
-    )
+    # render_run_panel publishes the canonical signature only when the execution
+    # controls are mounted. In the fresh-result view those controls stay lazy so
+    # passive toggles (timings/reliability) cannot replace the current signature
+    # with a stale hidden-runner signature.
+    setup_controls_visible = bool(st.session_state.get(STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY, False))
+    if (not has_fresh_stored_result) or setup_controls_visible or new_run_result is not None:
+        current_signature = str(
+            st.session_state.get("step5_current_run_signature", current_signature)
+            or current_signature
+        )
+    else:
+        current_signature = current_run_signature
+        st.session_state["step5_current_run_signature"] = current_signature
+        st.session_state["step5_current_config_fingerprint"] = _resolve_config_fingerprint_for_ready_card(cfg_final)
     st.session_state["step5_current_input_signature"] = current_signature
 
     last_run_signature = str(st.session_state.get("step5_last_run_signature", "") or "")
@@ -1113,9 +1186,6 @@ def render_step_5() -> None:
     st.session_state[STEP5_CURRENT_RESULT_IS_FRESH_KEY] = bool(current_result_is_fresh_for_ui)
 
     if post_run_is_stale:
-        # Reliability/robustness must be tied to the latest executed setup. If
-        # the user has applied a suggestion or changed controls, close the panel
-        # until the updated setup has been run.
         st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = False
         st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = False
         st.info(
