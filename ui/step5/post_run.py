@@ -60,6 +60,7 @@ STEP5_SCROLL_TO_RELIABILITY_KEY = "step5_scroll_to_reliability_and_robustness_v1
 STEP5_RUN_DIAGNOSTICS_ANCHOR_ID = "step5-run-diagnostics-anchor"
 STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY = "step5_run_diagnostics_expanded_v1"
 STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY = "step5_scroll_to_run_diagnostics_v1"
+STEP5_SHOW_DETAILED_TIMING_TABLES_KEY = "step5_show_detailed_timing_tables_v1"
 
 
 SUGGESTION_DEPTH_MODE_KEY = "step5_suggestion_testing_depth_mode_v1"
@@ -406,12 +407,10 @@ def _engine_timing_detail_rows(run_map: dict) -> list[dict[str, Any]]:
 
 
 def _render_engine_timing_block(run_map: dict) -> None:
-    """Render the main engine timing summary; detailed rows live in one diagnostics expander below."""
+    """Render a compact engine timing snapshot."""
     engine_timing = _coerce_mapping(run_map.get("engine_timing", {}))
     if not engine_timing:
         return
-
-    st.markdown("### Engine timing summary")
 
     total_engine = _safe_float(engine_timing.get("total_engine", 0.0), 0.0)
     walk_forward = _safe_float(engine_timing.get("walk_forward_loop", 0.0), 0.0)
@@ -419,17 +418,15 @@ def _render_engine_timing_block(run_map: dict) -> None:
     n_oos_dates = _safe_int(engine_timing.get("n_oos_dates", 0), 0)
     n_loop_iterations = _safe_int(engine_timing.get("n_loop_iterations", 0), 0)
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("Total engine", f"{total_engine:.2f}s")
-    with c2:
-        st.metric("Walk-forward", f"{walk_forward:.2f}s")
-    with c3:
-        st.metric("Probabilistic", f"{probabilistic:.2f}s")
-    with c4:
-        st.metric("OOS months", int(n_oos_dates))
-
-    st.caption(f"Loop iterations={n_loop_iterations}. Timing is diagnostic only and can vary by environment.")
+    st.markdown("**Engine timing**")
+    st.caption(
+        f"Engine run **{total_engine:.2f}s** · "
+        f"walk-forward **{walk_forward:.2f}s** · "
+        f"probabilistic layer **{probabilistic:.2f}s** · "
+        f"OOS months **{int(n_oos_dates)}**"
+    )
+    if n_loop_iterations > 0:
+        st.caption(f"Loop iterations={n_loop_iterations}. Timing is diagnostic only and can vary by environment.")
 
 
 def _candidate_timing_rows(timing: dict) -> list[dict[str, Any]]:
@@ -532,7 +529,7 @@ def _render_single_suggestion_timing_detail(payload: dict[str, Any], *, as_expan
 
 
 def _render_suggestion_timing_overview() -> None:
-    """Render compact historical suggestion timings with detailed phase rows collapsed."""
+    """Render a compact historical suggestion timing summary."""
     payloads = _suggestion_phase_payloads()
     if not payloads:
         return
@@ -541,19 +538,12 @@ def _render_suggestion_timing_overview() -> None:
     total_tested = sum(max(0, _safe_int(item.get("tested", 0), 0)) for item in payloads)
     total_accepted = sum(max(0, _safe_int(item.get("accepted", 0), 0)) for item in payloads)
 
-    st.markdown("### Suggestion timing summary")
+    st.markdown("**Suggestion timing**")
     st.caption(
-        "Historical timing only: these suggestion tests are not re-run after Apply; "
-        "the current result may have been promoted from a previously tested candidate."
+        f"Historical suggestion tests: **{total:.2f}s** overhead · "
+        f"**{int(total_tested)}** candidate(s) tested · "
+        f"**{int(total_accepted)}** passed gate. These tests are not re-run after Apply."
     )
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Suggestion overhead", f"{total:.2f}s")
-    with c2:
-        st.metric("Candidates tested", int(total_tested))
-    with c3:
-        st.metric("Passed gate", int(total_accepted))
 
     summary_rows = []
     for item in payloads:
@@ -580,11 +570,11 @@ def _render_technical_run_metadata_content(meta_parts: list[str], run_timestamp:
 
 
 def _render_detailed_timing_breakdowns(run_map: dict, meta_parts: list[str], run_timestamp: Any) -> None:
-    """Render detailed timing/debug tables inside the existing diagnostics panel.
+    """Keep heavy timing/debug tables hidden unless explicitly requested.
 
-    This function is called from inside the main "Run timings and diagnostics"
-    expander. Streamlit does not allow nested expanders, so the detailed
-    breakdowns are rendered as a bordered section instead of a second expander.
+    This function is called from inside the main Run timings and diagnostics
+    expander, so it must not create another expander. A checkbox keeps the
+    default view compact while still making the detailed audit tables available.
     """
     engine_rows = _engine_timing_detail_rows(run_map)
     phase_payloads = _suggestion_phase_payloads()
@@ -593,32 +583,57 @@ def _render_detailed_timing_breakdowns(run_map: dict, meta_parts: list[str], run
     if not engine_rows and not phase_payloads and not has_metadata:
         return
 
-    with st.container(border=True):
-        st.markdown("### Detailed timing breakdowns")
-        st.caption(
-            "Expanded diagnostics for the current run. These are already inside the "
-            "Run timings and diagnostics panel, so they are shown as a section rather than a nested expander."
+    show_details = bool(
+        st.checkbox(
+            "Show detailed timing tables and technical metadata",
+            value=False,
+            key=STEP5_SHOW_DETAILED_TIMING_TABLES_KEY,
+            help=(
+                "Opens low-level engine component timings, candidate-level suggestion timings, "
+                "and raw run metadata. Keep this closed for the normal review flow."
+            ),
         )
+    )
+    if not show_details:
+        st.caption(
+            "Detailed engine components, candidate-level timings and raw metadata are hidden by default "
+            "to keep this diagnostics panel compact."
+        )
+        return
+
+    with st.container(border=True):
+        st.markdown("**Detailed timing tables**")
 
         if engine_rows:
-            st.markdown("**Engine timing breakdown**")
-            st.caption("Low-level engine timing components. Useful for debugging runtime bottlenecks, not for user-facing performance interpretation.")
-            st.dataframe(pd.DataFrame(engine_rows), use_container_width=True, hide_index=True)
+            engine_df = pd.DataFrame(engine_rows)
+            if "seconds" in engine_df.columns:
+                engine_df["seconds"] = engine_df["seconds"].map(lambda x: f"{_safe_float(x, 0.0):.2f}s")
+            st.caption("Engine component timings")
+            st.dataframe(engine_df, use_container_width=True, hide_index=True)
 
-        if phase_payloads:
+        candidate_rows: list[dict[str, Any]] = []
+        for payload in phase_payloads:
+            phase = str(payload.get("phase", ""))
+            for row in _candidate_timing_rows(_coerce_mapping(payload.get("timing", {}))):
+                candidate_rows.append(
+                    {
+                        "phase": phase,
+                        "candidate": str(row.get("candidate", "Candidate") or "Candidate"),
+                        "status": str(row.get("status", "") or ""),
+                        "seconds": f"{_safe_float(row.get('seconds', 0.0), 0.0):.2f}s",
+                    }
+                )
+
+        if candidate_rows:
             if engine_rows:
                 st.divider()
-            st.markdown("**Suggestion phase breakdowns**")
-            st.caption("Candidate-level timings for the optional improvement checks. Planned candidate counts are shown here only when they differ from the number actually engine-tested.")
-            for idx, payload in enumerate(phase_payloads):
-                if idx > 0:
-                    st.divider()
-                _render_single_suggestion_timing_detail(payload, as_expander=False)
+            st.caption("Candidate-level suggestion timings")
+            st.dataframe(pd.DataFrame(candidate_rows), use_container_width=True, hide_index=True)
 
         if has_metadata:
-            if engine_rows or phase_payloads:
+            if engine_rows or candidate_rows:
                 st.divider()
-            st.markdown("**Technical run metadata**")
+            st.caption("Technical run metadata")
             _render_technical_run_metadata_content(meta_parts, run_timestamp)
 
 

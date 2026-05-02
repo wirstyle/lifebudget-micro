@@ -8,6 +8,15 @@ import pandas as pd
 import streamlit as st
 
 from src.investment import config_to_dict
+from ui.services.step4_universe_service import (
+    SEMANTIC_LAST_SIGNATURE,
+    SEMANTIC_SLIDER_KEYS,
+    SEMANTIC_TOUCHED_FLAG,
+    allowed_style_presets_for_philosophy,
+    allowed_strategy_templates_for_philosophy,
+    resolve_semantic_slider_defaults,
+    semantic_seed_signature,
+)
 from ui.step5.simple_mode import render_simple_mode, resolve_simple_mode_state
 from ui.step5.run_panel import clear_retired_step5_state, render_run_panel
 from ui.step5.post_run import render_post_run
@@ -41,6 +50,7 @@ STEP5_POST_RUN_IS_STALE_KEY = "step5_post_run_is_stale"
 STEP5_RELIABILITY_EXPANDED_KEY = "step5_reliability_and_robustness_expanded_v1"
 STEP5_SCROLL_TO_RELIABILITY_KEY = "step5_scroll_to_reliability_and_robustness_v1"
 STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY = "step5_change_or_rerun_controls_visible_v1"
+STEP5_ACTIVE_RESULT_SYNCED_TO_CONTROLS_KEY = "step5_active_result_synced_to_controls_v1"
 
 
 def _clamp_suggestion_count(value: Any, *, default: int = 1, low: int = 1, high: int = 8) -> int:
@@ -349,6 +359,144 @@ def _stored_result_matches_current_active_state(asset_panel_df: Any) -> tuple[bo
     )
     return fresh, current_signature, dict(stored_cfg)
 
+
+def _active_result_signature(run_map: dict, fallback_signature: str = "") -> str:
+    """Return a durable signature for the currently executed/promoted result."""
+    run_map = _coerce_mapping(run_map)
+    signature = str(
+        run_map.get("run_signature", "")
+        or st.session_state.get("step5_last_run_signature", "")
+        or fallback_signature
+        or run_map.get("config_fingerprint", "")
+        or st.session_state.get("step5_last_config_fingerprint", "")
+        or ""
+    )
+    if signature:
+        return signature
+    cfg = _active_result_config(run_map)
+    if cfg:
+        encoded = json.dumps(cfg, sort_keys=True, default=str)
+        return hashlib.md5(encoded.encode("utf-8")).hexdigest()[:12]
+    return ""
+
+
+def _active_result_config(run_map: dict | None = None) -> dict:
+    """Return the executed/promoted config that belongs to the active result."""
+    run_map = _coerce_mapping(run_map if run_map is not None else st.session_state.get("step5_last_run_result", {}))
+    return (
+        _coerce_mapping(run_map.get("config", {}))
+        or _coerce_mapping(run_map.get("config_dict", {}))
+        or _coerce_mapping(st.session_state.get("last_engine_config", {}))
+        or _coerce_mapping(st.session_state.get("step5_last_cfg_final", {}))
+    )
+
+
+def _cfg_style_label(cfg: dict, fallback: str = "") -> str:
+    return str(
+        cfg.get("preset", "")
+        or cfg.get("style", "")
+        or cfg.get("style_preset", "")
+        or fallback
+        or ""
+    )
+
+
+def _clamp01(value: Any, default: float = 0.5) -> float:
+    try:
+        raw = float(value)
+    except Exception:
+        raw = float(default)
+    return float(max(0.0, min(1.0, raw)))
+
+
+def _sync_post_run_edit_controls_from_active_result(
+    *,
+    run_map: dict,
+    cfg_payload: dict,
+    current_philosophy: str,
+    fallback_signature: str = "",
+) -> None:
+    """Seed editable Step 5 controls from the active executed result once.
+
+    Suggestion phases can promote a rerun-tested result without mounting the
+    setup widgets. If the user later opens "Change setup or run a new test", the
+    controls should start from that active result rather than from stale pre-run
+    widget values. The sync is intentionally one-shot per run signature so it
+    does not overwrite manual edits while the user is experimenting.
+    """
+    cfg_payload = _coerce_mapping(cfg_payload)
+    if not cfg_payload:
+        return
+
+    active_signature = _active_result_signature(run_map, fallback_signature)
+    if not active_signature:
+        return
+    if str(st.session_state.get(STEP5_ACTIVE_RESULT_SYNCED_TO_CONTROLS_KEY, "") or "") == active_signature:
+        return
+
+    philosophy = str(current_philosophy or st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
+
+    template_options = allowed_strategy_templates_for_philosophy(philosophy)
+    template = str(cfg_payload.get("template", st.session_state.get("step5_template", "")) or "")
+    if template not in template_options:
+        template = template_options[0] if template_options else str(st.session_state.get("step5_template", "Balanced Risk-Controlled") or "Balanced Risk-Controlled")
+    st.session_state["step5_template"] = template
+
+    style_options = allowed_style_presets_for_philosophy(philosophy, template)
+    style = _cfg_style_label(cfg_payload, st.session_state.get("step5_style", ""))
+    if style not in style_options:
+        style = style_options[0] if style_options else str(st.session_state.get("step5_style", "Balanced") or "Balanced")
+    st.session_state["step5_style"] = style
+
+    defaults = resolve_semantic_slider_defaults(template, style)
+    semantic_values: dict[str, float] = {}
+    for logical_key, widget_key in SEMANTIC_SLIDER_KEYS.items():
+        value = cfg_payload.get(logical_key, defaults.get(logical_key, 0.5))
+        semantic_values[logical_key] = _clamp01(value, defaults.get(logical_key, 0.5))
+        st.session_state[widget_key] = semantic_values[logical_key]
+
+    st.session_state[SEMANTIC_LAST_SIGNATURE] = semantic_seed_signature(template, style)
+    st.session_state[SEMANTIC_TOUCHED_FLAG] = any(
+        abs(float(semantic_values.get(k, defaults.get(k, 0.5))) - float(defaults.get(k, 0.5))) > 1e-6
+        for k in SEMANTIC_SLIDER_KEYS
+    )
+
+    universe_size = max(1, _safe_int(st.session_state.get("universe_size", 25), 25))
+    technical_defaults = {
+        "top_k": ("step5_basic_top_k", int, 12),
+        "lookback_mu": ("step5_basic_lookback_mu", int, 12),
+        "lookback_sigma": ("step5_basic_lookback_sigma", int, 12),
+        "temperature": ("step5_basic_temperature", float, 1.0),
+        "weight_shrink": ("step5_basic_weight_shrink", float, 0.05),
+        "inertia": ("step5_basic_inertia", float, 0.0),
+        "feature_mu_blend": ("step5_basic_feature_mu_blend", float, 0.25),
+    }
+    for cfg_key, (widget_key, caster, default) in technical_defaults.items():
+        if cfg_key not in cfg_payload:
+            continue
+        try:
+            value = caster(cfg_payload.get(cfg_key, default))
+        except Exception:
+            value = caster(default)
+        if cfg_key == "top_k":
+            value = max(1, min(int(value), universe_size))
+        st.session_state[widget_key] = value
+
+    if "signal_mode" in cfg_payload:
+        signal_mode_options = {
+            "mu_sigma",
+            "huber_mu",
+            "lambdarank_like",
+            "directional_classifier",
+            "top_k_classifier",
+        }
+        signal_mode = str(cfg_payload.get("signal_mode", "mu_sigma") or "mu_sigma")
+        st.session_state["step5_basic_signal_mode"] = signal_mode if signal_mode in signal_mode_options else "mu_sigma"
+
+    if "feature_mu_enabled" in cfg_payload:
+        st.session_state["step5_basic_feature_mu_enabled"] = bool(cfg_payload.get("feature_mu_enabled", False))
+
+    st.session_state[STEP5_ACTIVE_RESULT_SYNCED_TO_CONTROLS_KEY] = active_signature
 
 def _latest_run_performance_summary() -> dict:
     run_map = _coerce_mapping(st.session_state.get("step5_last_run_result", {}))
@@ -698,7 +846,15 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
         f"feature_mu_enabled={feature_mu_enabled} · feature_mu_blend={feature_mu_blend_display}"
     )
 
-    _render_technical_improvement_guide(str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced"))
+    guide_profile = str(
+        cfg_final.get("preset", "")
+        or cfg_final.get("style", "")
+        or cfg_final.get("style_preset", "")
+        or st.session_state.get("step5_style", "")
+        or st.session_state.get("investment_philosophy", "Balanced")
+        or "Balanced"
+    )
+    _render_technical_improvement_guide(guide_profile)
 
     return {
         "top_k": int(top_k),
@@ -991,8 +1147,14 @@ def _build_executed_setup_summary(
     except Exception:
         oos_months = int(_safe_int(_coerce_mapping(stored_run.get("performance_summary", {})).get("periods", 0), 0))
 
-    template = str(simple_cfg.get("template", "—") or "—")
-    style = str(simple_cfg.get("preset", "—") or "—")
+    template = str(cfg_final.get("template", simple_cfg.get("template", "—")) or "—")
+    style = str(
+        cfg_final.get("preset", "")
+        or cfg_final.get("style", "")
+        or cfg_final.get("style_preset", "")
+        or simple_cfg.get("preset", "—")
+        or "—"
+    )
     active_parts = [
         f"Risk profile: {current_philosophy}",
         f"Selected universe: {universe_size} assets",
@@ -1050,6 +1212,18 @@ def render_step_5() -> None:
     gov = dict(gov_state or {})
 
     if has_fresh_stored_result:
+        active_run_map = _coerce_mapping(st.session_state.get("step5_last_run_result", {}))
+        active_cfg_payload = _active_result_config(active_run_map)
+        if active_cfg_payload:
+            cfg_final = dict(active_cfg_payload)
+
+        _sync_post_run_edit_controls_from_active_result(
+            run_map=active_run_map,
+            cfg_payload=cfg_final,
+            current_philosophy=current_philosophy,
+            fallback_signature=current_run_signature,
+        )
+
         active_setup_summary = _build_executed_setup_summary(
             cfg_final=cfg_final,
             asset_panel_df=asset_panel_df,
@@ -1065,6 +1239,11 @@ def render_step_5() -> None:
                 "The metrics below remain tied to the active result shown here until a new run completes."
             )
 
+            # The controls are rendered directly inside this expander so the user
+            # can continue refining from the active result. They are seeded from
+            # the executed/promoted config above, so unchanged controls should
+            # still match the active result.
+            st.session_state[STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY] = True
             technical_engine_overrides: dict[str, Any] = {}
 
             def _post_run_technical_footer(simple_cfg_payload: dict) -> None:
