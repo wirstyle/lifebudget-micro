@@ -184,54 +184,6 @@ def _normalise_perf(perf: Any) -> dict:
     }
 
 
-def _extract_oos_returns_for_projection(run_map: dict) -> list[float]:
-    candidates = [
-        _coerce_mapping(run_map).get("oos_returns_monthly"),
-        _coerce_mapping(run_map).get("oos_returns_simple"),
-        _coerce_mapping(run_map).get("portfolio_returns"),
-        _coerce_mapping(run_map).get("oos_returns"),
-        _coerce_mapping(run_map).get("returns"),
-    ]
-    for raw in candidates:
-        if raw is None:
-            continue
-        try:
-            if hasattr(raw, "tolist"):
-                raw = raw.tolist()
-        except Exception:
-            raw = []
-        if not isinstance(raw, list):
-            continue
-        out: list[float] = []
-        for item in raw:
-            try:
-                out.append(float(item))
-            except Exception:
-                continue
-        if out:
-            return out
-    return []
-
-
-def _store_projection_bridge_context_for_current_result(run_map: dict) -> None:
-    run_map = _coerce_mapping(run_map)
-    ctx = st.session_state.get("investment_context", {})
-    if not isinstance(ctx, dict):
-        ctx = {}
-    ctx["oos_returns_monthly"] = list(_extract_oos_returns_for_projection(run_map))
-    ctx.setdefault("run_signature", str(run_map.get("run_signature", "") or ""))
-    st.session_state["investment_context"] = ctx
-
-
-def _render_continue_with_current_result_button(run_map: dict, *, key: str) -> None:
-    _, continue_col, _ = st.columns([0.29, 0.42, 0.29])
-    with continue_col:
-        if st.button("Continue with current result", key=key, use_container_width=True):
-            _store_projection_bridge_context_for_current_result(run_map)
-            st.session_state["current_step"] = 6
-            st.rerun()
-
-
 def _coerce_cfg_payload(cfg_payload: Any) -> dict:
     payload = _coerce_mapping(cfg_payload)
     valid = {f.name for f in fields(MicroPipelineConfig)}
@@ -1521,15 +1473,6 @@ def render_size_improvement(run_result: dict) -> None:
     _render_recommended_candidate(best_candidate, perf, baseline_size)
 
     action_label = str(best_candidate.get("label", "recommended size") or "recommended size")
-    left, right = st.columns(2)
-    with left:
-        if st.button("Apply recommended size", key="step5_apply_best_size_candidate_v1", use_container_width=True):
-            _apply_candidate(best_candidate)
-    with right:
-        if st.button("Keep current size and finish", key="step5_skip_best_size_candidate_v1", use_container_width=True):
-            _skip_current_size_candidate(scope, action_label, current_run_signature)
-
-    _render_continue_with_current_result_button(run_map, key="step5_size_continue_current_result_v1")
 
     with st.expander("Why this candidate passed", expanded=False):
         st.success("This candidate passed the universe-size acceptance gate.")
@@ -1556,6 +1499,15 @@ def render_size_improvement(run_result: dict) -> None:
         detail = build_universe_mix_detail(assets)
         if isinstance(detail, pd.DataFrame) and not detail.empty:
             st.dataframe(detail, use_container_width=True, hide_index=True)
+
+    left, right = st.columns(2)
+    with left:
+        if st.button("Apply recommended size", key="step5_apply_best_size_candidate_v1", use_container_width=True):
+            _apply_candidate(best_candidate)
+    with right:
+        if st.button("Keep current size and finish", key="step5_skip_best_size_candidate_v1", use_container_width=True):
+            _skip_current_size_candidate(scope, action_label, current_run_signature)
+
 
     # Keep raw size-search diagnostics out of the main recommendation surface.
     # Suggestion timing/details are available through the Step 5 run diagnostics panel.

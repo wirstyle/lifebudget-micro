@@ -1866,10 +1866,66 @@ def _render_step6_q_and_a() -> None:
 
 def _render_step6_terms() -> None:
     with st.expander("Scenario terms", expanded=False):
+        st.markdown("**Starting investment pot**")
+        st.caption(
+            "The amount already available at the start of the Long-Term Scenario. It is separate from future monthly contributions."
+        )
+
+        st.markdown("**Optional wealth goal**")
+        st.caption(
+            "A target amount used to calculate goal probability. If the goal is left at £0, the projection can still run, "
+            "but goal probability is not meaningful."
+        )
+
+        st.markdown("**Compare across horizons**")
+        st.caption(
+            "Runs the same contribution and return-path assumptions across several time horizons, such as 20, 30 and 50 years. "
+            "It compares time length, not separate market forecasts."
+        )
+
+        st.markdown("**Horizon comparison table**")
+        st.caption(
+            "A table that compares terminal outcomes at each selected horizon, including median wealth, savings-only baseline and uncertainty ranges."
+        )
+
         st.markdown("**P10 / median / P90**")
         st.caption(
             "Scenario range markers: P10 is a lower outcome, median is the middle outcome, and P90 is a higher outcome. "
             "They are not promised results."
+        )
+
+        st.markdown("**Monte Carlo paths**")
+        st.caption(
+            "The number of simulated paths used to build the scenario range. More paths can make the range smoother, "
+            "but they do not make the future more predictable."
+        )
+
+        st.markdown("**Projection path mode**")
+        st.caption(
+            "Controls how the scenario path is generated. A monthly path uses monthly returns directly; a hybrid daily path expands each sampled month "
+            "into a synthetic within-month journey."
+        )
+
+        st.markdown("**Hybrid daily simulation**")
+        st.caption(
+            "The scenario still samples monthly Strategy Engine returns, but each sampled month is expanded into synthetic daily steps that compound back "
+            "to the same monthly return."
+        )
+
+        st.markdown("**Synthetic trading days per month**")
+        st.caption(
+            "The number of artificial daily steps used inside each simulated month when hybrid daily simulation is selected."
+        )
+
+        st.markdown("**Daily path variation**")
+        st.caption(
+            "Controls how much visible movement happens inside each simulated month. It changes the shape of the path, not the sampled monthly return itself."
+        )
+
+        st.markdown("**Return path**")
+        st.caption(
+            "The return source used by Long-Term Scenario. After Strategy Engine has run, this is normally the historical Strategy Engine OOS return series. "
+            "Before that, the app can use a clearly labelled educational proxy."
         )
 
         st.markdown("**Savings-only baseline**")

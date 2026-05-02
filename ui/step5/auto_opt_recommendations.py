@@ -149,54 +149,6 @@ def _normalise_perf(perf: Any) -> dict:
     }
 
 
-def _extract_oos_returns_for_projection(run_map: dict) -> list[float]:
-    candidates = [
-        _coerce_mapping(run_map).get("oos_returns_monthly"),
-        _coerce_mapping(run_map).get("oos_returns_simple"),
-        _coerce_mapping(run_map).get("portfolio_returns"),
-        _coerce_mapping(run_map).get("oos_returns"),
-        _coerce_mapping(run_map).get("returns"),
-    ]
-    for raw in candidates:
-        if raw is None:
-            continue
-        try:
-            if hasattr(raw, "tolist"):
-                raw = raw.tolist()
-        except Exception:
-            raw = []
-        if not isinstance(raw, list):
-            continue
-        out: list[float] = []
-        for item in raw:
-            try:
-                out.append(float(item))
-            except Exception:
-                continue
-        if out:
-            return out
-    return []
-
-
-def _store_projection_bridge_context_for_current_result(run_map: dict) -> None:
-    run_map = _coerce_mapping(run_map)
-    ctx = st.session_state.get("investment_context", {})
-    if not isinstance(ctx, dict):
-        ctx = {}
-    ctx["oos_returns_monthly"] = list(_extract_oos_returns_for_projection(run_map))
-    ctx.setdefault("run_signature", str(run_map.get("run_signature", "") or ""))
-    st.session_state["investment_context"] = ctx
-
-
-def _render_continue_with_current_result_button(run_map: dict, *, key: str) -> None:
-    _, continue_col, _ = st.columns([0.29, 0.42, 0.29])
-    with continue_col:
-        if st.button("Continue with current result", key=key, use_container_width=True):
-            _store_projection_bridge_context_for_current_result(run_map)
-            st.session_state["current_step"] = 6
-            st.rerun()
-
-
 def _coerce_cfg_payload(cfg_payload: Any) -> dict:
     payload = _coerce_mapping(cfg_payload)
     valid = {f.name for f in fields(MicroPipelineConfig)}
@@ -948,20 +900,6 @@ def render_auto_opt_improvement(run_result: dict) -> None:
         best_candidate = accepted_items[0]
         _render_recommended_candidate(best_candidate, perf)
 
-        left, right = st.columns(2)
-        with left:
-            if st.button("Apply recommended tuning", key="step5_apply_best_auto_opt_candidate_v1", use_container_width=True):
-                _apply_candidate(best_candidate)
-        with right:
-            if st.button("Keep current tuning and continue", key="step5_skip_best_auto_opt_candidate_v1", use_container_width=True):
-                _skip_current_auto_opt_candidate(
-                    scope,
-                    str(best_candidate.get("label", "recommended tuning") or "recommended tuning"),
-                    current_run_signature,
-                )
-
-        _render_continue_with_current_result_button(run_map, key="step5_auto_opt_continue_current_result_v1")
-
         with st.expander("How to decide on this engine-tuning recommendation", expanded=False):
             st.info(
                 "**Decision guide:** this keeps the same strategy preset, risk style, Step 4 universe and universe size. "
@@ -1013,6 +951,19 @@ def render_auto_opt_improvement(run_result: dict) -> None:
                     for key, value in technical_patch.items()
                 ]
                 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        left, right = st.columns(2)
+        with left:
+            if st.button("Apply recommended tuning", key="step5_apply_best_auto_opt_candidate_v1", use_container_width=True):
+                _apply_candidate(best_candidate)
+        with right:
+            if st.button("Keep current tuning and continue", key="step5_skip_best_auto_opt_candidate_v1", use_container_width=True):
+                _skip_current_auto_opt_candidate(
+                    scope,
+                    str(best_candidate.get("label", "recommended tuning") or "recommended tuning"),
+                    current_run_signature,
+                )
+
 
     # Advanced engine-tuning diagnostics intentionally stay out of the main decision surface.
     # Timing/candidate diagnostics are available from the Step 5 run diagnostics area.

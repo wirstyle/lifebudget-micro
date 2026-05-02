@@ -159,54 +159,6 @@ def _normalise_perf(perf: Any) -> dict:
     }
 
 
-def _extract_oos_returns_for_projection(run_map: dict) -> list[float]:
-    candidates = [
-        _coerce_mapping(run_map).get("oos_returns_monthly"),
-        _coerce_mapping(run_map).get("oos_returns_simple"),
-        _coerce_mapping(run_map).get("portfolio_returns"),
-        _coerce_mapping(run_map).get("oos_returns"),
-        _coerce_mapping(run_map).get("returns"),
-    ]
-    for raw in candidates:
-        if raw is None:
-            continue
-        try:
-            if hasattr(raw, "tolist"):
-                raw = raw.tolist()
-        except Exception:
-            raw = []
-        if not isinstance(raw, list):
-            continue
-        out: list[float] = []
-        for item in raw:
-            try:
-                out.append(float(item))
-            except Exception:
-                continue
-        if out:
-            return out
-    return []
-
-
-def _store_projection_bridge_context_for_current_result(run_map: dict) -> None:
-    run_map = _coerce_mapping(run_map)
-    ctx = st.session_state.get("investment_context", {})
-    if not isinstance(ctx, dict):
-        ctx = {}
-    ctx["oos_returns_monthly"] = list(_extract_oos_returns_for_projection(run_map))
-    ctx.setdefault("run_signature", str(run_map.get("run_signature", "") or ""))
-    st.session_state["investment_context"] = ctx
-
-
-def _render_continue_with_current_result_button(run_map: dict, *, key: str) -> None:
-    _, continue_col, _ = st.columns([0.29, 0.42, 0.29])
-    with continue_col:
-        if st.button("Continue with current result", key=key, use_container_width=True):
-            _store_projection_bridge_context_for_current_result(run_map)
-            st.session_state["current_step"] = 6
-            st.rerun()
-
-
 def _coerce_cfg_payload(cfg_payload: Any) -> dict:
     payload = _coerce_mapping(cfg_payload)
     valid = {f.name for f in fields(MicroPipelineConfig)}
@@ -1255,6 +1207,8 @@ def render_universe_improvement(run_result: dict) -> None:
         best_candidate = accepted_items[0]
         _render_recommended_candidate(best_candidate, perf)
 
+        _render_universe_mix_decision_expander(best_candidate, evaluations, table)
+
         left, right = st.columns(2)
         with left:
             if st.button("Apply recommended universe", key="step5_apply_best_universe_candidate_v1", use_container_width=True):
@@ -1267,9 +1221,6 @@ def render_universe_improvement(run_result: dict) -> None:
                     current_run_signature,
                 )
 
-        _render_continue_with_current_result_button(run_map, key="step5_universe_continue_current_result_v1")
-
-        _render_universe_mix_decision_expander(best_candidate, evaluations, table)
 
     if not accepted_items and not universe_was_skipped:
         if st.button("Continue with current universe mix", key="step5_continue_current_universe_v1", use_container_width=True):

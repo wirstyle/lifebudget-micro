@@ -162,62 +162,6 @@ def _normalise_perf(perf: Any) -> dict:
     }
 
 
-def _extract_oos_returns_for_projection(run_map: dict) -> list[float]:
-    candidates = [
-        _coerce_mapping(run_map).get("oos_returns_monthly"),
-        _coerce_mapping(run_map).get("oos_returns_simple"),
-        _coerce_mapping(run_map).get("portfolio_returns"),
-        _coerce_mapping(run_map).get("oos_returns"),
-        _coerce_mapping(run_map).get("returns"),
-    ]
-    for raw in candidates:
-        if raw is None:
-            continue
-        try:
-            if hasattr(raw, "tolist"):
-                raw = raw.tolist()
-        except Exception:
-            raw = []
-        if not isinstance(raw, list):
-            continue
-        out: list[float] = []
-        for item in raw:
-            try:
-                out.append(float(item))
-            except Exception:
-                continue
-        if out:
-            return out
-    return []
-
-
-def _store_projection_bridge_context_for_current_result(run_map: dict) -> None:
-    run_map = _coerce_mapping(run_map)
-    ctx = st.session_state.get("investment_context", {})
-    if not isinstance(ctx, dict):
-        ctx = {}
-    ctx["oos_returns_monthly"] = list(_extract_oos_returns_for_projection(run_map))
-    ctx.setdefault("run_signature", str(run_map.get("run_signature", "") or ""))
-    st.session_state["investment_context"] = ctx
-
-
-def _render_continue_with_current_result_button(run_map: dict, *, key: str) -> None:
-    _, continue_col, _ = st.columns([0.29, 0.42, 0.29])
-    with continue_col:
-        if st.button("Continue with current result", key=key, use_container_width=True):
-            _store_projection_bridge_context_for_current_result(run_map)
-            st.session_state["current_step"] = 6
-            st.rerun()
-
-    n_oos = len(_extract_oos_returns_for_projection(run_map))
-    st.caption(
-        "Current result can already feed the Long-Term Scenario Explorer. "
-        "You can continue now, or finish the remaining optional checks first."
-    )
-    if n_oos <= 0:
-        st.caption("No OOS return series was found; the Long-Term Scenario Explorer can still use fallback profile assumptions.")
-
-
 def _coerce_cfg_payload(cfg_payload: Any) -> dict:
     payload = _coerce_mapping(cfg_payload)
     valid = {f.name for f in fields(MicroPipelineConfig)}
@@ -1061,16 +1005,6 @@ def render_preset_improvement(run_result: dict) -> dict:
         flow_state.update({"status": "pending_action", "has_recommendation": True, "blocks_auto_opt": True})
         _render_recommended_candidate(best_candidate, perf)
 
-        left, right = st.columns(2)
-        with left:
-            if st.button("Apply recommended preset", key="step5_apply_best_preset_candidate_v3", use_container_width=True):
-                _apply_candidate(best_candidate)
-        with right:
-            if st.button("Keep current preset and continue", key="step5_skip_best_preset_candidate_v1", use_container_width=True):
-                _skip_current_preset_candidate(scope, str(best_candidate.get("label", "recommended preset") or "recommended preset"))
-
-        _render_continue_with_current_result_button(run_map, key="step5_preset_continue_current_result_v1")
-
     details_label = "How to decide on this preset recommendation" if accepted_items and not preset_was_skipped else "Preset test diagnostics"
     with st.expander(details_label, expanded=False):
         detail_candidate = _coerce_mapping(accepted_items[0]) if accepted_items and not preset_was_skipped else {}
@@ -1093,6 +1027,16 @@ def render_preset_improvement(run_result: dict) -> dict:
             st.markdown(_candidate_decision_rationale(detail_candidate, philosophy))
             if detail_candidate.get("error"):
                 st.warning(str(detail_candidate.get("error")))
+
+    if accepted_items and not preset_was_skipped:
+        left, right = st.columns(2)
+        with left:
+            if st.button("Apply recommended preset", key="step5_apply_best_preset_candidate_v3", use_container_width=True):
+                _apply_candidate(accepted_items[0])
+        with right:
+            if st.button("Keep current preset and continue", key="step5_skip_best_preset_candidate_v1", use_container_width=True):
+                _skip_current_preset_candidate(scope, str(accepted_items[0].get("label", "recommended preset") or "recommended preset"))
+
 
     return flow_state
 
