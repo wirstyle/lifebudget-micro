@@ -1135,7 +1135,15 @@ def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: di
 
     _render_start_date_robustness_actions(run_map)
 
-    with st.expander("Detailed evidence and validation", expanded=False):
+    details_ctx = st.container(border=True) if inline_details else st.expander("Detailed evidence and validation", expanded=False)
+    with details_ctx:
+        if inline_details:
+            st.markdown("#### Detailed evidence and validation")
+            st.caption(
+                "Detailed reliability evidence is shown here instead of inside a nested expander, "
+                "because Streamlit does not allow expanders inside expanders."
+            )
+
         st.markdown("**Reliability components**")
         st.dataframe(pd.DataFrame(components), use_container_width=True, hide_index=True)
 
