@@ -596,16 +596,26 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
     free_margin = max(margin, 0.0)
     deficit = abs(min(margin, 0.0))
 
+    income_colour = "#f1f5f9"
+    fixed_colour = "#64748b"
+    variable_colour = "#94a3b8"
+    discretionary_colour = "#cbd5e1"
+    free_margin_colour = "#22c55e"
+    deficit_colour = "#ef4444"
+    margin_colour = free_margin_colour if margin >= 0 else deficit_colour
+    margin_label = "Free margin" if margin >= 0 else "Deficit"
+    margin_help = "Money left after spending" if margin >= 0 else "Spending above income"
+
     total = max(income, fixed + variable + discretionary + free_margin, fixed + variable + discretionary + deficit, 1.0)
     segments = [
-        ("Fixed", fixed, "#64748b"),
-        ("Variable", variable, "#94a3b8"),
-        ("Discretionary", discretionary, "#cbd5e1"),
+        ("Fixed essentials", fixed, fixed_colour),
+        ("Variable essentials", variable, variable_colour),
+        ("Discretionary", discretionary, discretionary_colour),
     ]
     if free_margin > 0:
-        segments.append(("Free margin", free_margin, "#22c55e"))
+        segments.append(("Free margin", free_margin, free_margin_colour))
     if deficit > 0:
-        segments.append(("Deficit", deficit, "#ef4444"))
+        segments.append(("Deficit", deficit, deficit_colour))
 
     pieces = []
     for label, amount, colour in segments:
@@ -616,23 +626,49 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
             f'<div title="{label}: £{amount:,.0f}/week" style="width:{width:.2f}%; background:{colour}; height:22px;"></div>'
         )
 
-    margin_colour = "#047857" if margin >= 0 else "#b91c1c"
+    legend_items = [
+        f"""
+        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
+            <span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; background:{income_colour}; border:1px solid #cbd5e1; display:inline-block;"></span>
+            <span><b>Income capacity</b> · total weekly budget background</span>
+        </span>
+        """,
+        f"""
+        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
+            <span style="display:inline-flex; gap:0.12rem;">
+                <span style="width:0.56rem; height:0.74rem; border-radius:0.22rem 0 0 0.22rem; background:{fixed_colour}; display:inline-block;"></span>
+                <span style="width:0.56rem; height:0.74rem; border-radius:0 0.22rem 0.22rem 0; background:{variable_colour}; display:inline-block;"></span>
+            </span>
+            <span><b>Essentials</b> · fixed + variable essentials</span>
+        </span>
+        """,
+        f"""
+        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
+            <span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; background:{discretionary_colour}; border:1px solid #cbd5e1; display:inline-block;"></span>
+            <span><b>Discretionary</b> · flexible spending</span>
+        </span>
+        """,
+        f"""
+        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
+            <span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; background:{margin_colour}; display:inline-block;"></span>
+            <span><b>{margin_label}</b> · {margin_help}</span>
+        </span>
+        """,
+    ]
+
     st.markdown(
         f"""
         <div style="border:1px solid rgba(49,51,63,0.14); border-radius:14px; padding:0.85rem; background:#ffffff; box-shadow:0 1px 6px rgba(0,0,0,0.03);">
-            <div style="display:flex; overflow:hidden; border-radius:999px; height:22px; background:#f1f5f9; margin-bottom:0.65rem;">
+            <div style="display:flex; overflow:hidden; border-radius:999px; height:22px; background:{income_colour}; margin-bottom:0.65rem;">
                 {''.join(pieces)}
             </div>
-            <div style="display:flex; flex-wrap:wrap; gap:0.45rem 0.9rem; font-size:0.84rem; color:#334155;">
-                <span><b>Income:</b> £{income:,.0f}/week</span>
-                <span><b>Spending:</b> £{(fixed + variable + discretionary):,.0f}/week</span>
-                <span><b>Free margin:</b> <span style="color:{margin_colour}; font-weight:700;">£{margin:,.0f}/week</span></span>
+            <div style="display:flex; flex-wrap:wrap; gap:0.45rem 0.9rem; font-size:0.82rem; color:#334155; line-height:1.35;">
+                {''.join(legend_items)}
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
 
 def _auto_save_current_situation_snapshot() -> None:
     """Persist the current Step 1 estimate without asking for a confirm button."""
