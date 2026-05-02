@@ -174,28 +174,34 @@ def render_simple_mode(*, use_internal_expanders: bool = True, posture_footer_re
     template_options = allowed_strategy_templates_for_philosophy(philosophy)
     if current_template not in template_options:
         current_template = rec_template if rec_template in template_options else template_options[0]
+
+    # Keep the selectboxes keyed directly to the public Step 5 state keys.
+    # Previously the widgets were unkeyed and then copied into session_state
+    # after rendering. That can leave Streamlit's internal widget value one
+    # rerun behind the public key, making the user select a preset twice.
+    st.session_state["step5_template"] = current_template
+
     left, right = st.columns(2)
     with left:
         template = st.selectbox(
             "Strategy template",
             template_options,
-            index=template_options.index(current_template),
+            key="step5_template",
         )
-        st.session_state["step5_template"] = template
         st.caption(_template_description(template))
 
-    current_style_after_template = str(st.session_state.get("step5_style", current_style) or current_style)
     style_options = allowed_style_presets_for_philosophy(philosophy, template)
+    current_style_after_template = str(st.session_state.get("step5_style", current_style) or current_style)
     if current_style_after_template not in style_options:
         current_style_after_template = rec_style if rec_style in style_options else style_options[0]
+    st.session_state["step5_style"] = current_style_after_template
 
     with right:
         style = st.selectbox(
             "Style preset",
             style_options,
-            index=style_options.index(current_style_after_template),
+            key="step5_style",
         )
-        st.session_state["step5_style"] = style
         st.caption(_style_description(style))
 
     if not freeze_after_apply:
