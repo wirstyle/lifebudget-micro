@@ -36,6 +36,10 @@ SUGGESTION_SECONDS_PER_TEST: dict[str, float] = {
     "size": 30.0,
 }
 SHOW_ADVANCED_SUGGESTION_DEPTH_KEY = "step5_show_advanced_suggestion_testing_controls_v1"
+STEP5_CURRENT_RESULT_IS_FRESH_KEY = "step5_current_result_is_fresh_v1"
+STEP5_POST_RUN_IS_STALE_KEY = "step5_post_run_is_stale"
+STEP5_RELIABILITY_EXPANDED_KEY = "step5_reliability_and_robustness_expanded_v1"
+STEP5_SCROLL_TO_RELIABILITY_KEY = "step5_scroll_to_reliability_and_robustness_v1"
 
 
 def _clamp_suggestion_count(value: Any, *, default: int = 1, low: int = 1, high: int = 8) -> int:
@@ -975,6 +979,8 @@ def render_step_5() -> None:
     current_result_is_fresh, current_run_signature = _current_result_is_fresh_for_ready_card(cfg_state, asset_panel_df)
     stored_run_result = st.session_state.get("step5_last_run_result")
     has_fresh_stored_result = bool(stored_run_result is not None and current_result_is_fresh)
+    st.session_state[STEP5_CURRENT_RESULT_IS_FRESH_KEY] = bool(has_fresh_stored_result)
+    st.session_state[STEP5_POST_RUN_IS_STALE_KEY] = bool(stored_run_result is not None and not has_fresh_stored_result)
 
     # Before a run, this screen is the Strategy Engine setup. After a fresh run,
     # make the result state explicit and avoid a second large "result overview"
@@ -1021,20 +1027,29 @@ def render_step_5() -> None:
             cfg_final, gov = _resolve_cfg_final(simple_cfg, pre_run_advanced_cfg)
             cfg_final = {**dict(cfg_final or {}), **dict(technical_engine_overrides or {})}
 
-            current_signature = _build_step5_input_signature(cfg_final, asset_panel_df)
+            # Re-check freshness after the collapsed setup controls have rendered.
+            # Streamlit executes expander contents even while collapsed, so mounting
+            # the runner here unconditionally can publish a stale current signature
+            # even though the visible page is still showing a fresh stored result.
+            # Only show the rerun button when the setup actually differs.
+            current_result_still_fresh, current_signature = _current_result_is_fresh_for_ready_card(cfg_final, asset_panel_df)
+            current_config_fp = _resolve_config_fingerprint_for_ready_card(cfg_final)
             st.session_state["step5_current_input_signature"] = current_signature
-            clear_retired_step5_state()
+            st.session_state["step5_current_run_signature"] = current_signature
+            st.session_state["step5_current_config_fingerprint"] = current_config_fp
 
-            new_run_result = _render_ready_to_run_section(
-                cfg_final=cfg_final,
-                asset_panel_df=asset_panel_df,
-                current_philosophy=current_philosophy,
-                simple_cfg=simple_cfg,
-                pre_run_advanced_cfg=pre_run_advanced_cfg,
-                governance_status=gov,
-                bordered=False,
-                show_detail_expanders=False,
-            )
+            if not current_result_still_fresh:
+                clear_retired_step5_state()
+                new_run_result = _render_ready_to_run_section(
+                    cfg_final=cfg_final,
+                    asset_panel_df=asset_panel_df,
+                    current_philosophy=current_philosophy,
+                    simple_cfg=simple_cfg,
+                    pre_run_advanced_cfg=pre_run_advanced_cfg,
+                    governance_status=gov,
+                    bordered=False,
+                    show_detail_expanders=False,
+                )
 
     else:
         st.info(
@@ -1093,9 +1108,16 @@ def render_step_5() -> None:
 
     execution_changed = bool(last_run_signature and last_run_signature != current_signature and not has_fresh_stored_result)
     post_run_is_stale = bool(new_run_result is None and stored_run_result is not None and execution_changed)
-    st.session_state["step5_post_run_is_stale"] = False
+    current_result_is_fresh_for_ui = bool(run_result is not None and not post_run_is_stale)
+    st.session_state[STEP5_POST_RUN_IS_STALE_KEY] = bool(post_run_is_stale)
+    st.session_state[STEP5_CURRENT_RESULT_IS_FRESH_KEY] = bool(current_result_is_fresh_for_ui)
 
     if post_run_is_stale:
+        # Reliability/robustness must be tied to the latest executed setup. If
+        # the user has applied a suggestion or changed controls, close the panel
+        # until the updated setup has been run.
+        st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = False
+        st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = False
         st.info(
             "The current strategy engine inputs differ from the last executed run. "
             "Run the updated setup to refresh the metrics."

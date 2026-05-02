@@ -38,6 +38,10 @@ SIZE_SUGGESTION_TIMING_KEY = "step5_size_suggestion_timing_v1"
 # detailed render.
 STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY = "step5_run_diagnostics_expanded_v1"
 STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY = "step5_scroll_to_run_diagnostics_v1"
+STEP5_RELIABILITY_EXPANDED_KEY = "step5_reliability_and_robustness_expanded_v1"
+STEP5_SCROLL_TO_RELIABILITY_KEY = "step5_scroll_to_reliability_and_robustness_v1"
+STEP5_CURRENT_RESULT_IS_FRESH_KEY = "step5_current_result_is_fresh_v1"
+STEP5_POST_RUN_IS_STALE_KEY = "step5_post_run_is_stale"
 
 # Personal Finance live-summary defaults. These mirror the first visible state
 # of the main Personal Finance Setup screen, so the sidebar is useful even on
@@ -492,6 +496,86 @@ def _suggestion_timing_rows() -> list[tuple[str, float, int, int]]:
         if seconds > 0.0 or candidates > 0:
             rows.append((label, seconds, candidates, accepted))
     return rows
+
+
+def _step5_improvement_flow_completed() -> bool:
+    """Return True once the terminal Step 5 improvement phase is resolved.
+
+    The main Step 5 post-run panel imports the exact phase-key constants from
+    the suggestion modules. The global sidebar deliberately avoids those imports
+    to prevent circular UI dependencies, so this helper detects the final
+    universe-size decision from session-state keys. A truthy Step 5 size
+    applied/skipped marker means the optional improvement flow is complete.
+    """
+    try:
+        items = list(st.session_state.items())
+    except Exception:
+        items = []
+
+    for key, value in items:
+        key_text = str(key).lower()
+        if "step5" not in key_text or "size" not in key_text:
+            continue
+        if not ("applied" in key_text or "skipped" in key_text):
+            continue
+        if "timing" in key_text or "suggestion_count" in key_text:
+            continue
+        if isinstance(value, bool):
+            if value:
+                return True
+            continue
+        if value is not None and str(value).strip():
+            return True
+
+    return False
+
+
+def _step5_result_is_current_for_sidebar() -> bool:
+    """Return True only when the sidebar can safely open reliability checks.
+
+    Completing all optional improvement phases is not enough. If the user has
+    applied a suggestion or changed engine inputs after the last executed run,
+    reliability and robustness should stay closed until the updated setup is run
+    again. The Strategy Engine workspace owns the authoritative freshness flag;
+    this sidebar also double-checks the stored run/config fingerprints when they
+    are available.
+    """
+    run_map = _latest_run_result()
+    if not run_map:
+        return False
+
+    explicit_fresh = st.session_state.get(STEP5_CURRENT_RESULT_IS_FRESH_KEY, None)
+    post_run_stale = bool(st.session_state.get(STEP5_POST_RUN_IS_STALE_KEY, False))
+
+    # The global sidebar is rendered before the active Step 5 page. If the
+    # previous completed render says the result is fresh and not stale, trust
+    # that flag before inspecting transient current-signature keys. Those keys
+    # can briefly lag behind the main page and incorrectly disable the button.
+    if isinstance(explicit_fresh, bool) and explicit_fresh and not post_run_stale:
+        return True
+
+    if post_run_stale:
+        return False
+
+    last_signature = str(st.session_state.get("step5_last_run_signature", "") or run_map.get("run_signature", "") or "")
+    current_signature = str(
+        st.session_state.get("step5_current_run_signature", "")
+        or st.session_state.get("step5_current_input_signature", "")
+        or ""
+    )
+    if last_signature and current_signature and last_signature != current_signature:
+        return False
+
+    last_config_fp = str(st.session_state.get("step5_last_config_fingerprint", "") or run_map.get("config_fingerprint", "") or "")
+    current_config_fp = str(st.session_state.get("step5_current_config_fingerprint", "") or "")
+    if last_config_fp and current_config_fp and last_config_fp != current_config_fp:
+        return False
+
+    if isinstance(explicit_fresh, bool):
+        return bool(explicit_fresh)
+
+    # Legacy fallback for older sessions before the workspace wrote the explicit flag.
+    return bool(run_map)
 
 
 # ---------------------------------------------------------------------------
@@ -1546,17 +1630,54 @@ def _render_step5_diagnostics() -> None:
 
         st.divider()
         st.caption("Full validation details stay in the main post-run panel.")
-        st.info(
-            "Reliability and robustness are best run after the optional improvement checks are completed, "
-            "because accepted suggestions can still change the setup being tested."
-        )
-        st.button(
-            "Show reliability & robustness",
-            key="global_sidebar_step5_reliability_disabled",
+
+        improvement_flow_completed = _step5_improvement_flow_completed()
+        result_is_current = _step5_result_is_current_for_sidebar()
+        reliability_visible = bool(st.session_state.get(STEP5_RELIABILITY_EXPANDED_KEY, False))
+
+        if (not improvement_flow_completed or not result_is_current) and reliability_visible:
+            # Do not allow the robustness panel to stay open for an intermediate
+            # or stale setup. Accepted/skipped suggestions can change the active
+            # engine inputs, so the updated setup must be run before reliability
+            # checks are meaningful.
+            reliability_visible = False
+            st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = False
+            st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = False
+
+        if improvement_flow_completed and result_is_current:
+            st.caption("Optional improvement checks completed. Reliability and robustness can now be opened from here.")
+        elif improvement_flow_completed and not result_is_current:
+            st.info(
+                "Optional improvement checks are completed, but the current Strategy Engine inputs differ from the last executed run. "
+                "Run the updated setup first, then open reliability and robustness."
+            )
+        else:
+            st.info(
+                "Reliability and robustness are best run after the optional improvement checks are completed, "
+                "because accepted suggestions can still change the setup being tested."
+            )
+
+        reliability_button_disabled = bool(not improvement_flow_completed or not result_is_current)
+        reliability_button_label = "Hide reliability & robustness" if reliability_visible else "Show reliability & robustness"
+        if st.button(
+            reliability_button_label,
+            key="global_sidebar_step5_toggle_reliability_and_robustness",
             use_container_width=True,
-            disabled=True,
-            help="Run reliability and robustness checks from the main Strategy Engine screen.",
-        )
+            disabled=reliability_button_disabled,
+            help=(
+                "Complete or skip all optional improvement checks before opening reliability and robustness."
+                if not improvement_flow_completed
+                else (
+                    "Run the updated Strategy Engine setup first; reliability checks must match the latest executed result."
+                    if not result_is_current
+                    else "Show or hide the reliability and robustness panel for the final selected setup."
+                )
+            ),
+        ):
+            next_visible = not reliability_visible
+            st.session_state[STEP5_RELIABILITY_EXPANDED_KEY] = next_visible
+            st.session_state[STEP5_SCROLL_TO_RELIABILITY_KEY] = bool(next_visible)
+            st.rerun()
 
 
 def _render_step5_sidebar(step: int) -> None:
