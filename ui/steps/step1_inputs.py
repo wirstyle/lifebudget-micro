@@ -1173,7 +1173,9 @@ def _apply_target_preset_and_rerun(value: float, label: str) -> None:
     The compact dashboard renders STEP1_TARGET_WEEKLY_SAVINGS as a
     number_input before the preset buttons. Streamlit forbids assigning to that
     widget key later in the same render, so presets must use the existing
-    pending-patch + rerun pattern.
+    pending-patch pattern and immediately rerun. Without the explicit rerun,
+    the patch is only applied on the next unrelated click, making the sidebar
+    look one interaction behind.
     """
     queue_step_patch(
         STEP1_PENDING_WIDGET_PATCH,
@@ -1183,6 +1185,7 @@ def _apply_target_preset_and_rerun(value: float, label: str) -> None:
             STEP2_TARGET_USER_TOUCHED_INTERNAL: True,
         },
     )
+    st.rerun()
 
 
 def _render_savings_target_card(snapshot: dict) -> tuple[dict, dict, dict, float, int]:

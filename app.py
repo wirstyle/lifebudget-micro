@@ -108,15 +108,18 @@ def main() -> None:
 
     step = _current_step()
 
-    # Shared contextual sidebar. This is intentionally not step navigation;
-    # the main wizard still owns Back/Continue routing inside each screen.
-    render_global_sidebar()
-
     # Step 0 has its own landing title, so avoid showing the app title twice.
     if step != 0:
         st.title("LifeBudget Micro")
 
+    # Render the active screen first so any state seeded or updated by that
+    # screen is available to the global sidebar in the same pass. Streamlit
+    # still displays sidebar content in the sidebar regardless of call order.
     ROUTES.get(step, render_step_0)()
+
+    # Shared contextual sidebar. This is intentionally not step navigation;
+    # the main wizard still owns Back/Continue routing inside each screen.
+    render_global_sidebar()
 
 
 if __name__ == "__main__":
