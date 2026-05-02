@@ -606,7 +606,12 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
     margin_label = "Free margin" if margin >= 0 else "Deficit"
     margin_help = "Money left after spending" if margin >= 0 else "Spending above income"
 
-    total = max(income, fixed + variable + discretionary + free_margin, fixed + variable + discretionary + deficit, 1.0)
+    total = max(
+        income,
+        fixed + variable + discretionary + free_margin,
+        fixed + variable + discretionary + deficit,
+        1.0,
+    )
     segments = [
         ("Fixed essentials", fixed, fixed_colour),
         ("Variable essentials", variable, variable_colour),
@@ -626,46 +631,36 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
             f'<div title="{label}: £{amount:,.0f}/week" style="width:{width:.2f}%; background:{colour}; height:22px;"></div>'
         )
 
+    def _legend_row(colour: str, title: str, detail: str, *, bordered: bool = False) -> str:
+        border = "border:1px solid #cbd5e1;" if bordered else ""
+        return (
+            '<div style="display:flex; align-items:center; gap:0.5rem; font-size:0.82rem; '
+            'color:#334155; line-height:1.35;">'
+            f'<span style="width:0.8rem; height:0.8rem; border-radius:0.22rem; background:{colour}; '
+            f'{border} display:inline-block; flex:0 0 auto;"></span>'
+            f'<span><b>{title}</b> · {detail}</span>'
+            '</div>'
+        )
+
     legend_rows = [
-        f"""
-        <div style="display:flex; align-items:center; gap:0.5rem; font-size:0.82rem; color:#334155; line-height:1.35;">
-            <span style="width:0.8rem; height:0.8rem; border-radius:0.22rem; background:{fixed_colour}; display:inline-block; flex:0 0 auto;"></span>
-            <span><b>Fixed essentials</b> · regular committed costs</span>
-        </div>
-        """,
-        f"""
-        <div style="display:flex; align-items:center; gap:0.5rem; font-size:0.82rem; color:#334155; line-height:1.35;">
-            <span style="width:0.8rem; height:0.8rem; border-radius:0.22rem; background:{variable_colour}; display:inline-block; flex:0 0 auto;"></span>
-            <span><b>Variable essentials</b> · flexible essential costs</span>
-        </div>
-        """,
-        f"""
-        <div style="display:flex; align-items:center; gap:0.5rem; font-size:0.82rem; color:#334155; line-height:1.35;">
-            <span style="width:0.8rem; height:0.8rem; border-radius:0.22rem; background:{discretionary_colour}; border:1px solid #cbd5e1; display:inline-block; flex:0 0 auto;"></span>
-            <span><b>Discretionary spending</b> · optional or lifestyle spending</span>
-        </div>
-        """,
-        f"""
-        <div style="display:flex; align-items:center; gap:0.5rem; font-size:0.82rem; color:#334155; line-height:1.35;">
-            <span style="width:0.8rem; height:0.8rem; border-radius:0.22rem; background:{margin_colour}; display:inline-block; flex:0 0 auto;"></span>
-            <span><b>{margin_label}</b> · {margin_help}</span>
-        </div>
-        """,
+        _legend_row(fixed_colour, "Fixed essentials", "regular committed costs"),
+        _legend_row(variable_colour, "Variable essentials", "flexible essential costs"),
+        _legend_row(discretionary_colour, "Discretionary spending", "optional or lifestyle spending", bordered=True),
+        _legend_row(margin_colour, margin_label, margin_help),
     ]
 
-    st.markdown(
-        f"""
-        <div style="border:1px solid rgba(49,51,63,0.14); border-radius:14px; padding:0.85rem; background:#ffffff; box-shadow:0 1px 6px rgba(0,0,0,0.03);">
-            <div style="display:flex; overflow:hidden; border-radius:999px; height:22px; background:{income_colour}; margin-bottom:0.8rem;">
-                {''.join(pieces)}
-            </div>
-            <div style="display:flex; flex-direction:column; gap:0.55rem;">
-                {''.join(legend_rows)}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    html = (
+        '<div style="border:1px solid rgba(49,51,63,0.14); border-radius:14px; padding:0.85rem; '
+        'background:#ffffff; box-shadow:0 1px 6px rgba(0,0,0,0.03);">'
+        f'<div style="display:flex; overflow:hidden; border-radius:999px; height:22px; background:{income_colour}; margin-bottom:0.8rem;">'
+        f'{"".join(pieces)}'
+        '</div>'
+        '<div style="display:flex; flex-direction:column; gap:0.55rem;">'
+        f'{"".join(legend_rows)}'
+        '</div>'
+        '</div>'
     )
+    st.markdown(html, unsafe_allow_html=True)
 
 def _auto_save_current_situation_snapshot() -> None:
     """Persist the current Step 1 estimate without asking for a confirm button."""
