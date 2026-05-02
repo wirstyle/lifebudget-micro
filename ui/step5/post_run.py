@@ -64,6 +64,7 @@ STEP5_SHOW_DETAILED_TIMING_TABLES_KEY = "step5_show_detailed_timing_tables_v1"
 
 
 SUGGESTION_DEPTH_MODE_KEY = "step5_suggestion_testing_depth_mode_v1"
+SUGGESTION_DEPTH_MODE_WIDGET_KEY = "step5_suggestion_testing_depth_mode_widget_v1"
 SUGGESTION_DEPTH_COUNT_KEYS: dict[str, str] = {
     "preset": "step5_suggestion_count_preset_v1",
     "auto_opt": "step5_suggestion_count_auto_opt_v1",
@@ -130,6 +131,16 @@ def _apply_suggestion_depth_preset(mode: str) -> dict[str, int]:
     return counts
 
 
+def _on_suggestion_depth_mode_change() -> None:
+    """Sync Testing depth immediately without relying on index + keyed widget state."""
+    mode = str(st.session_state.get(SUGGESTION_DEPTH_MODE_WIDGET_KEY, SUGGESTION_DEPTH_DEFAULT) or SUGGESTION_DEPTH_DEFAULT)
+    if mode not in ["Fast", "Balanced", "Thorough", "Custom"]:
+        mode = SUGGESTION_DEPTH_DEFAULT
+    st.session_state[SUGGESTION_DEPTH_MODE_KEY] = mode
+    if mode in SUGGESTION_DEPTH_PRESETS:
+        _apply_suggestion_depth_preset(mode)
+
+
 def _render_suggestion_depth_controls() -> None:
     """Optional runtime/coverage control for the sequential suggestion tests."""
     defaults = SUGGESTION_DEPTH_PRESETS[SUGGESTION_DEPTH_DEFAULT]
@@ -146,13 +157,20 @@ def _render_suggestion_depth_controls() -> None:
         if current_mode not in mode_options:
             current_mode = SUGGESTION_DEPTH_DEFAULT
             st.session_state[SUGGESTION_DEPTH_MODE_KEY] = current_mode
+
+        if st.session_state.get(SUGGESTION_DEPTH_MODE_WIDGET_KEY) not in mode_options:
+            st.session_state[SUGGESTION_DEPTH_MODE_WIDGET_KEY] = current_mode
+        elif str(st.session_state.get(SUGGESTION_DEPTH_MODE_WIDGET_KEY)) != current_mode:
+            st.session_state[SUGGESTION_DEPTH_MODE_WIDGET_KEY] = current_mode
+
         mode = st.selectbox(
             "Testing depth",
             options=mode_options,
-            index=mode_options.index(current_mode),
-            key=SUGGESTION_DEPTH_MODE_KEY,
+            key=SUGGESTION_DEPTH_MODE_WIDGET_KEY,
+            on_change=_on_suggestion_depth_mode_change,
             help="Controls how many rerun-tested alternatives are evaluated in each optional suggestion phase.",
         )
+        mode = str(st.session_state.get(SUGGESTION_DEPTH_MODE_KEY, mode) or mode)
 
         if mode in SUGGESTION_DEPTH_PRESETS:
             counts = _apply_suggestion_depth_preset(mode)
