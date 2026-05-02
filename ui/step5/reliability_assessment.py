@@ -1107,6 +1107,12 @@ def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: di
     components, overall, validation_df, validation_meta = _reliability_component_rows(run_map, benchmark_payload)
     robustness_payload, robustness_summary, robustness_status, robustness_message = _start_date_robustness_visible_summary(run_map)
 
+    component_status = {
+        str(row.get("Reliability component", "") or ""): str(row.get("Status", "") or "")
+        for row in list(components or [])
+        if isinstance(row, dict)
+    }
+
     st.markdown("### Result reliability assessment")
 
     c1, c2 = st.columns(2)
@@ -1135,14 +1141,37 @@ def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: di
 
     _render_start_date_robustness_actions(run_map)
 
-    details_ctx = st.container(border=True) if inline_details else st.expander("Detailed evidence and validation", expanded=False)
-    with details_ctx:
-        if inline_details:
-            st.markdown("#### Detailed evidence and validation")
-            st.caption(
-                "Detailed reliability evidence is shown here instead of inside a nested expander, "
-                "because Streamlit does not allow expanders inside expanders."
-            )
+    evidence_bits = [
+        f"market data: {component_status.get('Real market-data snapshot', '—')}",
+        f"walk-forward: {component_status.get('Walk-forward evaluation', '—')}",
+        f"benchmark check: {component_status.get('Benchmark calculation validation', '—')}",
+        f"future guarantee: {component_status.get('Future guarantee', 'Not claimed')}",
+    ]
+    st.caption("Evidence summary · " + " · ".join(evidence_bits))
+
+    show_details = bool(
+        st.checkbox(
+            "Show detailed reliability evidence and validation",
+            value=False,
+            key="step5_show_detailed_reliability_evidence_v1",
+            help=(
+                "Opens the full audit evidence: reliability components, benchmark validation, "
+                "start-date robustness rows, timing, and method notes."
+            ),
+        )
+    )
+
+    if not show_details:
+        st.caption(
+            "Detailed benchmark tables, robustness rows, and method notes are hidden to keep the review panel compact."
+        )
+        return
+
+    with st.container(border=True):
+        st.markdown("### Detailed evidence and validation")
+        st.caption(
+            "Full audit evidence for the current Strategy Engine result. These details are hidden by default so the reliability panel stays readable."
+        )
 
         st.markdown("**Reliability components**")
         st.dataframe(pd.DataFrame(components), use_container_width=True, hide_index=True)
