@@ -41,7 +41,7 @@ The hosted Streamlit app is deployed from the `deploy-lifebudget-demo` branch. T
 
 ```text
 Deployed branch: deploy-lifebudget-demo
-Final assessment tag: assignment-3-final
+Final assessment tag: assignment-3-final-v4
 ```
 
 Example Git commands to create the final tag from the deployed branch:
@@ -49,8 +49,8 @@ Example Git commands to create the final tag from the deployed branch:
 ```bash
 git checkout deploy-lifebudget-demo
 git pull origin deploy-lifebudget-demo
-git tag -a assignment-3-final -m "Assignment 3 final submission snapshot"
-git push origin assignment-3-final
+git tag -a assignment-3-final-v4 -m "Assignment 3 final submission snapshot"
+git push origin assignment-3-final-v4
 ```
 
 If a different tag or release name is used, replace the suggested label above with the exact submitted version label. The important point is that the tag identifies the same commit used by the online deployed branch.
