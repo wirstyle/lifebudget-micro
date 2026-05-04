@@ -1,12 +1,10 @@
-# ui/common/metrics.py
-
 """
 Reusable metric rendering helpers for Streamlit.
 
 Goal:
-- Centralise st.metric usage
-- Standardise formatting (%, decimals, etc.)
-- Avoid duplication across app.py
+- centralise st.metric usage;
+- standardise formatting for percentages, integers, currency, and robustness;
+- avoid duplicate metric-formatting code across UI modules.
 """
 
 from __future__ import annotations
@@ -20,7 +18,10 @@ def _format_number(value, decimals: int = 2, suffix: str = "") -> str:
     if value is None:
         return "—"
     try:
-        return f"{float(value):.{decimals}f}{suffix}"
+        number = float(value)
+        if number != number or number in {float("inf"), float("-inf")}:
+            return "—"
+        return f"{number:.{decimals}f}{suffix}"
     except Exception:
         return str(value)
 
@@ -96,13 +97,21 @@ def currency_metric(
         return
 
     try:
-        display_value = f"{currency_symbol}{float(value):,.{decimals}f}"
+        value_number = float(value)
+        if value_number != value_number or value_number in {float("inf"), float("-inf")}:
+            display_value = "—"
+        else:
+            display_value = f"{currency_symbol}{value_number:,.{decimals}f}"
     except Exception:
         display_value = str(value)
 
     if delta is not None:
         try:
-            display_delta = f"{currency_symbol}{float(delta):,.{decimals}f}"
+            delta_number = float(delta)
+            if delta_number != delta_number or delta_number in {float("inf"), float("-inf")}:
+                display_delta = "—"
+            else:
+                display_delta = f"{currency_symbol}{delta_number:,.{decimals}f}"
         except Exception:
             display_delta = str(delta)
         st.metric(label, display_value, display_delta)

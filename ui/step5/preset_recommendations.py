@@ -1,14 +1,18 @@
-from __future__ import annotations
-
 """Step 5 preset-improvement assistant.
 
-Scope of this first restored suggestion button:
-- test only high-level strategy preset alternatives;
-- do not change Step 4 universe, asset list, or universe size;
-- do not run local auto-optimisation;
-- apply changes through queued session-state updates to avoid Streamlit widget-key
-  mutation errors.
+This module implements Phase 1 of the optional Strategy Engine improvement flow.
+It tests nearby strategy preset alternatives using the real engine, compares the
+rerun-tested results against the current run, and lets the user either apply the
+accepted candidate or keep the current preset and continue.
+
+The phase is intentionally limited to high-level preset/template/style changes.
+It does not change the Step 4 universe, asset list, universe size, or technical
+engine tuning. Later phases handle those decisions.
 """
+
+from __future__ import annotations
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -1041,16 +1045,17 @@ def render_preset_improvement(run_result: dict) -> dict:
     return flow_state
 
 
-# Compatibility names used by older Step 5 imports. Keep these harmless until the
-# second and third suggestion buttons are rebuilt deliberately.
+# Compatibility names used by older Step 5 imports. The active post-run flow
+# calls the dedicated phase modules directly; these wrappers remain harmless for
+# older local imports.
 
 def render_preset_recommendations(run_result: dict, simple_cfg: dict | None = None) -> None:
     render_preset_improvement(run_result)
 
 
 def render_auto_opt_recommendations(simple_cfg: dict | None = None) -> None:
-    st.info("Technical auto-tune suggestions are intentionally disabled in this preset-only rebuild.")
+    st.info("Technical auto-tune suggestions are handled by the dedicated engine-tuning phase.")
 
 
 def render_size_recommendations() -> None:
-    st.info("Universe/size suggestions are intentionally disabled until the preset loop is stable.")
+    st.info("Universe and size suggestions are handled by the dedicated later-phase modules.")

@@ -16,6 +16,9 @@ from ui.steps.step6_projection import render_step_6
 from ui.steps.step7_insights import render_step_7
 
 
+# Central route registry for the Streamlit wizard.
+# Individual screens own their local UI and navigation buttons; app.py only
+# resolves the active step and delegates rendering to the relevant module.
 ROUTES = {
     0: render_step_0,
     1: render_step_1,
@@ -34,7 +37,6 @@ def _current_step() -> int:
         return int(st.session_state.get(CURRENT_STEP, 0) or 0)
     except Exception:
         return 0
-
 
 
 def _enforce_mobile_landscape_view() -> None:
@@ -100,13 +102,21 @@ def main() -> None:
     st.set_page_config(page_title="LifeBudget Micro", layout="centered")
     _enforce_mobile_landscape_view()
 
+    # Session defaults must exist before any screen reads or writes app state.
     bootstrap_session_state()
+
+    # Queued updates are applied before widgets render. This avoids Streamlit
+    # widget-key mutation issues when buttons apply presets, suggestions or
+    # navigation changes from a previous interaction.
     apply_queued_session_updates()
 
     if CURRENT_STEP not in st.session_state:
         st.session_state[CURRENT_STEP] = 0
 
     step = _current_step()
+    if step not in ROUTES:
+        step = 0
+        st.session_state[CURRENT_STEP] = 0
 
     # Step 0 has its own landing title, so avoid showing the app title twice.
     if step != 0:
@@ -115,7 +125,7 @@ def main() -> None:
     # Render the active screen first so any state seeded or updated by that
     # screen is available to the global sidebar in the same pass. Streamlit
     # still displays sidebar content in the sidebar regardless of call order.
-    ROUTES.get(step, render_step_0)()
+    ROUTES[step]()
 
     # Shared contextual sidebar. This is intentionally not step navigation;
     # the main wizard still owns Back/Continue routing inside each screen.

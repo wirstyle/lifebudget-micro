@@ -1,13 +1,11 @@
-# ui/common/tables.py
-
 """
 Reusable table rendering helpers for Streamlit.
 
 Goal:
-- Standardise dataframe display
-- Add sorting / formatting helpers
-- Reduce duplication in app.py
-- Centralise common comparison / download patterns
+- standardise dataframe display;
+- provide sorting and formatting helpers;
+- avoid duplicate table-formatting code across UI modules;
+- centralise common comparison and download patterns.
 """
 
 from __future__ import annotations
@@ -20,6 +18,14 @@ import streamlit as st
 
 def _is_valid_df(df: pd.DataFrame | None) -> bool:
     return isinstance(df, pd.DataFrame) and not df.empty
+
+
+def _is_finite_number(value: object) -> bool:
+    try:
+        number = float(value)
+        return bool(pd.notnull(number) and number not in {float("inf"), float("-inf")})
+    except Exception:
+        return False
 
 
 def _safe_title(title: Optional[str]) -> None:
@@ -187,7 +193,9 @@ def format_percentage_columns(df: pd.DataFrame, columns: Sequence[str]) -> pd.Da
         if col in work.columns:
             try:
                 numeric = pd.to_numeric(work[col], errors="coerce")
-                work[col] = numeric.map(lambda x: f"{x * 100:.2f}%" if pd.notnull(x) else "—")
+                work[col] = numeric.map(
+                    lambda x: f"{float(x) * 100:.2f}%" if _is_finite_number(x) else "—"
+                )
             except Exception:
                 pass
     return work
@@ -206,7 +214,9 @@ def format_decimal_columns(
         if col in work.columns:
             try:
                 numeric = pd.to_numeric(work[col], errors="coerce")
-                work[col] = numeric.map(lambda x: f"{x:.{decimals}f}" if pd.notnull(x) else "—")
+                work[col] = numeric.map(
+                    lambda x: f"{float(x):.{decimals}f}" if _is_finite_number(x) else "—"
+                )
             except Exception:
                 pass
     return work
@@ -227,7 +237,7 @@ def format_currency_columns(
             try:
                 numeric = pd.to_numeric(work[col], errors="coerce")
                 work[col] = numeric.map(
-                    lambda x: f"{currency_symbol}{x:,.{decimals}f}" if pd.notnull(x) else "—"
+                    lambda x: f"{currency_symbol}{float(x):,.{decimals}f}" if _is_finite_number(x) else "—"
                 )
             except Exception:
                 pass

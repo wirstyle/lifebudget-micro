@@ -1,108 +1,105 @@
-# src/expenses.py
-# ------------------------------------------------------------
-# LifeBudget Micro — helpers for:
-# - Weekly normalisation of itemised expenses
-# - Default "fixed essentials" rows for st.data_editor
-# - Discretionary preset suggestion (by preset name)
-# - Variable essentials breakdown model (utilities/season/commute/groceries/household)
-# - One-off events cleaning + shock_map building (weekly)
-# - Apply cumulative shock_map to a time series (used by compounder.py)
-# - Shared period conversion helpers (weekly / monthly / yearly)
-# ------------------------------------------------------------
+"""
+Expense and cash-flow helper functions for LifeBudget Micro.
+
+This module contains shared budgeting utilities used by the Personal Finance
+Planner and short-term scenario services:
+
+- weekly/monthly/yearly period conversion helpers;
+- fixed essentials default rows and weekly aggregation;
+- discretionary spending presets;
+- variable essentials breakdown calculations;
+- one-off event cleaning and weekly shock-map construction;
+- cumulative shock application for balance paths.
+
+The functions are intentionally small and dependency-light so they can be reused
+from Streamlit UI services without creating circular imports.
+"""
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, TypedDict, Union
 import math
+from typing import Dict, List, Sequence, TypedDict, Union
 
 
-# --- Conversions (kept here to avoid circular imports) ---
+# --- Conversions kept here to avoid circular imports. ---
 WEEKS_PER_YEAR = 52.0
 MONTHS_PER_YEAR = 12.0
 WEEKS_PER_MONTH = WEEKS_PER_YEAR / MONTHS_PER_YEAR
 
 PERIOD_TO_WEEK = {
     "Weekly": 1.0,
-    "Monthly": MONTHS_PER_YEAR / WEEKS_PER_YEAR,  # approx, consistent with app.py
+    "Monthly": MONTHS_PER_YEAR / WEEKS_PER_YEAR,
     "Yearly": 1.0 / WEEKS_PER_YEAR,
 }
 
 
 def to_weekly(amount: Union[int, float], period: str) -> float:
-    """Convert (amount, period) -> weekly float."""
+    """Convert a supported period amount into a weekly amount.
+
+    The function intentionally raises ``ValueError`` for unknown periods so
+    calling code catches invalid widget/session values early.
+    """
     if period not in PERIOD_TO_WEEK:
         raise ValueError(f"Unknown period: {period!r}. Expected one of {list(PERIOD_TO_WEEK)}")
     return float(amount) * float(PERIOD_TO_WEEK[period])
 
 
 # ------------------------------------------------------------
-# Period conversion helpers (shared across budgeting & investment)
+# Period conversion helpers
 # ------------------------------------------------------------
 
 def weekly_to_monthly(amount: Union[int, float]) -> float:
-    """
-    Convert weekly amount to monthly equivalent.
-
-    Uses 52 weeks / 12 months convention.
-    """
+    """Convert a weekly amount to a monthly equivalent using 52 / 12."""
     return float(amount) * WEEKS_PER_MONTH
 
 
 def monthly_to_weekly(amount: Union[int, float]) -> float:
-    """
-    Convert monthly amount to weekly equivalent.
-    """
+    """Convert a monthly amount to a weekly equivalent using 52 / 12."""
     return float(amount) / WEEKS_PER_MONTH
 
 
 def monthly_to_yearly(amount: Union[int, float]) -> float:
-    """
-    Convert monthly amount to yearly equivalent.
-    """
+    """Convert a monthly amount to a yearly equivalent."""
     return float(amount) * MONTHS_PER_YEAR
 
 
 def yearly_to_monthly(amount: Union[int, float]) -> float:
-    """
-    Convert yearly amount to monthly equivalent.
-    """
+    """Convert a yearly amount to a monthly equivalent."""
     return float(amount) / MONTHS_PER_YEAR
 
 
 def weekly_to_yearly(amount: Union[int, float]) -> float:
-    """
-    Convert weekly amount to yearly equivalent.
-    """
+    """Convert a weekly amount to a yearly equivalent."""
     return float(amount) * WEEKS_PER_YEAR
 
 
 def yearly_to_weekly(amount: Union[int, float]) -> float:
-    """
-    Convert yearly amount to weekly equivalent.
-    """
+    """Convert a yearly amount to a weekly equivalent."""
     return float(amount) / WEEKS_PER_YEAR
 
 
 def _safe_float(x) -> float:
+    """Convert to float, treating None, NaN, and invalid values as zero."""
     try:
         if x is None:
             return 0.0
-        v = float(x)
-        if math.isnan(v):
+        value = float(x)
+        if math.isnan(value):
             return 0.0
-        return v
+        return value
     except Exception:
         return 0.0
 
 
 def _safe_int(x, default: int = 0) -> int:
+    """Convert to int, falling back when values are missing or invalid."""
     try:
         if x is None:
             return default
-        v = float(x)
-        if math.isnan(v):
+        value = float(x)
+        if math.isnan(value):
             return default
-        return int(v)
+        return int(value)
     except Exception:
         return default
 
@@ -118,25 +115,23 @@ class ExpenseItem(TypedDict, total=False):
 
 
 def total_weekly_from_items(items: Sequence[dict]) -> float:
-    """
-    Sum a list of itemised expenses into a weekly total.
+    """Sum itemised expense rows into a weekly total.
 
-    Expected fields per dict:
-      - amount (numeric)
-      - period ("Weekly"|"Monthly"|"Yearly")  [optional; defaults Weekly]
+    Expected fields per row:
+    - ``amount``: numeric amount;
+    - ``period``: ``Weekly``, ``Monthly`` or ``Yearly``; defaults to Weekly.
 
-    Back-compat:
-      - If legacy 'enabled' exists, it is respected (False => row ignored).
+    Legacy rows with ``enabled=False`` are ignored for backward compatibility.
     """
     total = 0.0
-    for it in items or []:
+
+    for item in items or []:
         try:
-            # Back-compat: respect legacy "enabled" if present
-            if "enabled" in it and not bool(it.get("enabled", True)):
+            if "enabled" in item and not bool(item.get("enabled", True)):
                 continue
 
-            amount = _safe_float(it.get("amount", 0.0))
-            period = it.get("period", "Weekly") or "Weekly"
+            amount = _safe_float(item.get("amount", 0.0))
+            period = item.get("period", "Weekly") or "Weekly"
 
             if amount <= 0:
                 continue
@@ -149,7 +144,7 @@ def total_weekly_from_items(items: Sequence[dict]) -> float:
 
 
 def default_fixed_items_rows() -> List[ExpenseItem]:
-    """Default rows for a 'Fixed essentials' data_editor."""
+    """Return default fixed-essential rows for the optional Step 1 editor."""
     return [
         {"name": "Rent / housing", "amount": 0.0, "period": "Monthly"},
         {"name": "Utilities (gas/electric/water)", "amount": 0.0, "period": "Monthly"},
@@ -162,27 +157,25 @@ def default_fixed_items_rows() -> List[ExpenseItem]:
 
 
 # ============================================================
-# Discretionary presets (matches Step 1 UI buttons)
+# Discretionary presets
 # ============================================================
 
 def discretionary_preset_value(preset_name: str) -> float:
-    """
-    Return a weekly discretionary preset value based on the UI preset button.
-    Matches Step 1: ["Quiet week", "Typical", "Social-heavy"].
-    """
+    """Return a weekly discretionary preset used by the legacy Step 1 buttons."""
     name = (preset_name or "").strip().lower()
+
     if name == "quiet week":
         return 20.0
     if name == "typical":
         return 35.0
     if name == "social-heavy":
         return 60.0
-    # fallback (keeps MVP feel)
+
     return 35.0
 
 
 # ============================================================
-# Variable essentials — breakdown model (matches your Step 1 expander)
+# Variable essentials — breakdown model
 # ============================================================
 
 def variable_essentials_weekly_total(
@@ -197,10 +190,11 @@ def variable_essentials_weekly_total(
     household: Union[int, float],
     household_period: str,
 ) -> Dict[str, float]:
-    """
-    Returns a dict with a transparent breakdown + total_weekly.
+    """Return a transparent weekly breakdown for variable essentials.
 
-    Season multipliers are intentionally simple for an MVP.
+    The model is intentionally simple for the prototype: utilities are adjusted
+    by a small seasonal multiplier, commute is calculated as days times cost,
+    and groceries/household basics are normalised to weekly amounts.
     """
     util_base_w = to_weekly(_safe_float(utilities_base), str(utilities_period or "Weekly"))
 
@@ -243,73 +237,92 @@ class ShockRow(TypedDict, total=False):
 
 
 def clean_events(rows: Sequence[dict], *, weeks: int) -> List[ShockRow]:
-    """Clean rows from data_editor-like source; returns only valid amount>0 rows."""
+    """Clean event rows and return valid one-off expense events.
+
+    Input rows usually come from a data editor or compact stress-test preset.
+    Only positive amounts are kept. Weeks are clipped to the selected planning
+    horizon so downstream simulations can safely build a weekly shock map.
+    """
     cleaned: List[ShockRow] = []
-    W = int(weeks)
-    if W <= 0:
+    horizon = max(_safe_int(weeks, default=0), 0)
+
+    if horizon <= 0:
         return cleaned
 
-    for r in rows or []:
-        amount = _safe_float(r.get("amount", 0.0))
+    for row in rows or []:
+        amount = _safe_float(row.get("amount", 0.0))
         if amount <= 0:
             continue
 
-        week = _safe_int(r.get("week", 0), default=0)
-        if week < 1 or week > W:
-            week = max(1, min(W, week if week != 0 else 1))
+        week = _safe_int(row.get("week", 0), default=0)
+        if week < 1 or week > horizon:
+            week = max(1, min(horizon, week if week != 0 else 1))
 
-        name = str(r.get("name", "") or "").strip()
+        name = str(row.get("name", "") or "").strip()
         cleaned.append({"name": name, "amount": float(round(amount, 2)), "week": int(week)})
 
     return cleaned
 
 
 def events_to_weekly_shock_map(rows: Sequence[ShockRow]) -> Dict[int, float]:
-    """
-    Convert cleaned events into a weekly shock map.
+    """Convert cleaned one-off events into a weekly shock map.
 
     Convention:
-      - positive 'amount' means an expense
-      - shock_map stores NEGATIVE numbers to reduce balances
-    Output: {week_index (1-indexed): -total_amount_for_week}
+    - positive ``amount`` means an expense entered by the user;
+    - the returned shock map stores negative values to reduce balances.
+
+    Output shape: ``{week_index_1_based: -total_amount_for_week}``.
     """
     shock_map: Dict[int, float] = {}
-    for r in rows or []:
-        week = int(r["week"])
-        amt = abs(_safe_float(r["amount"]))
-        if amt <= 0:
+
+    for row in rows or []:
+        week = int(row["week"])
+        amount = abs(_safe_float(row["amount"]))
+
+        if amount <= 0:
             continue
-        shock_map[week] = float(shock_map.get(week, 0.0) - amt)
+
+        shock_map[week] = float(shock_map.get(week, 0.0) - amount)
+
     return shock_map
 
 
 # ============================================================
-# Apply cumulative shock map to a series (used by compounder.py)
+# Apply cumulative shock map to a series
 # ============================================================
 
-def apply_cumulative_events_to_series(values: Sequence[Union[int, float]], shock_map: Dict[int, float]) -> List[float]:
-    """
-    Apply a cumulative shock_map to a time series.
+def apply_cumulative_events_to_series(
+    values: Sequence[Union[int, float]],
+    shock_map: Dict[int, float],
+) -> List[float]:
+    """Apply a cumulative shock map to a numeric time series.
 
-    shock_map:
-      {week (1-indexed) -> shock amount (NEGATIVE for expenses)}
+    ``shock_map`` uses 1-indexed weeks and negative values for expenses.
 
     Semantics:
-    - If a shock occurs at week k, all values from k onward shift by that amount.
-    - Multiple shocks accumulate over time.
+    - if a shock occurs at week ``k``, all values from ``k`` onward shift by
+      that amount;
+    - multiple shocks accumulate over time.
     """
-    if not values:
+    if values is None:
         return []
+
+    values_list = list(values)
+    if not values_list:
+        return []
+
     if not shock_map:
-        return [float(v) for v in values]
+        return [float(value) for value in values_list]
 
     out: List[float] = []
     cumulative = 0.0
 
-    for i, v in enumerate(values):
-        week = i + 1  # 1-indexed
+    for index, value in enumerate(values_list):
+        week = index + 1
+
         if week in shock_map:
             cumulative += float(shock_map[week])
-        out.append(float(v) + cumulative)
+
+        out.append(float(value) + cumulative)
 
     return out

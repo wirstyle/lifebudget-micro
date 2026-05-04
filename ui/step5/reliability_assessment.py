@@ -1,18 +1,21 @@
-from __future__ import annotations
-
 """Strategy Engine result-reliability assessment.
 
-This module adds a lightweight confidence layer for the Strategy Engine result without
-running extra engines or downloading new data. It deliberately validates what can
-be validated safely:
+This module adds a lightweight confidence layer for the Strategy Engine result.
+By default, it validates what can be checked safely without extra downloads:
+
 - real market-data basis;
 - walk-forward/OOS structure;
 - same-period benchmark context;
 - metric-calculation sanity checks for known market assets;
 - sensitivity evidence from already-tested engine-tuning candidates.
 
-It does not claim that the strategy is a live fund track record or a forecast.
+It also offers an optional manual start-date robustness check that reruns the
+same configuration on alternative historical windows from the existing selected
+market-data panel. It does not claim that the strategy is a live fund track
+record or a forecast.
 """
+
+from __future__ import annotations
 
 import json
 import math
@@ -997,7 +1000,7 @@ def _render_start_date_robustness_actions(run_map: dict) -> None:
     if saved_scope != scope and saved_payload:
         st.info("The saved robustness check belongs to a previous result/configuration. Run the check again to update it for the current Strategy Engine result.")
 
-    run_label = "Re-run robustness check" if has_current_robustness else "Run robustness check"
+    run_label = "Re-run start-date robustness" if has_current_robustness else "Run start-date robustness"
     run_help = (
         "Refresh the start-date sensitivity check for this active Strategy Engine result."
         if has_current_robustness
@@ -1109,8 +1112,17 @@ def _render_start_date_robustness_details(payload: dict) -> None:
     )
 
 
-def render_result_reliability_assessment(run_map: dict, *, benchmark_payload: dict | None = None, inline_details: bool = False) -> None:
-    """Render a compact reliability assessment for the current Strategy Engine result."""
+def render_result_reliability_assessment(
+    run_map: Any,
+    benchmark_payload: Any = None,
+    *,
+    inline_details: bool = False,
+) -> None:
+    """Render a compact reliability assessment for the current Strategy Engine result.
+
+    ``inline_details`` is accepted for compatibility with the Step 5 post-run
+    renderer; this component now controls its own internal detail toggle.
+    """
     run_map = _coerce_mapping(run_map)
     benchmark_payload = _coerce_mapping(benchmark_payload or {})
 

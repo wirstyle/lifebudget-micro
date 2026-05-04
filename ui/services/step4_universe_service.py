@@ -1,3 +1,16 @@
+"""
+Step 4 universe and market-data service for LifeBudget Micro.
+
+This module contains the non-UI logic behind the Investment Strategy Lab setup.
+It resolves investment philosophy defaults, universe sizes, universe strategies,
+asset labels, custom asset baskets, cached Yahoo deployment panels, feature
+engineering, diagnostics payloads, and the Step 4 payload handed to Step 5.
+
+The Step 4 renderer should stay mostly layout-focused. This service owns the
+state transformations, asset-universe construction, panel cache resolution and
+session_state updates needed by the Strategy Engine.
+"""
+
 from __future__ import annotations
 
 from io import BytesIO
@@ -11,15 +24,15 @@ import time
 import pandas as pd
 import streamlit as st
 
-from src.investment import build_asset_group_dataframe, build_asset_group_summary
-from src.market_data import download_yahoo_price_panel, build_return_panel_from_prices
 from src.features import (
     DailyFeatureConfig,
-    validate_daily_asset_panel,
+    add_cross_sectional_features,
     add_daily_intramonth_state_features,
     build_intramonth_monthly_features,
-    add_cross_sectional_features,
+    validate_daily_asset_panel,
 )
+from src.investment import build_asset_group_dataframe, build_asset_group_summary
+from src.market_data import build_return_panel_from_prices, download_yahoo_price_panel
 from ui.state.keys import (
     ASSET_AUTO_ADJUST,
     ASSET_END_DATE,
@@ -42,7 +55,6 @@ from ui.state.keys import (
     LAST_USED_UNIVERSE_ASSETS,
     PLANNING_SNAPSHOT,
     RECOMMENDED_UNIVERSE_ASSETS,
-    START_DATE_STABILITY_TEST_OPTIONS,
     UNIVERSE_CUSTOM_ENABLED,
     UNIVERSE_CUSTOM_ENABLED_SOURCE,
     UNIVERSE_SIMPLE_STRATEGY_TEMPLATE,
@@ -58,8 +70,9 @@ STEP4_PANEL_BUILD_NONCE_KEY = "step4_panel_build_nonce"
 STEP4_PANEL_LAST_BUILD_TRIGGER_KEY = "step4_panel_last_build_trigger"
 
 # Cached deployment panels.
-# Local/dev can still force live Yahoo by setting LIFEBUDGET_USE_DEPLOYMENT_PANEL_FIRST=0.
-# Streamlit Cloud should keep the default so Step 4 does not depend on live Yahoo requests.
+# Streamlit Cloud should use these files first so the public demo does not
+# depend on live Yahoo/yfinance availability or rate limits. Local/dev can force
+# live Yahoo by setting LIFEBUDGET_USE_DEPLOYMENT_PANEL_FIRST=0.
 DEPLOYMENT_ASSET_PANEL_PATH = Path(
     os.getenv("LIFEBUDGET_DEPLOYMENT_ASSET_PANEL", "data/deployment_asset_panel.csv.gz")
 )
@@ -80,8 +93,8 @@ STEP4_RAW_WEEKLY_PANEL_KEY = "_step4_raw_weekly_return_panel_df"
 STEP4_RAW_PANEL_SOURCE_KEY = "_step4_raw_return_panel_source"
 
 
-
 def _serialize_feature_cfg(cfg: DailyFeatureConfig) -> str:
+    """Serialize the feature-engineering config for cache/signature stability."""
     payload = {
         "date_col": cfg.date_col,
         "asset_col": cfg.asset_col,
@@ -117,6 +130,13 @@ def build_step4_panel_input_signature(
     auto_adjust: bool,
     uploaded_file: Any,
 ) -> str:
+    """Build a compact hash for the market-data panel inputs.
+
+    Step 4 uses this signature to decide whether the cached/prepared panel can
+    be reused or whether the asset panel must be resolved again. The signature
+    includes selected assets, candidate assets, data source, date range,
+    frequency, upload metadata and the feature-engineering configuration.
+    """
     uploaded_name = str(getattr(uploaded_file, "name", "") or "")
     uploaded_size = int(getattr(uploaded_file, "size", 0) or 0) if uploaded_file is not None else 0
     payload = {
@@ -143,9 +163,15 @@ def _coerce_timing_value(value: Any) -> float:
 
 
 def format_step4_timing_summary(timings: Dict[str, Any] | None) -> str:
+    """Format Step 4 panel timing metadata for compact diagnostics.
+
+    This is intentionally text-based because it is used in captions, debug
+    blocks and cached-panel traceability notes.
+    """
     t = dict(timings or {})
     if not t:
         return ""
+
     parts: List[str] = []
     seconds_keys = [
         "deployment_panel_read_seconds",
@@ -194,7 +220,9 @@ def format_step4_timing_summary(timings: Dict[str, Any] | None) -> str:
         cache_parts.append(f"deployment_cache_mode={t.get('deployment_cache_mode')}")
     if cache_parts:
         parts.extend(cache_parts)
+
     return " · ".join(parts)
+
 
 UNIVERSE_SIZES = [12, 25, 50, 75, 100, 150, 250]
 
@@ -363,7 +391,10 @@ STYLE_MODIFIERS = {
 INVESTMENT_PHILOSOPHY_BUNDLES = {
     "Growth": {
         "universe_strategy_preferences": [
-            UNIVERSE_STRATEGY_EQUITY, UNIVERSE_STRATEGY_QUALITY, UNIVERSE_STRATEGY_DIVERSIFIED, UNIVERSE_STRATEGY_CORE,
+            UNIVERSE_STRATEGY_EQUITY,
+            UNIVERSE_STRATEGY_QUALITY,
+            UNIVERSE_STRATEGY_DIVERSIFIED,
+            UNIVERSE_STRATEGY_CORE,
         ],
         "strategy_template": "Core Ranking",
         "style_preset": "Growth",
@@ -374,7 +405,10 @@ INVESTMENT_PHILOSOPHY_BUNDLES = {
     },
     "Balanced": {
         "universe_strategy_preferences": [
-            UNIVERSE_STRATEGY_CORE, UNIVERSE_STRATEGY_DIVERSIFIED, UNIVERSE_STRATEGY_LONG_HISTORY, UNIVERSE_STRATEGY_QUALITY,
+            UNIVERSE_STRATEGY_CORE,
+            UNIVERSE_STRATEGY_DIVERSIFIED,
+            UNIVERSE_STRATEGY_LONG_HISTORY,
+            UNIVERSE_STRATEGY_QUALITY,
         ],
         "strategy_template": "Balanced Risk-Controlled",
         "style_preset": "Balanced",
@@ -385,7 +419,10 @@ INVESTMENT_PHILOSOPHY_BUNDLES = {
     },
     "Defensive": {
         "universe_strategy_preferences": [
-            UNIVERSE_STRATEGY_DEFENSIVE, UNIVERSE_STRATEGY_LOW_VOL, UNIVERSE_STRATEGY_LONG_HISTORY, UNIVERSE_STRATEGY_CORE,
+            UNIVERSE_STRATEGY_DEFENSIVE,
+            UNIVERSE_STRATEGY_LOW_VOL,
+            UNIVERSE_STRATEGY_LONG_HISTORY,
+            UNIVERSE_STRATEGY_CORE,
         ],
         "strategy_template": "Balanced Risk-Controlled",
         "style_preset": "Defensive",
@@ -397,13 +434,61 @@ INVESTMENT_PHILOSOPHY_BUNDLES = {
 }
 
 UNIVERSE_ALLOWED_STRATEGIES_BY_SIZE = {
-    12: [UNIVERSE_STRATEGY_CORE, UNIVERSE_STRATEGY_EQUITY, UNIVERSE_STRATEGY_DEFENSIVE, UNIVERSE_STRATEGY_REAL_ASSETS, UNIVERSE_STRATEGY_QUALITY, UNIVERSE_STRATEGY_LOW_VOL, UNIVERSE_STRATEGY_LONG_HISTORY],
+    12: [
+        UNIVERSE_STRATEGY_CORE,
+        UNIVERSE_STRATEGY_EQUITY,
+        UNIVERSE_STRATEGY_DEFENSIVE,
+        UNIVERSE_STRATEGY_REAL_ASSETS,
+        UNIVERSE_STRATEGY_QUALITY,
+        UNIVERSE_STRATEGY_LOW_VOL,
+        UNIVERSE_STRATEGY_LONG_HISTORY,
+    ],
     25: STRATEGIES,
-    50: [UNIVERSE_STRATEGY_CORE, UNIVERSE_STRATEGY_DIVERSIFIED, UNIVERSE_STRATEGY_EQUITY, UNIVERSE_STRATEGY_DEFENSIVE, UNIVERSE_STRATEGY_REAL_ASSETS, UNIVERSE_STRATEGY_QUALITY, UNIVERSE_STRATEGY_LOW_VOL],
-    75: [UNIVERSE_STRATEGY_CORE, UNIVERSE_STRATEGY_DIVERSIFIED, UNIVERSE_STRATEGY_EQUITY, UNIVERSE_STRATEGY_DEFENSIVE, UNIVERSE_STRATEGY_REAL_ASSETS, UNIVERSE_STRATEGY_QUALITY, UNIVERSE_STRATEGY_LOW_VOL],
-    100: [UNIVERSE_STRATEGY_CORE, UNIVERSE_STRATEGY_DIVERSIFIED, UNIVERSE_STRATEGY_EQUITY, UNIVERSE_STRATEGY_DEFENSIVE, UNIVERSE_STRATEGY_REAL_ASSETS, UNIVERSE_STRATEGY_QUALITY, UNIVERSE_STRATEGY_LOW_VOL],
-    150: [UNIVERSE_STRATEGY_CORE, UNIVERSE_STRATEGY_DIVERSIFIED, UNIVERSE_STRATEGY_EQUITY, UNIVERSE_STRATEGY_DEFENSIVE, UNIVERSE_STRATEGY_REAL_ASSETS, UNIVERSE_STRATEGY_QUALITY, UNIVERSE_STRATEGY_LOW_VOL],
-    250: [UNIVERSE_STRATEGY_CORE, UNIVERSE_STRATEGY_DIVERSIFIED, UNIVERSE_STRATEGY_EQUITY, UNIVERSE_STRATEGY_DEFENSIVE, UNIVERSE_STRATEGY_REAL_ASSETS, UNIVERSE_STRATEGY_QUALITY, UNIVERSE_STRATEGY_LOW_VOL],
+    50: [
+        UNIVERSE_STRATEGY_CORE,
+        UNIVERSE_STRATEGY_DIVERSIFIED,
+        UNIVERSE_STRATEGY_EQUITY,
+        UNIVERSE_STRATEGY_DEFENSIVE,
+        UNIVERSE_STRATEGY_REAL_ASSETS,
+        UNIVERSE_STRATEGY_QUALITY,
+        UNIVERSE_STRATEGY_LOW_VOL,
+    ],
+    75: [
+        UNIVERSE_STRATEGY_CORE,
+        UNIVERSE_STRATEGY_DIVERSIFIED,
+        UNIVERSE_STRATEGY_EQUITY,
+        UNIVERSE_STRATEGY_DEFENSIVE,
+        UNIVERSE_STRATEGY_REAL_ASSETS,
+        UNIVERSE_STRATEGY_QUALITY,
+        UNIVERSE_STRATEGY_LOW_VOL,
+    ],
+    100: [
+        UNIVERSE_STRATEGY_CORE,
+        UNIVERSE_STRATEGY_DIVERSIFIED,
+        UNIVERSE_STRATEGY_EQUITY,
+        UNIVERSE_STRATEGY_DEFENSIVE,
+        UNIVERSE_STRATEGY_REAL_ASSETS,
+        UNIVERSE_STRATEGY_QUALITY,
+        UNIVERSE_STRATEGY_LOW_VOL,
+    ],
+    150: [
+        UNIVERSE_STRATEGY_CORE,
+        UNIVERSE_STRATEGY_DIVERSIFIED,
+        UNIVERSE_STRATEGY_EQUITY,
+        UNIVERSE_STRATEGY_DEFENSIVE,
+        UNIVERSE_STRATEGY_REAL_ASSETS,
+        UNIVERSE_STRATEGY_QUALITY,
+        UNIVERSE_STRATEGY_LOW_VOL,
+    ],
+    250: [
+        UNIVERSE_STRATEGY_CORE,
+        UNIVERSE_STRATEGY_DIVERSIFIED,
+        UNIVERSE_STRATEGY_EQUITY,
+        UNIVERSE_STRATEGY_DEFENSIVE,
+        UNIVERSE_STRATEGY_REAL_ASSETS,
+        UNIVERSE_STRATEGY_QUALITY,
+        UNIVERSE_STRATEGY_LOW_VOL,
+    ],
 }
 
 STRATEGY_SEEDS = {
@@ -418,9 +503,6 @@ STRATEGY_SEEDS = {
 }
 
 
-# Plain-English display labels for the assets used by the Step 4 universe builder.
-# Important: these labels are UI-only. The engine, Yahoo download and session_state keep
-# the canonical ticker values such as "GLD", "SPY" and "TLT".
 ASSET_DISPLAY_NAMES: Dict[str, str] = {
     "ACWI": "Global equities",
     "AGG": "Aggregate bonds",
@@ -556,7 +638,6 @@ def asset_display_label(ticker: Any) -> str:
     return f"{symbol} ({name})" if name else symbol
 
 
-
 def _unique_preserve_order(items: List[str]) -> List[str]:
     out: List[str] = []
     seen = set()
@@ -574,6 +655,7 @@ def coerce_snapshot() -> dict:
 
 
 def store_investment_context(plan_snapshot: dict) -> dict:
+    """Persist the Step 1-3 contribution bridge used by Step 4 and later modules."""
     monthly_contribution = float(max(plan_snapshot.get("target_a_monthly", 0.0) or 0.0, 0.0))
     weekly_equivalent = float(max(plan_snapshot.get("target_a_weekly", 0.0) or 0.0, 0.0))
     baseline_monthly = float(max(plan_snapshot.get("baseline_savings_monthly", 0.0) or 0.0, 0.0))
@@ -746,6 +828,12 @@ def build_universe_size_status(philosophy: Any, universe_size: Any) -> Dict[str,
 
 
 def apply_investment_philosophy_bundle(philosophy: Any) -> dict:
+    """Apply the coherent Step 4 defaults for the selected investment philosophy.
+
+    The bundle seeds Step 5 strategy template/style, projection profile and
+    semantic slider defaults so later screens stay aligned with the selected
+    Growth/Balanced/Defensive posture.
+    """
     philosophy_name = str(philosophy or "Balanced")
     if philosophy_name not in INVESTMENT_PHILOSOPHY_OPTIONS:
         philosophy_name = "Balanced"
@@ -762,7 +850,10 @@ def apply_investment_philosophy_bundle(philosophy: Any) -> dict:
     apply_semantic_slider_defaults(rec_template, rec_style, force=True)
     st.session_state[SEMANTIC_LAST_SIGNATURE] = semantic_seed_signature(rec_template, rec_style)
     allowed = allowed_universe_strategies_for_size(st.session_state.get(UNIVERSE_SIZE, bundle["default_universe_size"]))
-    preferred = next((x for x in bundle["universe_strategy_preferences"] if x in allowed), allowed[0] if allowed else UNIVERSE_STRATEGY_CORE)
+    preferred = next(
+        (x for x in bundle["universe_strategy_preferences"] if x in allowed),
+        allowed[0] if allowed else UNIVERSE_STRATEGY_CORE,
+    )
     current_strategy = str(st.session_state.get(UNIVERSE_STRATEGY, preferred) or preferred)
     if current_strategy not in allowed or UNIVERSE_STRATEGY not in st.session_state:
         st.session_state[UNIVERSE_STRATEGY] = preferred
@@ -791,10 +882,10 @@ def validate_universe_inputs(universe_size: Any, strategy_name: Any) -> Tuple[in
     return size_value, strategy_value
 
 
-
 def parse_custom_assets(raw_text: Any) -> List[str]:
     parts = str(raw_text or "").replace("\n", ",").split(",")
     return _unique_preserve_order([normalize_asset_ticker(x) for x in parts if normalize_asset_ticker(x)])
+
 
 def _strategy_expansion_order(strategy_value: str) -> List[str]:
     """Return strategy-compatible fallback order for filling larger target baskets.
@@ -889,6 +980,7 @@ def _expanded_universe_source(universe_size: Any, strategy_name: Any) -> Tuple[L
 
 
 def build_generated_universe(universe_size: Any, strategy_name: Any) -> List[str]:
+    """Build the primary Step 4 asset universe for the selected size/strategy."""
     size_value, strategy_value = validate_universe_inputs(universe_size, strategy_name)
     source, _primary_count, _strategy_value = _expanded_universe_source(size_value, strategy_value)
     return list(source[: int(size_value)])
@@ -910,19 +1002,17 @@ def build_universe_generation_summary(universe_size: Any, strategy_name: Any) ->
         "complete": bool(prepared_count >= int(size_value)),
     }
 
+
 def build_strategy_candidate_pool(universe_size: Any, strategy_name: Any) -> List[str]:
-    """
-    Build a candidate pool for Step 4 / Step 5 universe-size search.
+    """Build the wider candidate pool used by Step 5 universe-size search.
 
     Important:
-    - canonical UI sizes remain validated elsewhere (12/25/50/75/...)
-    - this helper must still behave sensibly when the optimisation layer passes
-      intermediate refinement sizes (for example 44 / 47 / 53 / 56)
-    - we therefore avoid collapsing non-canonical refinement sizes back to 25
-      via validate_universe_inputs()
-
-    Strategy validation still follows the current size bucket rules, but the
-    requested size itself is preserved as the real target for the candidate pool.
+    - canonical UI sizes remain validated elsewhere (12/25/50/75/...);
+    - the optimisation layer may pass intermediate refinement sizes such as
+      44, 47, 53 or 56;
+    - the requested size itself is preserved for the target pool size. We only
+      use validate_universe_inputs() to coerce the strategy name into a known
+      strategy.
     """
     try:
         requested_size = int(universe_size)
@@ -946,20 +1036,27 @@ def build_strategy_candidate_pool(universe_size: Any, strategy_name: Any) -> Lis
     return pool_source[: min(len(pool_source), target_size)]
 
 
-def resolve_universe_selection(universe_size: Any, strategy_name: Any, custom_enabled: bool, custom_text: Any) -> Tuple[List[str], str]:
+def resolve_universe_selection(
+    universe_size: Any,
+    strategy_name: Any,
+    custom_enabled: bool,
+    custom_text: Any,
+) -> Tuple[List[str], str]:
+    """Resolve the active universe assets and explain where they came from.
+
+    Priority:
+    1. Manual custom basket when enabled and valid.
+    2. Step 5 recommendation-preserved basket when it matches current size/style.
+    3. Generated Step 4 universe.
+    """
     generated = build_generated_universe(universe_size, strategy_name)
     size_value, strategy_value = validate_universe_inputs(universe_size, strategy_name)
 
-    # Manual custom baskets keep priority where the Step 4 UI allows them.
     if bool(custom_enabled):
         custom_assets = parse_custom_assets(custom_text)
         if custom_assets:
             return custom_assets, "custom"
 
-    # Step 5 universe-composition suggestions can promote a tested same-size
-    # composition without turning it into a manual custom list. This keeps Step 4
-    # stable for the user while allowing Phase 3 to preserve the exact tested
-    # assets after Apply.
     try:
         source = str(st.session_state.get(UNIVERSE_CUSTOM_ENABLED_SOURCE, "") or "")
         rec_ctx = st.session_state.get("step5_recommended_universe_context_v1", {})
@@ -983,7 +1080,6 @@ def resolve_universe_selection(universe_size: Any, strategy_name: Any, custom_en
     return generated, "generated"
 
 
-
 def build_universe_preview_text(selected_assets: List[str], preview_limit: int = 8) -> str:
     assets = [normalize_asset_ticker(x) for x in list(selected_assets or []) if normalize_asset_ticker(x)]
     if not assets:
@@ -1004,7 +1100,13 @@ def build_universe_mix(selected_assets: List[str]) -> Tuple[pd.DataFrame, dict]:
     if "ticker" in mix_df.columns and "asset" not in mix_df.columns:
         mix_df = mix_df.rename(columns={"ticker": "asset"})
     summary = build_asset_group_summary(assets)
-    work = mix_df.groupby("group", dropna=False).size().reset_index(name="count").sort_values(["count", "group"], ascending=[False, True]).reset_index(drop=True)
+    work = (
+        mix_df.groupby("group", dropna=False)
+        .size()
+        .reset_index(name="count")
+        .sort_values(["count", "group"], ascending=[False, True])
+        .reset_index(drop=True)
+    )
     return work, dict(summary or {})
 
 
@@ -1031,7 +1133,17 @@ def build_universe_mix_detail(selected_assets: List[str]) -> pd.DataFrame:
     return work[final_cols].sort_values(sort_cols, ascending=True).reset_index(drop=True)
 
 
-def sync_step4_state(*, philosophy: str, universe_size: int, strategy_name: str, custom_enabled: bool, custom_text: str, selected_assets: List[str], selection_source: str) -> None:
+def sync_step4_state(
+    *,
+    philosophy: str,
+    universe_size: int,
+    strategy_name: str,
+    custom_enabled: bool,
+    custom_text: str,
+    selected_assets: List[str],
+    selection_source: str,
+) -> None:
+    """Persist Step 4 universe choices and candidate pools into session state."""
     st.session_state[INVESTMENT_PHILOSOPHY] = str(philosophy)
     st.session_state[UNIVERSE_SIZE] = int(universe_size)
     st.session_state[UNIVERSE_STRATEGY] = str(strategy_name)
@@ -1040,7 +1152,9 @@ def sync_step4_state(*, philosophy: str, universe_size: int, strategy_name: str,
     st.session_state[UNIVERSE_CUSTOM_ENABLED_SOURCE] = str(selection_source)
     st.session_state[LAST_USED_UNIVERSE_ASSETS] = list(selected_assets)
     st.session_state[RECOMMENDED_UNIVERSE_ASSETS] = list(selected_assets)
-    st.session_state[LAST_RECOMMENDATION_CANDIDATE_ASSETS] = list(build_strategy_candidate_pool(universe_size, strategy_name))
+    st.session_state[LAST_RECOMMENDATION_CANDIDATE_ASSETS] = list(
+        build_strategy_candidate_pool(universe_size, strategy_name)
+    )
 
 
 def build_bridge_explanation(context: dict) -> str:
@@ -1048,7 +1162,7 @@ def build_bridge_explanation(context: dict) -> str:
     weekly = float(context.get("weekly_equivalent", 0.0) or 0.0)
     extra = float(context.get("required_cut_monthly", 0.0) or 0.0)
     return (
-        "For the investment module, Step 4 now uses the monthly contribution view as the main unit: "
+        "The investment module uses the monthly contribution view as the main unit: "
         f"£{monthly:,.0f}/month. Equivalent to £{weekly:,.0f}/week in the earlier budgeting steps. "
         f"Extra cut needed vs baseline: £{extra:,.0f}/month."
     )
@@ -1096,14 +1210,17 @@ def _cached_download_yahoo_asset_panel(
                 continue
         if working_panels:
             merged = pd.concat(working_panels, ignore_index=True)
-            merged = merged.dropna(subset=["date", "asset", "return"]).sort_values(["date", "asset"]).reset_index(drop=True)
+            merged = (
+                merged.dropna(subset=["date", "asset", "return"])
+                .sort_values(["date", "asset"])
+                .reset_index(drop=True)
+            )
             if not merged.empty:
                 return merged
     except Exception as exc:
         last_error = exc
 
     raise ValueError(f"Yahoo download failed for the selected universe. Last error: {last_error}")
-
 
 
 @st.cache_data(show_spinner=False)
@@ -1156,6 +1273,7 @@ def _read_uploaded_asset_panel_bytes(file_bytes: bytes, filename: str) -> pd.Dat
 
 
 def validate_asset_panel(panel_df: pd.DataFrame) -> pd.DataFrame:
+    """Validate and normalise the common asset-return panel schema."""
     if panel_df is None or not isinstance(panel_df, pd.DataFrame) or panel_df.empty:
         raise ValueError("Asset panel is empty.")
     need = {"date", "asset", "return"}
@@ -1170,7 +1288,6 @@ def validate_asset_panel(panel_df: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         raise ValueError("Asset panel is empty after cleaning.")
     return out
-
 
 
 def build_weekly_return_panel_from_daily_returns(daily_panel_df: pd.DataFrame) -> pd.DataFrame:
@@ -1202,7 +1319,11 @@ def _clear_raw_return_panel_state() -> None:
             del st.session_state[key]
 
 
-def _store_raw_return_panels(raw_daily_panel: pd.DataFrame, *, source_label: str = "Yahoo live/local daily returns") -> Dict[str, Any]:
+def _store_raw_return_panels(
+    raw_daily_panel: pd.DataFrame,
+    *,
+    source_label: str = "Yahoo live/local daily returns",
+) -> Dict[str, Any]:
     """Store raw daily and weekly panels from the latest live/local or cached run."""
     daily = validate_asset_panel(raw_daily_panel)
     weekly = build_weekly_return_panel_from_daily_returns(daily)
@@ -1575,8 +1696,6 @@ def _should_use_deployment_panel_first(frequency: str) -> bool:
     return _deployment_panel_file().exists()
 
 
-
-
 def resolve_step4_asset_panel(
     *,
     selected_assets: List[str],
@@ -1588,6 +1707,16 @@ def resolve_step4_asset_panel(
     auto_adjust: bool,
     uploaded_file: Any,
 ) -> Tuple[pd.DataFrame | None, str, str]:
+    """Resolve the market-data panel used by the Step 5 Strategy Engine.
+
+    Resolution order:
+    1. Uploaded panel when source_mode is upload.
+    2. Cached deployment panel first when configured/available.
+    3. Live/local Yahoo download with cached deployment fallback.
+
+    The returned dataframe is the prepared engine panel. Raw daily/weekly panels
+    are stored separately for diagnostics and downloads.
+    """
     source_mode = str(source_mode or "yahoo").lower()
     frequency = str(frequency or "monthly").lower()
     overall_t0 = time.perf_counter()
@@ -1613,11 +1742,7 @@ def resolve_step4_asset_panel(
             cfg = DailyFeatureConfig()
             feature_cfg_json = _serialize_feature_cfg(cfg)
             tmp = validate_daily_asset_panel(panel_df, cfg)
-            obs_per_month = (
-                tmp.assign(_month=tmp["date"].dt.to_period("M"))
-                .groupby(["asset", "_month"])
-                .size()
-            )
+            obs_per_month = tmp.assign(_month=tmp["date"].dt.to_period("M")).groupby(["asset", "_month"]).size()
             median_obs_per_asset_month = float(obs_per_month.median()) if not obs_per_month.empty else 0.0
             apply_monthly_intramonth = bool(median_obs_per_asset_month >= 5.0)
 
@@ -1645,9 +1770,6 @@ def resolve_step4_asset_panel(
 
     deployment_error: Exception | None = None
 
-    # Robust deployment path: use cached Yahoo-generated panels first when present.
-    # This prevents Streamlit Cloud from touching live Yahoo/yfinance when the user
-    # switches between monthly / weekly / daily diagnostics.
     if _should_use_deployment_panel_first(frequency):
         try:
             panel_df, source_label, union_caption, cache_timings = _load_deployment_panel_for_frequency(
@@ -1680,8 +1802,6 @@ def resolve_step4_asset_panel(
             bool(auto_adjust),
         )
     except Exception as yahoo_exc:
-        # Safety fallback: even when live Yahoo is explicitly requested, keep the
-        # public demo usable if the cached prepared panel exists.
         if _deployment_panel_file().exists():
             try:
                 panel_df, source_label, union_caption, cache_timings = _load_deployment_panel_for_frequency(
@@ -1746,7 +1866,11 @@ def resolve_step4_asset_panel(
     except Exception as e:
         raise ValueError(f"Feature engineering failed: {e}")
 
-    loaded_assets = sorted(set(panel_df["asset"].astype(str).str.upper())) if isinstance(panel_df, pd.DataFrame) and not panel_df.empty else []
+    loaded_assets = (
+        sorted(set(panel_df["asset"].astype(str).str.upper()))
+        if isinstance(panel_df, pd.DataFrame) and not panel_df.empty
+        else []
+    )
     missing_assets = [ticker for ticker in universe_union if ticker not in set(loaded_assets)]
     union_caption = f"Tickers requested ({len(universe_union)}): {', '.join(asset_display_label(x) for x in universe_union)}"
     if loaded_assets and len(loaded_assets) != len(universe_union):
@@ -1771,6 +1895,7 @@ def update_asset_panel_state(
     timings: Dict[str, Any] | None = None,
     build_trigger: str = "",
 ) -> None:
+    """Persist the resolved market-data panel and readiness metadata."""
     st.session_state[ASSET_PANEL_DF] = panel_df if isinstance(panel_df, pd.DataFrame) and not panel_df.empty else None
     st.session_state[ASSET_PANEL_READY] = bool(isinstance(panel_df, pd.DataFrame) and not panel_df.empty)
     st.session_state[ASSET_PANEL_SOURCE_LABEL] = str(source_label or "")
@@ -1784,6 +1909,7 @@ def update_asset_panel_state(
 
 
 def build_step4_universe_payload_from_state() -> Dict[str, Any]:
+    """Build the Step 4 payload consumed by the Strategy Engine screen."""
     size_value, strategy_value = validate_universe_inputs(
         st.session_state.get(UNIVERSE_SIZE, 25),
         st.session_state.get(UNIVERSE_STRATEGY, UNIVERSE_STRATEGY_CORE),
@@ -1804,7 +1930,10 @@ def build_step4_universe_payload_from_state() -> Dict[str, Any]:
         "candidate_assets": build_strategy_candidate_pool(size_value, strategy_value),
         "philosophy": get_canonical_investment_philosophy(),
         "style_preset": str(st.session_state.get(UNIVERSE_SIMPLE_STYLE_PRESET, "Balanced") or "Balanced"),
-        "strategy_template": str(st.session_state.get(UNIVERSE_SIMPLE_STRATEGY_TEMPLATE, "Balanced Risk-Controlled") or "Balanced Risk-Controlled"),
+        "strategy_template": str(
+            st.session_state.get(UNIVERSE_SIMPLE_STRATEGY_TEMPLATE, "Balanced Risk-Controlled")
+            or "Balanced Risk-Controlled"
+        ),
         "projection_profile": str(st.session_state.get(INVESTMENT_PROJECTION_PROFILE_HINT, "Balanced") or "Balanced"),
         "asset_source_mode": str(st.session_state.get(ASSET_SOURCE_MODE, "yahoo") or "yahoo"),
         "asset_start_date": st.session_state.get(ASSET_START_DATE),
@@ -1821,6 +1950,7 @@ def build_step4_universe_payload_from_state() -> Dict[str, Any]:
 
 
 def panel_df_to_csv_bytes(panel_df: pd.DataFrame) -> bytes:
+    """Serialize a panel dataframe into CSV bytes for download buttons."""
     if panel_df is None or panel_df.empty:
         return b""
     df = panel_df.copy()
@@ -1830,4 +1960,5 @@ def panel_df_to_csv_bytes(panel_df: pd.DataFrame) -> bytes:
 
 
 def panel_download_filename(source_label: str, strategy: str, frequency: str) -> str:
+    """Build a stable, filesystem-safe filename for a panel download."""
     return f"{source_label}_{strategy}_{frequency}_panel.csv".replace(" ", "_").replace("/", "_").lower()

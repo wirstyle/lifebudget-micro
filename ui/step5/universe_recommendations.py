@@ -1,18 +1,16 @@
-from __future__ import annotations
+"""Step 5 universe-mix recommendation phase.
 
-"""Step 5 universe-composition assistant.
+This module implements Phase 3 of the optional Strategy Engine improvement flow.
+It keeps the active Step 5 strategy preset, technical engine configuration and
+universe size unchanged, then tests alternative same-size asset compositions
+that already exist in the Step 4 market-data panel.
 
-Phase 3 scope:
-- keep the active Step 5 strategy preset unchanged;
-- keep the active technical engine configuration unchanged;
-- keep the current universe size unchanged;
-- test only small candidate asset compositions already present in the Step 4
-  market-data panel;
-- apply by promoting an already rerun-tested candidate result.
-
-This module deliberately does not implement universe-size search. Size remains a
-separate later phase.
+Accepted candidates are applied by promoting an already rerun-tested result, so
+the user does not need to manually run the same candidate again. Universe-size
+search remains a separate later phase.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 src/evaluation.py
 
@@ -36,6 +34,7 @@ Most functions work with a long panel DataFrame containing at least:
 The module is frequency-agnostic: monthly, weekly, etc.
 """
 
+from __future__ import annotations
 from dataclasses import dataclass, asdict
 import json
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -102,7 +101,7 @@ def _safe_float(x: Any) -> float:
 DEFAULT_COHERENCE_PHILOSOPHY = "Balanced"
 EXPERIMENTAL_COHERENCE_OBJECTIVE_NAME = "coherence_score"
 
-# Phase 2 soft-gating thresholds.
+# Coherence soft-gating thresholds used during candidate selection.
 # Keep these conservative and aligned with the existing penalty ladder:
 # - below 0.40: structurally too stretched for automatic selection
 # - below 0.60: still valid, but discouraged unless no better candidate exists
@@ -223,9 +222,9 @@ def _coherence_penalty_from_score(coherence_score: Any) -> float:
     return 0.0
 
 def _coherence_selection_penalty_from_score(coherence_score: Any) -> float:
-    """Soft selection-time penalty for frontier choice (Phase 3A).
+    """Soft selection-time penalty for frontier-style candidate choice.
 
-    Keep this gentler than the Phase 1 objective penalty. Phase 2 gating still
+    Keep this gentler than the main objective penalty. Coherence gating still
     handles hard exclusion / discouraged fallback.
     """
     score = _safe_float(coherence_score)
@@ -288,7 +287,7 @@ def _apply_coherence_selection_gating(
     higher_is_better: bool = True,
     score_sort_col: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
-    """Phase 2 soft gating for final selection."""
+    """Apply coherence soft gating before final candidate selection."""
     work = pd.DataFrame(df).copy()
     if work.empty:
         return work, work, {
@@ -3876,7 +3875,7 @@ def compare_cost_model_runs(
     """Compare a baseline run against a cost-aware run.
 
     Intended usage:
-    - baseline_run: existing legacy or no-cost run
+    - baseline_run: existing baseline or no-cost run
     - cost_run: run with cost_model_enabled and optionally tax_model_enabled
     """
     left_perf = _run_perf_dict(baseline_run)
@@ -4151,7 +4150,7 @@ def compare_factor_model_runs(
     """Compare a baseline run against an industrial factor-model run.
 
     Intended usage:
-    - baseline_run: no factor overlay / legacy run
+    - baseline_run: no factor overlay / baseline run
     - factor_run: run with factor_model_active and/or factor_covariance_active
     """
     left_perf = _run_perf_dict(baseline_run)
@@ -5883,18 +5882,26 @@ def _select_stage1_refinement_seeds(
 ) -> List[Dict[str, Any]]:
     if stage1_df is None or not isinstance(stage1_df, pd.DataFrame) or stage1_df.empty:
         return []
+
     eligible = stage1_df.copy()
+
     if "status" in eligible.columns:
         eligible = eligible[eligible["status"].fillna("ok").astype(str).eq("ok")].copy()
-    if objective_sort_col in eligible.columns:
-        eligible = eligible[pd.to_numeric(eligible[objective_sort_col], errors="coerce").notna()].copy()
+
+    if objective_col in eligible.columns:
+        eligible = eligible[pd.to_numeric(eligible[objective_col], errors="coerce").notna()].copy()
+
     if "candidate_stage" in eligible.columns:
         eligible = eligible[eligible["candidate_stage"].astype(str).eq("stage1")].copy()
+
     if eligible.empty:
         return []
+
     eligible = eligible.sort_values([objective_col, "trial"], ascending=[False, True], na_position="last").reset_index(drop=True)
+
     seeds: List[Dict[str, Any]] = []
     seen: set = set()
+
     for _, row in eligible.head(max(int(top_n), 0)).iterrows():
         params = extract_best_candidate_payload_from_row(row, base_cfg_payload={}).get("candidate_overrides", {})
         if not params:
@@ -5904,6 +5911,7 @@ def _select_stage1_refinement_seeds(
             continue
         seen.add(key)
         seeds.append(params)
+
     return seeds
 
 
@@ -6144,7 +6152,7 @@ def run_simple_auto_optimize(
     min_rel_improvement: float = 1e-4,
     coherence_philosophy: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Run the backend for Phase 5 Simple-mode auto optimization.
+    """Run the backend for Step 5 Simple-mode automatic tuning.
 
     This helper keeps the contract UI-agnostic: it resolves the semantic tuning
     policy, builds a small local neighbourhood, runs the existing local search,
@@ -6586,7 +6594,13 @@ def build_tuning_trials_table(
             out[col] = pd.to_numeric(out[col], errors="coerce")
     if "status" not in out.columns:
         out["status"] = "ok"
-    out["is_valid_trial"] = out["status"].fillna("ok").astype(str).eq("ok") & pd.to_numeric(out.get(objective_col), errors="coerce").notna()
+    if objective_col in out.columns:
+        objective_values = pd.to_numeric(out[objective_col], errors="coerce")
+    else:
+        objective_values = pd.Series(np.nan, index=out.index, dtype="float64")
+
+    out["is_valid_trial"] = out["status"].fillna("ok").astype(str).eq("ok") & objective_values.notna()
+
     if objective_col in out.columns:
         out["objective_rank"] = pd.to_numeric(out[objective_col], errors="coerce").rank(method="min", ascending=not bool(sort_desc))
     else:
@@ -6647,16 +6661,30 @@ def choose_best_tuning_trial(
                 eligible = preferred
     if eligible.empty:
         return None, table
-    sort_cols = [objective_sort_col, "sharpe", "cagr", "trial"]
-    ascending = [not bool(higher_is_better), False, False, True]
+    sort_cols_raw = [objective_sort_col, "sharpe", "cagr", "trial"]
+    ascending_raw = [not bool(higher_is_better), False, False, True]
+
     if coherence_philosophy is not None and "coherence_score" in eligible.columns:
-        sort_cols = [objective_sort_col, "coherence_score", "sharpe", "cagr", "trial"]
-        ascending = [not bool(higher_is_better), False, False, False, True]
-    eligible = eligible.sort_values(
-        sort_cols,
-        ascending=ascending,
-        na_position="last",
-    ).reset_index(drop=True)
+        sort_cols_raw = [objective_sort_col, "coherence_score", "sharpe", "cagr", "trial"]
+        ascending_raw = [not bool(higher_is_better), False, False, False, True]
+
+    sort_pairs = [
+        (col, asc)
+        for col, asc in zip(sort_cols_raw, ascending_raw)
+        if col in eligible.columns
+    ]
+
+    if sort_pairs:
+        sort_cols = [col for col, _ in sort_pairs]
+        ascending = [asc for _, asc in sort_pairs]
+        eligible = eligible.sort_values(
+            sort_cols,
+            ascending=ascending,
+            na_position="last",
+        ).reset_index(drop=True)
+
+    return eligible.iloc[0], table
+
 
 # ============================================================
 # Step 5 candidate selection / stability integration
@@ -6720,7 +6748,7 @@ def _build_step5_candidate_selection_table(
         if not np.isfinite(base_score):
             base_score = float(sharpe if np.isfinite(sharpe) else 0.0)
             if np.isfinite(max_drawdown):
-                base_score -= 0.50 * float(max_drawdown)
+                base_score += 0.50 * float(max_drawdown)
             if np.isfinite(cagr):
                 base_score += 0.30 * float(cagr)
 
@@ -6870,7 +6898,7 @@ def _build_step5_governance_payload(
     gate_status = str(row.get("coherence_gate_status", "ok") or "ok")
     if np.isfinite(instability_penalty) and instability_penalty > 0.08:
         warnings.append("Governance is discounting temporal fragility in the selected candidate.")
-    if np.isfinite(max_dd) and max_dd > 0.20:
+    if np.isfinite(max_dd) and abs(float(max_dd)) > 0.20:
         warnings.append("Drawdown remains elevated for the intended philosophy.")
     if np.isfinite(sharpe) and sharpe < 0.70:
         warnings.append("Sharpe remains modest after stability adjustment.")
@@ -7222,7 +7250,7 @@ def build_lambdarank_multiloss_summary(run: Dict[str, Any]) -> pd.DataFrame:
     """Compact summary for LambdaRank-real and multi-loss research modes.
 
     The function is defensive: it works even when some diagnostics are absent,
-    so it can be used safely across legacy and partially upgraded runs.
+    so it can be used safely across baseline and partially upgraded runs.
     """
     perf = _run_perf_dict(run)
     cfg = run.get("config")
@@ -7446,7 +7474,12 @@ def _coerce_objective_specs_for_hv(
     out: Dict[str, Dict[str, str]] = {}
     for col in [str(x) for x in list(objective_cols or []) if str(x).strip()]:
         spec = dict(specs_in.get(col, {}))
-        sense = str(spec.get("sense", "min" if col in {"max_drawdown", "mean_turnover"} else "max")).strip().lower()
+        sense = str(
+            spec.get(
+                "sense",
+                "min" if col in {"mean_turnover"} else "max",
+            )
+        ).strip().lower()
         if sense not in {"min", "max"}:
             sense = "max"
         out[col] = {"sense": sense}
@@ -7761,7 +7794,7 @@ def choose_solution_by_weighted_hypervolume(
 
 
 # ============================================================
-# Fixed composite score helpers (Phase 4 canonical selector)
+# Fixed composite score helpers
 # ============================================================
 
 
@@ -7912,7 +7945,7 @@ def _fixed_composite_objective_specs(
         "cagr": {"sense": "max"},
         "diversification": {"sense": "max"},
         "stability": {"sense": "max"},
-        "max_drawdown": {"sense": "min"},
+        "max_drawdown": {"sense": "max"},
         "mean_turnover": {"sense": "min"},
     }
     specs = {str(k): dict(v) for k, v in (objective_specs or {}).items()}
@@ -8346,7 +8379,7 @@ def choose_multiobjective_solution_by_policy(
 
 
 # ============================================================
-# Recursive multi-objective search (Phase 4E)
+# Recursive multi-objective search
 # ============================================================
 
 
@@ -10015,7 +10048,7 @@ def run_recursive_multiobjective_search(
     - adaptive per-parameter shrink around the frontier
     - warm-start across rounds via seed_payloads injection
     - multi-criteria convergence (HV + frontier stability + best-payload stability + objective improvements)
-    - explicit round telemetry for UI / debugging
+    - explicit round telemetry for UI diagnostics
     """
     method = str(search_method or "nsga2").strip().lower()
 

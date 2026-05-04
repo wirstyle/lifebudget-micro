@@ -1,59 +1,40 @@
-from __future__ import annotations
+"""Daily-to-monthly and daily-to-weekly feature engineering helpers.
 
-"""
-src/features.py
-
-Daily-to-monthly feature engineering helpers for the investment micro-pipeline.
-
-Purpose
--------
-This module sits *upstream* from ``investment.py``.
-It is responsible for converting a daily asset panel into a monthly panel with
-leakage-safe intramonth features that can later be used by a richer research
-stack or by future versions of the micro-pipeline.
-
-Current focus
--------------
-The currently implemented blocks are the intramonth volatility, daily momentum, and daily cross-sectional dispersion engines:
-
-- realised intramonth volatility
-- intramonth mean / std of daily simple returns
-- EWMA daily volatility snapshots (5d / 10d / 21d)
-- rolling realised vol snapshots (5d / 10d / 21d)
-- daily momentum snapshots (5d / 10d / 21d)
-- volatility-adjusted daily momentum snapshots
-- short-term reversal proxy
-- daily range proxies inside each month
-- leakage-safe daily -> monthly aggregation
-- monthly panel builder compatible with ``run_micro_investment_pipeline``
+This module sits upstream from ``src.investment``. It converts daily asset
+returns into weekly or monthly asset panels with leakage-safe, backward-looking
+features that the Strategy Engine can consume.
 
 Input assumptions
 -----------------
-The daily input panel should contain at least:
-    - date
-    - asset
-    - return
-where ``return`` is a **daily simple return**.
+The input panel should contain at least:
+- ``date``;
+- ``asset``;
+- ``return`` as a daily simple return in decimal form.
 
-Output
-------
-The monthly panel contains at least:
-    - date   (month end)
-    - asset
-    - return (monthly simple return)
-plus engineered feature columns.
+Output contract
+---------------
+The generated panels always preserve the Strategy Engine contract:
+- ``date``;
+- ``asset``;
+- ``return`` as a simple return.
+
+Additional feature columns may include intramonth volatility, momentum,
+cross-sectional dispersion, macro context, and feature-based mu proxies. These
+features are historical diagnostics/signals for educational backtests; they are
+not forecasts or investment recommendations.
 
 Design principles
 -----------------
-- modular
-- robust
-- quant-research style
-- no silent leakage from future periods
-- keep compatibility with the current monthly micro-pipeline
+- keep daily-to-period aggregation explicit;
+- avoid using information from future periods;
+- keep compatibility with the current monthly micro-pipeline;
+- keep richer research-style features optional and upstream from the engine.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -317,7 +298,7 @@ def add_daily_intramonth_state_features(df_daily: pd.DataFrame, cfg: DailyFeatur
     - volatility-adjusted momentum
     - short-term reversal proxy
     - cumulative month-to-date log/simple return
-    - advanced intramonth alpha proxies:
+    - additional intramonth signal-state variables:
       efficiency, momentum spreads, semivol asymmetry, breakout/channel state,
       rolling hit-rates and volatility compression
 
@@ -808,13 +789,9 @@ def _safe_weighted_row_mean(df: pd.DataFrame, weights: Dict[str, float]) -> pd.S
 
 def add_feature_based_mu_features(df_panel: pd.DataFrame) -> pd.DataFrame:
     """
-    Build richer feature-based mu proxies that investment.py can use upstream.
+    Build feature-based expected-return proxy columns for the engine.
 
-    Design:
-    - combine cross-sectional momentum / vol-adjusted momentum / reversal signals
-    - create smoothed per-asset versions (3 / 6 periods)
-    - re-standardise cross-sectionally by date so the allocator can consume them
-    - keep everything leakage-safe: only contemporaneous or backward-looking features
+    These are heuristic signal features, not forecasts. They combine available cross-sectional momentum, volatility-adjusted momentum, reversal and quality signals into smoothed per-asset columns that the Strategy Engine may use as additional context.
     """
     if df_panel is None or not isinstance(df_panel, pd.DataFrame) or df_panel.empty:
         raise ValueError("df_panel must be a non-empty pandas DataFrame")
@@ -990,7 +967,10 @@ def add_conditional_rebalance_context_features(df_monthly: pd.DataFrame) -> pd.D
 # ============================================================
 
 
-def build_intrAweek_weekly_features(df_daily: pd.DataFrame, cfg: DailyFeatureConfig | None = None) -> pd.DataFrame:
+def build_intraweek_weekly_features(
+    df_daily: pd.DataFrame,
+    cfg: DailyFeatureConfig | None = None,
+) -> pd.DataFrame:
     """Aggregate daily data into a weekly asset panel with end-of-week snapshots.
 
     The output intentionally keeps many column names aligned with the monthly
@@ -1071,6 +1051,12 @@ def build_intrAweek_weekly_features(df_daily: pd.DataFrame, cfg: DailyFeatureCon
     out["asset"] = out["asset"].astype(str).str.upper().str.strip()
     return out.sort_values(["date", "asset"]).reset_index(drop=True)
 
+def build_intrAweek_weekly_features(
+    df_daily: pd.DataFrame,
+    cfg: DailyFeatureConfig | None = None,
+) -> pd.DataFrame:
+    """Backward-compatible alias for the original misspelled helper name."""
+    return build_intraweek_weekly_features(df_daily, cfg)
 
 def build_cross_sectional_intraweek_features(df_daily: pd.DataFrame, cfg: DailyFeatureConfig | None = None) -> pd.DataFrame:
     """Build week-level cross-sectional diagnostics from daily returns and momentum states."""
@@ -1162,7 +1148,7 @@ def build_weekly_panel_from_daily(
 ) -> pd.DataFrame:
     """Build a weekly asset panel compatible with the current micro-pipeline."""
     cfg = cfg or DailyFeatureConfig()
-    weekly_asset = build_intrAweek_weekly_features(df_daily, cfg)
+    weekly_asset = build_intraweek_weekly_features(df_daily, cfg)
     if include_cross_sectional:
         cs = build_cross_sectional_intraweek_features(df_daily, cfg)
         weekly_asset = weekly_asset.merge(cs, on="date", how="left")
@@ -1179,7 +1165,6 @@ def build_weekly_panel_from_daily(
 # Final monthly panel builder
 # ============================================================
 
-
 def build_monthly_panel_from_daily(
     df_daily: pd.DataFrame,
     cfg: DailyFeatureConfig | None = None,
@@ -1188,23 +1173,19 @@ def build_monthly_panel_from_daily(
     macro_panel_df: Optional[pd.DataFrame] = None,
     out_csv: Optional[str] = None,
 ) -> pd.DataFrame:
-    """
-    Main entry point.
+    """Build a monthly asset panel compatible with the Strategy Engine.
 
-    Builds a monthly asset panel compatible with the current micro-pipeline while
-    also carrying engineered intramonth features.
-
-    Compatibility
-    -------------
     The returned panel always contains:
-        - date
-        - asset
-        - return
+    - ``date``;
+    - ``asset``;
+    - ``return``.
 
-    so it can be passed directly into the current investment micro-pipeline,
-    which expects monthly asset panel columns in that format. The current app
-    validator checks the same schema. fileciteturn14file3 fileciteturn14file10
+    Additional engineered columns are retained for feature-aware configurations,
+    diagnostics, and future research-style extensions. The monthly ``return`` is
+    computed from daily simple returns within each month.
     """
+
+
     cfg = cfg or DailyFeatureConfig()
     monthly_asset = build_intramonth_monthly_features(df_daily, cfg)
 
@@ -1253,7 +1234,7 @@ def select_micro_pipeline_columns(df_monthly: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# Toy data / smoke test
+# Internal smoke-test helpers
 # ============================================================
 
 

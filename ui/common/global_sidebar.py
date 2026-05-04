@@ -2,9 +2,21 @@
 
 Streamlit-native version: no custom CSS/HTML.
 
-The sidebar is a compact visual navigator plus a lightweight inspector. It uses
-only native Streamlit components, avoids heavy computation, and keeps expensive
-checks/actions on the main screen.
+The sidebar is a compact visual navigator plus a lightweight state inspector.
+It uses only native Streamlit components, avoids heavy computation, and keeps
+expensive checks/actions on the main screen.
+
+Design principles
+-----------------
+- The main screen owns the workflow and heavy actions.
+- The sidebar provides context, navigation and explanation.
+- Diagnostics are read-only unless they simply toggle a main-screen panel.
+- The sidebar should never refresh market data, run the Strategy Engine, launch
+  robustness checks, or apply investment suggestions by itself.
+
+This keeps the app safer for assessment: users can inspect state and move
+between modules without accidentally triggering expensive or state-changing
+operations.
 """
 
 from __future__ import annotations
@@ -25,8 +37,10 @@ STEP0_NOTICE_ACCEPTED = "step0_educational_notice_accepted"
 STEP0_SELECTED_MODULE = "step0_selected_module"
 STEP0_PATHWAY = "step0_planning_pathway"
 
-# Timing keys used by Step 5 suggestion modules. They are strings here on purpose
-# so the sidebar does not need to import all recommendation modules just to render.
+# Timing keys used by Step 5 suggestion modules.
+# They are strings here on purpose so the sidebar does not import recommendation
+# modules just to render. This avoids circular UI dependencies and keeps the
+# global sidebar lightweight.
 PRESET_SUGGESTION_TIMING_KEY = "step5_preset_suggestion_timing_v1"
 AUTO_OPT_SUGGESTION_TIMING_KEY = "step5_auto_opt_suggestion_timing_v1"
 UNIVERSE_SUGGESTION_TIMING_KEY = "step5_universe_suggestion_timing_v1"
@@ -128,16 +142,21 @@ def _first_positive_value(*values: Any) -> float:
 
 
 def _personal_finance_sidebar_summary() -> dict[str, float | int | bool | str]:
+
+
     """Read the lightweight Personal Finance state without triggering work.
 
-    app.py renders the global sidebar before the active step, so the Step 1
-    widgets may not have seeded their defaults yet on a first visit. Use this
-    order of evidence:
+    The sidebar should remain safe even when a screen has not yet seeded all of
+    its widget-backed values, or when the user navigates back from a later module.
+    Use this order of evidence:
+
     1. confirmed planning snapshot;
     2. live preview snapshot, if the main screen produced one on a prior rerun;
     3. current widget-backed values;
     4. the same safe defaults shown by the Personal Finance Setup screen.
     """
+
+
     snapshot = _planning_snapshot()
     preview = _coerce_mapping(st.session_state.get("planning_snapshot_preview", {}))
     source_snapshot = snapshot or preview
@@ -460,7 +479,7 @@ def _step_access_state(target_step: int, current_step: int) -> tuple[bool, str]:
     if target_step == 7:
         if current_step >= 7 or _has_projection_result():
             return True, "Open insights and reports."
-        return False, "Generate a long-term scenarios scenario before opening reports."
+        return False, "Generate a long-term scenario before opening reports."
 
     return False, "Step unavailable."
 
@@ -1886,7 +1905,7 @@ def _render_step6_projection_diagnostics() -> None:
             st.caption(f"{len(oos_returns)} monthly OOS returns available for long-term scenarios.")
 
         if not panel_meta and not run_map:
-            st.caption("Projection context will populate after Personal Finance, Personal Finance Setup, Risk Profile & Asset Universe, or Strategy Engine has produced inputs.")
+            st.caption("Projection context will populate after Personal Finance, Risk Profile & Asset Universe, or Strategy Engine has produced inputs.")
 
 
 def _render_step6_q_and_a() -> None:
@@ -2290,12 +2309,18 @@ def _render_step7_sidebar(step: int) -> None:
 
 
 def render_global_sidebar() -> None:
-    """Render a persistent sidebar across the whole Streamlit app.
 
-    Call this once from app.py, after st.set_page_config and before rendering the
-    active step. Do not call it from individual step files, otherwise the sidebar
-    can be duplicated.
+
+    """Render a persistent contextual sidebar across the whole Streamlit app.
+
+    Call this once from app.py after the active screen has rendered. Rendering the
+    main screen first lets the sidebar read any state seeded or updated by that
+    screen during the current rerun.
+
+    Do not call this from individual step files, otherwise the sidebar can be
+    duplicated.
     """
+
     step = _current_step()
 
     with st.sidebar:

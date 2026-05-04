@@ -1,3 +1,10 @@
+"""Shared Streamlit message and heading helpers for LifeBudget Micro.
+
+This module centralises small UI message wrappers and short Step 1 copy strings
+so the app keeps consistent success, warning, error, loading, and section-header
+patterns across screens.
+"""
+
 from __future__ import annotations
 
 from contextlib import contextmanager

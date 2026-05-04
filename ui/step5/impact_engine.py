@@ -1,3 +1,14 @@
+"""Step 5 local impact and tuning helpers for LifeBudget Micro.
+
+This module performs small, engine-backed local reruns around a current
+Strategy Engine configuration. It supports advanced/manual-control diagnostics
+by estimating local parameter impact, simple local auto-tuning candidates, and
+a small Pareto frontier around selected changed parameters.
+
+These helpers are intended for technical Step 5 diagnostics and should remain
+secondary to the main Strategy Engine user flow.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -30,9 +41,12 @@ def _coerce_mapping(value: Any) -> dict:
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
+        out = float(value)
+        if out == out and out not in {float("inf"), float("-inf")}:
+            return out
     except Exception:
-        return float(default)
+        pass
+    return float(default)
 
 
 def _coerce_cfg(cfg_payload: dict) -> MicroPipelineConfig:
@@ -66,13 +80,13 @@ def compute_local_impact(
     max_params: int = 3,
 ) -> pd.DataFrame:
     """
-    Estimate REAL local impact of changed numeric overrides via small +/- reruns.
+    Estimate real local impact of changed numeric overrides via small +/- reruns.
 
     For each changed numeric parameter:
-    - perturb down
-    - perturb up
-    - rerun engine
-    - measure marginal change vs base metrics
+    - perturb down;
+    - perturb up;
+    - rerun the engine;
+    - measure marginal change versus base metrics.
     """
     base_cfg = dict(cfg_base or {})
     override_map = dict(overrides or {})
@@ -174,8 +188,10 @@ def compute_gradient_map(
         dd_up = _metric(up, "drawdown_impact")
         dd_down = _metric(down, "drawdown_impact")
 
-        up_score = sharpe_up + (0.50 * cagr_up) - (0.75 * dd_up)
-        down_score = sharpe_down + (0.50 * cagr_down) - (0.75 * dd_down)
+        # max_drawdown is normally negative. A positive drawdown_impact means
+        # max_drawdown became less negative, which is an improvement.
+        up_score = sharpe_up + (0.50 * cagr_up) + (0.75 * dd_up)
+        down_score = sharpe_down + (0.50 * cagr_down) + (0.75 * dd_down)
 
         if abs(up_score - down_score) < float(min_abs_signal):
             direction = "flat"
@@ -313,16 +329,17 @@ def compute_local_autotune(
 
 
 def _dominates(a: dict, b: dict) -> bool:
-    # Objectives: sharpe ↑, cagr ↑, max_drawdown ↓
+    # Objectives: sharpe ↑, cagr ↑, drawdown magnitude ↓
     a_sh = _safe_float(a.get("sharpe", 0.0), 0.0)
     a_cg = _safe_float(a.get("cagr", 0.0), 0.0)
-    a_dd = _safe_float(a.get("max_drawdown", 0.0), 0.0)
+    a_dd_abs = abs(_safe_float(a.get("max_drawdown", 0.0), 0.0))
+
     b_sh = _safe_float(b.get("sharpe", 0.0), 0.0)
     b_cg = _safe_float(b.get("cagr", 0.0), 0.0)
-    b_dd = _safe_float(b.get("max_drawdown", 0.0), 0.0)
+    b_dd_abs = abs(_safe_float(b.get("max_drawdown", 0.0), 0.0))
 
-    no_worse = (a_sh >= b_sh) and (a_cg >= b_cg) and (a_dd <= b_dd)
-    strictly_better = (a_sh > b_sh) or (a_cg > b_cg) or (a_dd < b_dd)
+    no_worse = (a_sh >= b_sh) and (a_cg >= b_cg) and (a_dd_abs <= b_dd_abs)
+    strictly_better = (a_sh > b_sh) or (a_cg > b_cg) or (a_dd_abs < b_dd_abs)
     return bool(no_worse and strictly_better)
 
 
@@ -337,10 +354,11 @@ def compute_local_pareto(
 ) -> dict:
     """
     Build a small local Pareto frontier around the current config.
+
     Uses gradient-informed directional candidates and evaluates:
-      - sharpe (maximize)
-      - cagr (maximize)
-      - max_drawdown (minimize)
+    - sharpe (maximize);
+    - cagr (maximize);
+    - drawdown magnitude (minimize).
     """
     base_cfg = dict(cfg_base or {})
     if not base_cfg or asset_panel_df is None or not isinstance(asset_panel_df, pd.DataFrame) or asset_panel_df.empty:
@@ -373,19 +391,19 @@ def compute_local_pareto(
     candidate_cfgs = []
     candidate_id = 1
 
-    # baseline candidate
-    candidate_rows.append({
-        "candidate_id": "base",
-        "parameter": "base",
-        "direction": "base",
-        "candidate_value": None,
-        "sharpe": _safe_float(baseline_metrics.get("sharpe", 0.0), 0.0),
-        "cagr": _safe_float(baseline_metrics.get("cagr", 0.0), 0.0),
-        "max_drawdown": _safe_float(baseline_metrics.get("max_drawdown", 0.0), 0.0),
-    })
+    candidate_rows.append(
+        {
+            "candidate_id": "base",
+            "parameter": "base",
+            "direction": "base",
+            "candidate_value": None,
+            "sharpe": _safe_float(baseline_metrics.get("sharpe", 0.0), 0.0),
+            "cagr": _safe_float(baseline_metrics.get("cagr", 0.0), 0.0),
+            "max_drawdown": _safe_float(baseline_metrics.get("max_drawdown", 0.0), 0.0),
+        }
+    )
     candidate_cfgs.append({"candidate_id": "base", "cfg": dict(base_cfg)})
 
-    # single-parameter candidates around gradient direction
     trials = 1
     for _, row in selected.iterrows():
         if trials >= int(max_candidates):
@@ -400,7 +418,6 @@ def compute_local_pareto(
             continue
 
         signed = 1.0 if direction == "up" else -1.0
-        # produce two local candidates: 1x step and 2x step
         for mult in (1.0, 2.0):
             if trials >= int(max_candidates):
                 break
@@ -413,15 +430,17 @@ def compute_local_pareto(
                 continue
             cid = f"cand_{candidate_id}"
             candidate_id += 1
-            candidate_rows.append({
-                "candidate_id": cid,
-                "parameter": param,
-                "direction": direction,
-                "candidate_value": cfg[param],
-                "sharpe": _safe_float(metrics.get("sharpe", 0.0), 0.0),
-                "cagr": _safe_float(metrics.get("cagr", 0.0), 0.0),
-                "max_drawdown": _safe_float(metrics.get("max_drawdown", 0.0), 0.0),
-            })
+            candidate_rows.append(
+                {
+                    "candidate_id": cid,
+                    "parameter": param,
+                    "direction": direction,
+                    "candidate_value": cfg[param],
+                    "sharpe": _safe_float(metrics.get("sharpe", 0.0), 0.0),
+                    "cagr": _safe_float(metrics.get("cagr", 0.0), 0.0),
+                    "max_drawdown": _safe_float(metrics.get("max_drawdown", 0.0), 0.0),
+                }
+            )
             candidate_cfgs.append({"candidate_id": cid, "cfg": cfg})
 
     candidates_df = pd.DataFrame(candidate_rows)
@@ -433,7 +452,6 @@ def compute_local_pareto(
             "frontier_candidates": [],
         }
 
-    # Pareto filter
     rows = candidates_df.to_dict(orient="records")
     frontier_ids = []
     for i, a in enumerate(rows):

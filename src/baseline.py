@@ -1,30 +1,44 @@
-# src/baseline.py
 """
-Baseline (deterministic) module.
+Deterministic baseline path helpers for LifeBudget Micro.
 
-This module provides the "no-change" trajectory used as the comparison anchor.
+This module builds the no-change weekly cash-flow path used as the comparison
+anchor in the Personal Finance Planner and short-term feasibility checks.
 
-Important naming note (current MVP):
-- `variable_expenses` here is used as the **controllable spending bucket** from Step 1/2.
-  In LifeBudget Micro's current design, that bucket corresponds to **discretionary spending**.
-- Fixed costs are passed in as `fixed_expenses` (fixed essential + variable essentials combined),
-  and are treated as unchanged in the baseline.
+The baseline calculation is intentionally simple:
 
-Option A chosen:
-- Validation lives in app.py (Streamlit-friendly try/except + st.error)
-- baseline.py still provides validate_baseline_df() as the single schema rule
+    weekly surplus = income - fixed_expenses - variable_expenses
+
+The caller decides what each spending bucket represents. For example, one
+service may pass fixed + variable essentials as ``fixed_expenses`` and
+discretionary spending as ``variable_expenses``; another service may keep fixed
+essentials separate and combine variable essentials with discretionary spending.
+The baseline only needs the total weekly spending split across two buckets.
+
+Validation remains deliberately small: this module checks the dataframe schema,
+while service/renderer layers decide how to display any user-facing errors.
 """
 
 from __future__ import annotations
+
 import pandas as pd
 
 
 def validate_baseline_df(df: pd.DataFrame) -> None:
+    """Validate the minimum schema expected from a baseline dataframe.
+
+    The charting and feasibility services require at least:
+
+    - ``Week``: 1-indexed week number;
+    - ``Balance``: cumulative balance after each week.
+
+    Additional columns, such as ``Weekly Savings``, are allowed.
+    """
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         raise ValueError("Baseline output is missing or empty.")
 
     required = {"Week", "Balance"}
     missing = required - set(df.columns)
+
     if missing:
         raise KeyError(
             f"Baseline dataframe missing columns: {sorted(missing)}. "
@@ -39,22 +53,23 @@ def generate_baseline(
     variable_expenses: float,
     weeks: int = 12,
 ) -> pd.DataFrame:
-    """
-    Generate a deterministic baseline trajectory.
+    """Generate a deterministic weekly baseline trajectory.
 
     Parameters:
-    - income: weekly income (take-home)
-    - fixed_expenses: weekly fixed total (fixed essential + variable essentials combined)
-    - variable_expenses: weekly controllable bucket (currently: discretionary spending)
-    - weeks: planning horizon
+    - ``income``: weekly take-home income;
+    - ``fixed_expenses``: first weekly spending bucket;
+    - ``variable_expenses``: second weekly spending bucket;
+    - ``weeks``: positive planning horizon in weeks.
 
     Returns:
-    DataFrame with columns:
-    - Week
-    - Weekly Savings (weekly surplus given the baseline allocation)
-    - Balance (cumulative)
+    A dataframe with:
+
+    - ``Week``;
+    - ``Weekly Savings``: weekly surplus under the no-change baseline;
+    - ``Balance``: cumulative balance over the selected horizon.
     """
-    if int(weeks) <= 0:
+    horizon = int(weeks)
+    if horizon <= 0:
         raise ValueError(f"weeks must be positive, got {weeks}")
 
     weekly_savings = float(income) - float(fixed_expenses) - float(variable_expenses)
@@ -62,7 +77,7 @@ def generate_baseline(
     data = []
     balance = 0.0
 
-    for week in range(1, int(weeks) + 1):
+    for week in range(1, horizon + 1):
         balance += weekly_savings
         data.append(
             {
@@ -72,5 +87,5 @@ def generate_baseline(
             }
         )
 
-    # ✅ No validation here (app.py handles validation + user-facing errors)
+    # Callers validate and decide how to surface errors in the UI.
     return pd.DataFrame(data)
