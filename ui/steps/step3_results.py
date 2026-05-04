@@ -1,20 +1,33 @@
-"""Step 3 — Results."""
+"""
+Legacy Step 3 short-term feasibility renderer.
+
+The final prototype usually renders the feasibility summary and chart inside the
+combined Personal Finance Planner dashboard in ``step1_inputs.py``. This module
+is kept for legacy/embedded compatibility and displays the Step 3 view model
+built by ``step3_results_service``.
+"""
+
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import streamlit as st
 
-from ui.common.cards import summary_card
 from ui.common.messages import section_header
 from ui.common.metrics import currency_metric
-from ui.services.step3_results_service import build_step3_view_model, coerce_snapshot
 from ui.services.step2_goal_service import UNCERTAINTY_OPTIONS
+from ui.services.step3_results_service import build_step3_view_model, coerce_snapshot
 from ui.state.keys import *
 
 STEP0_PATHWAY = "step0_planning_pathway"
 
 
 def _current_pathway() -> str:
+    """Resolve the current planning pathway with legacy fallback keys.
+
+    Step 0 has used a few different session-state keys during the prototype.
+    This helper normalises them into the canonical pathway value used for
+    navigation after the short-term feasibility step.
+    """
     valid = {"compare_both", "savings_only", "savings_plus_investing"}
 
     value = str(st.session_state.get(STEP0_PATHWAY, "") or "").strip()
@@ -51,6 +64,7 @@ def _current_pathway() -> str:
 
 
 def _pathway_label(pathway: str) -> str:
+    """Return a user-facing label for the selected planning pathway."""
     return {
         "compare_both": "Compare savings vs investing",
         "savings_only": "Savings-only plan",
@@ -58,13 +72,32 @@ def _pathway_label(pathway: str) -> str:
     }.get(pathway, "Compare savings vs investing")
 
 
-def _render_projection_chart(baseline_df, plan_a_df, *, target_weekly: float = 0.0) -> None:
+def _render_projection_chart(
+    baseline_df,
+    plan_a_df,
+    *,
+    target_weekly: float = 0.0,
+    shock_week: int | None = None,
+    shock_amount: float = 0.0,
+) -> None:
+    """Render the Step 3 baseline vs target-plan chart.
+
+    The service provides the baseline path and target-plan simulation output.
+    The chart maps Mean/Lower/Upper to expected and 10–90% scenario range.
+    """
     if baseline_df.empty or plan_a_df.empty:
         return
+
     fig, ax = plt.subplots(figsize=(10, 4.4))
     ax.plot(baseline_df["Week"], baseline_df["Balance"], label="Baseline", linewidth=2.5)
-    ax.plot(plan_a_df["Week"], plan_a_df["Mean"], label="Target plan (mean)", linewidth=2.5)
-    ax.fill_between(plan_a_df["Week"], plan_a_df["Lower"], plan_a_df["Upper"], alpha=0.15, label="Target plan (10–90%)")
+    ax.plot(plan_a_df["Week"], plan_a_df["Mean"], label="Target plan (expected)", linewidth=2.5)
+    ax.fill_between(
+        plan_a_df["Week"],
+        plan_a_df["Lower"],
+        plan_a_df["Upper"],
+        alpha=0.15,
+        label="Target plan range (10–90%)",
+    )
 
     if float(target_weekly or 0.0) > 0.0:
         final_week = float(baseline_df["Week"].max())
@@ -78,6 +111,25 @@ def _render_projection_chart(baseline_df, plan_a_df, *, target_weekly: float = 0
             fontsize=9,
         )
 
+    try:
+        marker_week = int(shock_week or 0)
+        marker_amount = float(shock_amount or 0.0)
+    except Exception:
+        marker_week = 0
+        marker_amount = 0.0
+
+    if marker_week > 0 and marker_amount > 0.0:
+        ax.axvline(marker_week, linestyle=":", linewidth=1.3, label="Life event stress")
+        ax.annotate(
+            f"one-off -£{marker_amount:,.0f}",
+            xy=(marker_week, 0),
+            xytext=(6, 18),
+            textcoords="offset points",
+            rotation=90,
+            fontsize=8,
+            va="bottom",
+        )
+
     ax.axhline(0.0, linestyle="--", linewidth=1.0)
     ax.set_title("Short-term balance path")
     ax.set_xlabel("Week")
@@ -87,6 +139,7 @@ def _render_projection_chart(baseline_df, plan_a_df, *, target_weekly: float = 0
 
 
 def _branch_card(pathway: str) -> tuple[str, str, str, int]:
+    """Return the next-step navigation copy for the selected pathway."""
     if pathway == "savings_only":
         return (
             "Next pathway",
@@ -94,6 +147,7 @@ def _branch_card(pathway: str) -> tuple[str, str, str, int]:
             "Continue to Step 6",
             6,
         )
+
     if pathway == "savings_plus_investing":
         return (
             "Next pathway",
@@ -101,6 +155,7 @@ def _branch_card(pathway: str) -> tuple[str, str, str, int]:
             "Continue to Step 4",
             4,
         )
+
     return (
         "Next pathway",
         "Build the investment branch so Step 6 can compare savings-only outcomes against savings + investing outcomes.",
@@ -110,6 +165,7 @@ def _branch_card(pathway: str) -> tuple[str, str, str, int]:
 
 
 def _go_to_next_branch(pathway: str, next_step: int) -> None:
+    """Navigate to the next module while preserving pathway compatibility keys."""
     # Defensive navigation: write both canonical imported key and raw string key.
     st.session_state[STEP0_PATHWAY] = pathway
     st.session_state["selected_planning_pathway"] = pathway
@@ -124,6 +180,7 @@ def _go_to_next_branch(pathway: str, next_step: int) -> None:
 
     st.rerun()
 
+
 _UNCERTAINTY_LABELS = {
     "Quick estimate (default)": "Balanced uncertainty",
     "Typical spending": "Mild variability",
@@ -136,15 +193,33 @@ _UNCERTAINTY_REVERSE_LABELS = {label: raw for raw, label in _UNCERTAINTY_LABELS.
 _STRESS_PRESET_OPTIONS = ["None", "Minor unexpected expense", "Major monthly shock", "Severe emergency shock"]
 
 _STRESS_PRESET_EVENTS = {
-    "None": {"amount": 0.0, "label": "No one-off cost is applied."},
-    "Minor unexpected expense": {"amount": 250.0, "label": "Adds a modest one-off cost in the middle of the short-term horizon."},
-    "Major monthly shock": {"amount": 600.0, "label": "Adds a more demanding one-off cost in the middle of the short-term horizon."},
-    "Severe emergency shock": {"amount": 1000.0, "label": "Adds a large one-off cost to stress-test the plan."},
+    "None": {
+        "amount": 0.0,
+        "label": "No one-off cost is applied.",
+    },
+    "Minor unexpected expense": {
+        "amount": 250.0,
+        "label": "Adds a modest one-off cost in the middle of the short-term horizon.",
+    },
+    "Major monthly shock": {
+        "amount": 600.0,
+        "label": "Adds a more demanding one-off cost in the middle of the short-term horizon.",
+    },
+    "Severe emergency shock": {
+        "amount": 1000.0,
+        "label": "Adds a large one-off cost to stress-test the plan.",
+    },
 }
 
 
 def _sync_step3_assumption_controls(snapshot: dict) -> dict:
-    """Render short-term simulation assumptions in Step 3 and persist them to the planning snapshot."""
+    """Render Step 3 assumption controls and persist them to the snapshot.
+
+    This legacy renderer owns the visible Step 3 controls when the separate Step
+    3 page is used. The combined Personal Finance Planner has a compact version
+    of the same controls, so this function also writes compatibility payloads
+    expected by the shared short-term simulation service.
+    """
     if not isinstance(snapshot, dict):
         snapshot = {}
 
@@ -213,7 +288,6 @@ def _sync_step3_assumption_controls(snapshot: dict) -> dict:
         )
 
         uncertainty_display_options = [_UNCERTAINTY_LABELS.get(option, option) for option in UNCERTAINTY_OPTIONS]
-        current_uncertainty_display = _UNCERTAINTY_LABELS.get(current_uncertainty, current_uncertainty)
         selected_uncertainty_display = st.selectbox(
             "Scenario stress level",
             uncertainty_display_options,
@@ -280,13 +354,11 @@ def _sync_step3_assumption_controls(snapshot: dict) -> dict:
 
 def _render_scenario_summary(
     *,
-    pathway: str,
-    view_model: dict,
     snapshot: dict,
     planning_horizon: int,
     target_weekly: float,
-    expected_cash_only: float,
 ) -> None:
+    """Render a compact summary of the active short-term scenario."""
     stress_preset = str(snapshot.get("stress_preset", "None") or "None")
     raw_uncertainty = str(snapshot.get("uncertainty_preset", UNCERTAINTY_OPTIONS[0]) or UNCERTAINTY_OPTIONS[0])
     uncertainty_label = _UNCERTAINTY_LABELS.get(raw_uncertainty, raw_uncertainty)
@@ -341,6 +413,7 @@ def _classify_short_term_result(summary: dict, *, materiality_pct: float = 0.02)
 
 
 def _render_concise_explanation(summary: dict, *, planning_horizon: int, target_weekly: float) -> None:
+    """Render a short plain-English explanation of the Step 3 outcome."""
     baseline_final = float(summary.get("baseline_final", 0.0) or 0.0)
     conservative = float(summary.get("conservative_final", 0.0) or 0.0)
     expected = float(summary.get("expected_final", 0.0) or 0.0)
@@ -353,6 +426,7 @@ def _render_concise_explanation(summary: dict, *, planning_horizon: int, target_
         expected_delta = 0.0
     if abs(conservative_delta) < 0.5:
         conservative_delta = 0.0
+
     range_width = optimistic - conservative
 
     st.markdown("### What happened")
@@ -378,7 +452,9 @@ def _render_concise_explanation(summary: dict, *, planning_horizon: int, target_
         "- Wider ranges mean the plan depends more on real-life spending variability."
     )
 
-def _render_action_guidance(summary: dict, next_actions: dict) -> None:
+
+def _render_action_guidance(summary: dict) -> None:
+    """Render high-level guidance based on the classified short-term result."""
     classification = _classify_short_term_result(summary)
 
     st.markdown("### What to do next")
@@ -405,10 +481,12 @@ def _render_action_guidance(summary: dict, next_actions: dict) -> None:
 
 
 def render_step_3(*, embedded: bool = False) -> None:
+    """Render the legacy/embedded Step 3 short-term feasibility page."""
     if embedded:
         st.caption("Stress-test the selected weekly savings target before continuing.")
     else:
         section_header("Step 3 — Short-term feasibility")
+
     snapshot = coerce_snapshot()
     if not snapshot:
         st.warning("No planning snapshot found yet. Complete the current situation and savings target sections first.")
@@ -426,20 +504,20 @@ def render_step_3(*, embedded: bool = False) -> None:
     baseline_df = view_model["baseline_df"]
     plan_a_df = view_model["plan_a_df"]
     summary = view_model["summary"]
-    next_actions = view_model["next_actions"]
-    explanation = view_model["explanation"]
+    next_actions = view_model.get("next_actions", "")
+    explanation = view_model.get("explanation", "")
 
-    planning_horizon = int(snapshot.get("planning_horizon_weeks", st.session_state.get(STEP2_PLANNING_HORIZON_WEEKS, 12)) or 12)
+    planning_horizon = int(
+        snapshot.get("planning_horizon_weeks", st.session_state.get(STEP2_PLANNING_HORIZON_WEEKS, 12)) or 12
+    )
     target_weekly = float(snapshot.get("target_a_weekly", st.session_state.get(TARGET_A_WEEKLY, 0.0)) or 0.0)
-    expected_cash_only = float(target_weekly * planning_horizon)
+    shock_week = int(snapshot.get("shock_week", 0) or 0)
+    shock_amount = float(snapshot.get("shock_amount", 0.0) or 0.0)
 
     _render_scenario_summary(
-        pathway=pathway,
-        view_model=view_model,
         snapshot=snapshot,
         planning_horizon=planning_horizon,
         target_weekly=target_weekly,
-        expected_cash_only=expected_cash_only,
     )
 
     m1, m2, m3 = st.columns(3)
@@ -454,16 +532,48 @@ def render_step_3(*, embedded: bool = False) -> None:
         f"Baseline final balance: **£{float(summary['baseline_final']):,.0f}**. "
         "The figures above show the conservative, expected and high-case outcomes for this scenario."
     )
-    st.markdown("## Short-term cash-flow path")
-    _render_projection_chart(baseline_df, plan_a_df, target_weekly=target_weekly)
 
-    _render_action_guidance(summary, next_actions)
+    st.markdown("## Short-term cash-flow path")
+    _render_projection_chart(
+        baseline_df,
+        plan_a_df,
+        target_weekly=target_weekly,
+        shock_week=shock_week,
+        shock_amount=shock_amount,
+    )
+
+    _render_action_guidance(summary)
+
+    if next_actions:
+        with st.expander("Detailed next actions", expanded=False):
+            if isinstance(next_actions, dict):
+                title = str(next_actions.get("title", "Next actions") or "Next actions")
+                body = str(next_actions.get("body", "") or "")
+                level = str(next_actions.get("level", "info") or "info")
+
+                st.markdown(f"### {title}")
+
+                if level == "success":
+                    st.success(body)
+                elif level == "warning":
+                    st.warning(body)
+                elif level == "error":
+                    st.error(body)
+                else:
+                    st.info(body)
+            else:
+                st.markdown(str(next_actions))
 
     with st.expander("See concise explanation", expanded=False):
         _render_concise_explanation(summary, planning_horizon=planning_horizon, target_weekly=target_weekly)
 
+    if explanation:
+        with st.expander("Technical simulation details", expanded=False):
+            st.markdown(str(explanation))
+
     st.markdown("---")
     card_title, card_body, button_label, next_step = _branch_card(pathway)
+
     if embedded:
         st.caption(f"**{card_title}:** {card_body}")
         if st.button(button_label, key=f"step3_continue_branch_{pathway}", use_container_width=True):
@@ -480,8 +590,3 @@ def render_step_3(*, embedded: bool = False) -> None:
         st.caption(f"**{card_title}:** {card_body}")
         if st.button(button_label, key=f"step3_continue_branch_{pathway}", use_container_width=True):
             _go_to_next_branch(pathway, next_step)
-
-    # Safety net while debugging branch routing: visible only if savings-only path is active.
-    if pathway == "savings_only":
-        if st.button("Go directly to Step 6", key="step3_force_step6_savings_only", use_container_width=True):
-            _go_to_next_branch("savings_only", 6)

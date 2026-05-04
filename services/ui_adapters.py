@@ -1,10 +1,13 @@
-# services/ui_adapters.py
 """
 UI adapter helpers for LifeBudget Micro.
 
-Gold Stable mode keeps adapters small and deterministic. Advanced Step 5 and
-recommendation payloads are retained as empty compatibility surfaces so legacy
-imports do not break, but they no longer drive active UI paths.
+This module converts Streamlit session-state objects and service outputs into
+small, deterministic dictionaries used by the Step 4, Step 5, Step 6, and final
+report workflows.
+
+Some helpers intentionally return empty compatibility payloads for inactive
+advanced/recommendation paths. This keeps older saved state and imports safe
+without reactivating retired UI flows.
 """
 
 from __future__ import annotations
@@ -12,8 +15,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 
-PROJECTION_PROFILE_OPTIONS = ["Conservative", "Balanced", "Growth"]
-
+PROJECTION_PROFILE_OPTIONS = ["Conservative", "Defensive", "Balanced", "Growth"]
 
 def coerce_mapping(value: Any) -> Dict[str, Any]:
     if value is None:
@@ -116,7 +118,7 @@ def build_step5_simple_payload(session_state: Any) -> Dict[str, Any]:
 
 
 def build_step5_advanced_payload(session_state: Any) -> Dict[str, Any]:
-    """Retired in Gold Stable mode. Advanced Step 5 payload is intentionally empty."""
+    """Compatibility surface for inactive advanced Step 5 payloads."""
     return {}
 
 
@@ -216,7 +218,7 @@ def build_projection_state_payload(session_state: Any) -> Dict[str, Any]:
 
 
 def build_recommendation_state_payload(session_state: Any) -> Dict[str, Any]:
-    """Retired in Gold Stable mode. Kept for compatibility with old snapshots."""
+    """Compatibility surface for saved recommendation state from older runs."""
     return {
         "simple_override_patch": {},
         "simple_override_scope_key": "",

@@ -1,4 +1,20 @@
-# coherence.py
+"""Configuration-coherence helpers for LifeBudget Micro.
+
+This module defines lightweight governance rules for the Strategy Engine
+configuration. It does not run the engine and it does not optimise portfolios.
+Instead, it checks whether a resolved configuration is structurally aligned with
+the selected philosophy: Growth, Balanced, or Defensive.
+
+The main responsibilities are:
+- translate a philosophy and universe size into compatibility constraints;
+- extract high-level configuration blocks from a MicroPipelineConfig-like dict;
+- evaluate whether the current config is coherent, mixed, or incoherent;
+- suggest small repair patches when a configuration drifts too far from its
+  intended philosophy.
+
+These checks are used by src.investment and the Step 5 UI to explain advanced
+engine controls and recommendation/repair decisions.
+"""
 
 from __future__ import annotations
 
@@ -121,7 +137,8 @@ def _derive_turnover_control(cfg: Dict[str, Any]) -> str:
         if value is not None:
             tight_limit = value if tight_limit is None else min(tight_limit, value)
 
-    # --- RELAXED THRESHOLDS (UX fix) ---
+    # Classification thresholds are intentionally relaxed so calm base presets
+    # are not flagged as stretched merely because turnover controls exist.
     if strength >= 1.2 or (tight_limit is not None and tight_limit <= 0.20):
         return 'high'
     if strength >= 0.30 or (tight_limit is not None and tight_limit <= 0.40):
@@ -457,13 +474,33 @@ def detect_structural_incompatibilities(
     if not _turnover_compatible(blocks, constraints):
         tolerance = str(constraints.get('turnover_tolerance') or 'medium')
         turnover_patch: Dict[str, Any] = {}
+
         if tolerance == 'low':
-            turnover_patch['turnover_penalty_strength'] = max(1.0, _safe_float(payload.get('turnover_penalty_strength')) or 0.0)
+            current_strength = _safe_float(payload.get('turnover_penalty_strength')) or 0.0
             current_limit = _safe_float(payload.get('turnover_constraint_max_turnover'))
-            turnover_patch['turnover_constraint_max_turnover'] = min(current_limit, 0.25) if current_limit is not None else 0.25
+
+            # Keep the repaired value inside the same relaxed "low turnover-control"
+            # band used by _derive_turnover_control().
+            turnover_patch['turnover_penalty_strength'] = min(max(current_strength, 0.12), 0.20)
+            turnover_patch['turnover_constraint_max_turnover'] = (
+                max(current_limit, 0.41) if current_limit is not None else 0.41
+            )
+
         elif tolerance == 'medium':
-            turnover_patch['turnover_penalty_strength'] = max(0.20, _safe_float(payload.get('turnover_penalty_strength')) or 0.0)
-        _add_issue('turnover_control_too_aggressive', 'medium', f"turnover_control='{blocks.get('turnover_control')}' is too aggressive for {philosophy_name}", suggested_value=tolerance, patch=turnover_patch)
+            current_strength = _safe_float(payload.get('turnover_penalty_strength')) or 0.0
+            current_limit = _safe_float(payload.get('turnover_constraint_max_turnover'))
+
+            turnover_patch['turnover_penalty_strength'] = min(max(current_strength, 0.20), 0.29)
+            if current_limit is not None and current_limit <= 0.20:
+                turnover_patch['turnover_constraint_max_turnover'] = 0.25
+
+        _add_issue(
+            'turnover_control_outside_tolerance',
+            'medium',
+            f"turnover_control='{blocks.get('turnover_control')}' is outside the {philosophy_name} compatibility band",
+            suggested_value=tolerance,
+            patch=turnover_patch,
+        )
 
     if philosophy_name == 'Growth' and str(blocks.get('caps_strength')) == 'strong':
         _add_issue('growth_overconstrained_caps', 'low', 'Growth profile looks over-constrained by strong caps', suggested_value='soft', patch={'asset_weight_cap': 0.20})
@@ -568,7 +605,7 @@ def evaluate_config_coherence(
     blocks = extract_config_blocks(cfg)
     philosophy_name = _coerce_philosophy_name(philosophy)
 
-    # ✅ NUEVO: constraints reales (antes usabas spec fijo)
+    # Resolve constraints for the active philosophy, universe, template, and style.
     constraints = resolve_philosophy_to_constraints(
         philosophy_name,
         universe=universe,
@@ -580,7 +617,7 @@ def evaluate_config_coherence(
     reasons = []
     warnings = []
 
-    # --- lógica original mantenida ---
+    # Base structural checks.
     if philosophy_name == 'Growth' and blocks['covariance_model'] == 'none':
         warnings.append('Growth without covariance control')
 
@@ -606,10 +643,7 @@ def evaluate_config_coherence(
         score -= 1
         warnings.append('Overlay mode outside philosophy compatibility set')
 
-    # =========================================================
-    # ✅ FIX REAL: TOP_K
-    # =========================================================
-
+    # Top-k compatibility check.
     top_k_value = int(blocks.get('top_k', 0) or 0)
     low_k, high_k = constraints.get('top_k_range', (0, 999))
 
@@ -624,7 +658,7 @@ def evaluate_config_coherence(
             score += 1
             reasons.append("top_k within philosophy band")
 
-    # penalización fuerte
+    # Additional penalty for values far outside the compatible range.
     if top_k_value > 0:
         if top_k_value < low_k * 0.5 or top_k_value > high_k * 1.5:
             score -= 1
@@ -663,7 +697,7 @@ def evaluate_config_coherence(
         'repair_plan': guidance,
         'blocks': blocks,
         'philosophy': philosophy_name,
-        'philosophy_spec': constraints,  # 🔥 ahora correcto
+        'philosophy_spec': constraints, 
         'status': str(guidance.get('status', 'ok') or 'ok'),
         'severity_counts': dict(guidance.get('severity_counts', {}) or {}),
         'governance_summary': dict(guidance.get('governance_summary', {}) or {}),
@@ -682,7 +716,7 @@ def compute_coherence_score(
     score = 0.5
     philosophy_name = _coerce_philosophy_name(philosophy)
 
-    # --- lógica existente (igual) ---
+    # Philosophy-specific scoring adjustments.
     if philosophy_name == 'Defensive':
         if blocks['covariance_model'] == 'none':
             score -= 0.25
@@ -728,10 +762,7 @@ def compute_coherence_score(
         elif blocks['turnover_control'] == 'high':
             score -= 0.05
 
-    # =========================================================
-    # ✅ FIX: usar constraints reales SIEMPRE
-    # =========================================================
-
+    # Always score top_k against the resolved active constraints.
     constraints = resolve_philosophy_to_constraints(
         philosophy_name,
         universe=universe,
@@ -751,7 +782,7 @@ def compute_coherence_score(
         else:
             score += 0.05
 
-    # coherencia general
+    # General compatibility scoring.
     if blocks['signal_mode'] in set(constraints.get('preferred_signal_modes', [])):
         score += 0.04
 

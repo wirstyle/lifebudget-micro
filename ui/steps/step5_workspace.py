@@ -1,3 +1,16 @@
+"""
+Step 5 Strategy Engine workspace renderer.
+
+This module orchestrates the Strategy Engine screen. It resolves the current
+strategy setup, checks whether an existing run is still fresh, renders the
+pre-run setup controls, runs the engine through the run panel, and displays
+post-run results.
+
+The heavy engine execution, simple-mode controls, governance checks and post-run
+analysis are delegated to specialised ``ui.step5`` modules. This file should
+remain an orchestration layer for state, freshness checks and screen flow.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -21,8 +34,6 @@ from ui.step5.simple_mode import render_simple_mode, resolve_simple_mode_state
 from ui.step5.run_panel import clear_retired_step5_state, render_run_panel
 from ui.step5.post_run import render_post_run
 from ui.step5.governance import resolve_governance_status
-
-
 
 
 SUGGESTION_DEPTH_MODE_KEY = "step5_suggestion_testing_depth_mode_v1"
@@ -811,7 +822,7 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
             options=signal_mode_options,
             index=signal_mode_options.index(safe_signal_mode),
             key="step5_basic_signal_mode",
-            help="Minimal signal contract exposed in Fase 6.0, now including more distinct signal-model branches.",
+            help="Signal model used by the micro-pipeline to rank or classify candidate assets.",
         )
 
     c3, c4 = st.columns(2)
@@ -1001,6 +1012,7 @@ def _render_engine_transparency_body() -> None:
     )
 
 
+# Optional explanatory helpers retained for alternative Step 5 layouts.
 def _render_engine_transparency_intro() -> None:
     """Keep the detailed engine explanation available without making the page top-heavy."""
     with st.expander("Why the engine is needed", expanded=False):
@@ -1016,6 +1028,7 @@ def _render_strategy_engine_about_expander() -> None:
         )
         _render_engine_transparency_body()
 
+# Legacy compact setup summary retained for earlier Step 5 layouts.
 def _render_workspace_summary(cfg_final: dict, asset_panel_df: Any, current_philosophy: str, simple_cfg: dict) -> None:
     panel_rows = int(len(asset_panel_df)) if isinstance(asset_panel_df, pd.DataFrame) else 0
     panel_assets = int(asset_panel_df["asset"].nunique()) if isinstance(asset_panel_df, pd.DataFrame) and "asset" in asset_panel_df.columns else 0
@@ -1185,7 +1198,7 @@ def _build_executed_setup_summary(
     return " · ".join(active_parts)
 
 def render_step_5() -> None:
-    # Gold Stable: remove legacy exploration state before rendering.
+    # Remove retired exploration state before rendering the active Strategy Engine UI.
     clear_retired_step5_state()
 
     current_philosophy = str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
@@ -1328,10 +1341,8 @@ def render_step_5() -> None:
             bordered=False,
         )
 
-    # render_run_panel publishes the canonical signature only when the execution
-    # controls are mounted. In the fresh-result view those controls stay lazy so
-    # passive toggles (timings/reliability) cannot replace the current signature
-    # with a stale hidden-runner signature.
+    # In the fresh-result view, keep the active executed signature authoritative so
+    # passive post-run toggles do not replace it with a stale setup signature.
     setup_controls_visible = bool(st.session_state.get(STEP5_CHANGE_SETUP_CONTROLS_VISIBLE_KEY, False))
     if (not has_fresh_stored_result) or setup_controls_visible or new_run_result is not None:
         current_signature = str(

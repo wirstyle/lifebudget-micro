@@ -1,26 +1,137 @@
+"""Step 5 governance helpers for LifeBudget Micro.
+
+This module resolves the Simple-mode Strategy Engine intent plus any advanced
+manual overrides into a governed engine configuration. It also renders a compact
+governance summary for advanced Step 5 views.
+
+The governance layer is used to check whether manual changes remain coherent
+with the selected investment philosophy before the Strategy Engine is executed.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any
 
 import streamlit as st
 
-from src.investment import SimpleUISpec, config_to_dict, resolve_user_intention_to_governed_config
+from src.investment import (
+    SimpleUISpec,
+    config_to_dict,
+    resolve_user_intention_to_governed_config,
+)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+        if math.isfinite(out):
+            return out
+    except Exception:
+        pass
+    return float(default)
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _first_present(mapping: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return value
+    return default
 
 
 def _build_simple_spec(simple_cfg: dict) -> SimpleUISpec:
+    """Build the governed Simple UI spec from current Step 5 simple settings.
+
+    Supports both the current service payload keys and older semantic slider
+    names so saved state and older callers remain compatible.
+    """
     payload = dict(simple_cfg or {})
-    try:
-        universe_size = int(st.session_state.get("universe_size", 25) or 25)
-    except Exception:
-        universe_size = 25
+    universe_size = _safe_int(st.session_state.get("universe_size", 25), 25)
+
     return SimpleUISpec(
-        strategy_template=str(payload.get("template", "Balanced Risk-Controlled") or "Balanced Risk-Controlled"),
-        style_preset=str(payload.get("preset", "Balanced") or "Balanced"),
-        risk_appetite=float(payload.get("risk_appetite", 0.50) or 0.50),
-        diversification=float(payload.get("diversification_vs_concentration", 0.55) or 0.55),
-        stability=float(payload.get("stability_vs_responsiveness", 0.60) or 0.60),
-        turnover_pref=float(payload.get("low_turnover_vs_adaptive", 0.40) or 0.40),
-        drawdown_protection=float(payload.get("drawdown_protection", 0.62) or 0.62),
-        overlay_intensity=float(payload.get("overlay_intensity", 0.42) or 0.42),
-        signal_confidence=float(payload.get("confidence_in_signal", 0.56) or 0.56),
-        simplicity=float(payload.get("simplicity_vs_sophistication", 0.56) or 0.56),
+        strategy_template=str(
+            _first_present(
+                payload,
+                "strategy_template",
+                "template",
+                default="Balanced Risk-Controlled",
+            )
+            or "Balanced Risk-Controlled"
+        ),
+        style_preset=str(
+            _first_present(
+                payload,
+                "style_preset",
+                "preset",
+                default="Balanced",
+            )
+            or "Balanced"
+        ),
+        risk_appetite=_safe_float(
+            _first_present(payload, "risk_appetite", default=0.50),
+            0.50,
+        ),
+        diversification=_safe_float(
+            _first_present(
+                payload,
+                "diversification",
+                "diversification_vs_concentration",
+                default=0.55,
+            ),
+            0.55,
+        ),
+        stability=_safe_float(
+            _first_present(
+                payload,
+                "stability",
+                "stability_vs_responsiveness",
+                default=0.60,
+            ),
+            0.60,
+        ),
+        turnover_pref=_safe_float(
+            _first_present(
+                payload,
+                "turnover_pref",
+                "low_turnover_vs_adaptive",
+                default=0.40,
+            ),
+            0.40,
+        ),
+        drawdown_protection=_safe_float(
+            _first_present(payload, "drawdown_protection", default=0.62),
+            0.62,
+        ),
+        overlay_intensity=_safe_float(
+            _first_present(payload, "overlay_intensity", default=0.42),
+            0.42,
+        ),
+        signal_confidence=_safe_float(
+            _first_present(
+                payload,
+                "signal_confidence",
+                "confidence_in_signal",
+                default=0.56,
+            ),
+            0.56,
+        ),
+        simplicity=_safe_float(
+            _first_present(
+                payload,
+                "simplicity",
+                "simplicity_vs_sophistication",
+                default=0.56,
+            ),
+            0.56,
+        ),
         universe_size=universe_size,
     )
 
@@ -50,13 +161,13 @@ def resolve_governance_status(simple_cfg, advanced_cfg, resolved_cfg=None):
         strategy_template=simple_spec.strategy_template,
         style_preset=simple_spec.style_preset,
         overrides=overrides,
-        trace_source="step5_workspace",
+        trace_source="step5_governance",
     )
 
     governance_payload = governed.to_governance_payload().to_dict()
     cfg_final = config_to_dict(governed.final_cfg)
 
-    score = float(governance_payload.get("coherence_score") or 0.0)
+    score = _safe_float(governance_payload.get("coherence_score"), 0.0)
     status = str(governance_payload.get("coherence_status", governed.status) or governed.status or "coherent")
     warnings = list(governance_payload.get("warnings", []) or [])
     suggested_repairs = dict(governance_payload.get("suggested_repairs", {}) or {})
@@ -65,11 +176,11 @@ def resolve_governance_status(simple_cfg, advanced_cfg, resolved_cfg=None):
     if status in {"blocked", "discouraged"} or score < 0.55:
         state = "blocked"
         operational = "Blocked"
-        message = "Governance blocked this configuration. Structural inconsistencies detected."
+        message = "Governance blocked this configuration because structural inconsistencies were detected."
     elif status in {"stretched", "auto_repair_available"} or score < 0.72:
         state = "stretched"
         operational = "Stretched"
-        message = "Configuration is valid but stretched relative to its philosophy."
+        message = "Configuration is valid but stretched relative to its selected philosophy."
     else:
         state = "coherent"
         operational = "Operational"
@@ -86,6 +197,7 @@ def resolve_governance_status(simple_cfg, advanced_cfg, resolved_cfg=None):
         "warnings": warnings,
         "repairs": repair_patch,
         "repair_summary": suggested_repairs,
+        "suggested_repair_patch": repair_patch,
         "message": message,
         "explanation": explanation,
         "cfg_final": cfg_final,
@@ -96,17 +208,29 @@ def resolve_governance_status(simple_cfg, advanced_cfg, resolved_cfg=None):
 
 def render_governance(simple_cfg, advanced_cfg):
     gov = resolve_governance_status(simple_cfg, advanced_cfg)
+
     st.markdown("### Governance & philosophy")
     st.caption(
         f"State: {gov.get('operational_status', '—')} · "
         f"Score: {gov.get('coherence_score_display', '—')}"
     )
 
+    message = str(gov.get("message", "") or "")
+    state = str(gov.get("state", "coherent") or "coherent")
+
+    if message:
+        if state == "blocked":
+            st.error(message)
+        elif state == "stretched":
+            st.info(message)
+        else:
+            st.success(message)
+
     warnings = list(gov.get("warnings", []) or [])
     if warnings:
         st.warning("Warnings:")
-        for w in warnings:
-            st.write(f"- {w}")
+        for warning in warnings:
+            st.write(f"- {warning}")
 
     repair_summary = dict(gov.get("repair_summary", {}) or {})
     suggested_patch = dict(repair_summary.get("suggested_patch", {}) or {})

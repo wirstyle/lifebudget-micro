@@ -1,4 +1,13 @@
-"""Step 2 — Savings Goal."""
+"""
+Legacy Step 2 savings-goal renderer.
+
+The final prototype usually renders the savings-target controls inside the
+combined Personal Finance Planner dashboard in ``step1_inputs.py``. This module
+is kept for legacy/embedded compatibility and reuses ``step2_goal_service`` as
+the source of truth for target presets, feasibility payloads, and snapshot
+updates.
+"""
+
 from __future__ import annotations
 
 import streamlit as st
@@ -68,6 +77,7 @@ def _render_no_margin_mode(snapshot: dict, *, planning_horizon: int, embedded: b
         st.markdown("### Restore weekly margin first")
     else:
         section_header("Step 2 — Restore weekly margin first")
+
     st.warning(
         "Your current snapshot does not leave a weekly surplus yet. "
         "Before choosing a savings target, the useful next step is to restore break-even."
@@ -75,7 +85,10 @@ def _render_no_margin_mode(snapshot: dict, *, planning_horizon: int, embedded: b
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.metric("Weekly surplus available", "£0/week" if baseline_margin <= 0 else f"{_safe_money(baseline_margin)}/week")
+        st.metric(
+            "Weekly surplus available",
+            "£0/week" if baseline_margin <= 0 else f"{_safe_money(baseline_margin)}/week",
+        )
     with c2:
         st.metric("Discretionary spending", f"{_safe_money(discretionary_weekly)}/week")
     with c3:
@@ -149,6 +162,7 @@ def render_step_2(*, embedded: bool = False) -> None:
         st.caption("Choose a weekly savings target. The feasibility section updates below.")
     else:
         section_header("Step 2 — Choose your savings goal")
+
     st.info(INTENT_COPY[intent]["info"])
     st.caption(INTENT_COPY[intent]["tip"])
 
@@ -157,58 +171,73 @@ def render_step_2(*, embedded: bool = False) -> None:
         st.success(feedback_message)
 
     st.markdown("### My weekly savings target")
+
     if STEP1_TARGET_WEEKLY_SAVINGS not in st.session_state:
         st.session_state[STEP1_TARGET_WEEKLY_SAVINGS] = float(target_context["recommended_target"])
 
+    max_target_weekly = max(0.0, float(baseline_weekly))
+    current_target = float(st.session_state.get(STEP1_TARGET_WEEKLY_SAVINGS, 0.0) or 0.0)
+    if current_target > max_target_weekly:
+        st.session_state[STEP1_TARGET_WEEKLY_SAVINGS] = float(max_target_weekly)
+
     target_weekly = st.number_input(
-        "Weekly savings target (£)",
+        "Weekly savings target (£/week)",
         min_value=0.0,
+        max_value=float(max_target_weekly),
         step=5.0,
         key=STEP1_TARGET_WEEKLY_SAVINGS,
         on_change=_mark_target_user_touched,
+        help="This cannot be higher than your current weekly free margin.",
     )
+
     active_preset = str(st.session_state.get(STEP2_SELECTED_PRESET, "Recommended") or "Recommended")
     if active_preset == "Safe":
         st.caption(
-            f"Safe starting point: about £{float(target_context['safe_target']):,.0f}/week. This is the more cautious default for your current intent."
+            f"Cautious starting point: about £{float(target_context['safe_target']):,.0f}/week. "
+            "This is the lower-pressure default for your current intent."
         )
     elif active_preset == "Ambitious":
         st.caption(
-            f"Ambitious starting point: about £{float(target_context['ambitious_target']):,.0f}/week. This pushes harder and is more sensitive to setbacks."
+            f"Stretch starting point: about £{float(target_context['ambitious_target']):,.0f}/week. "
+            "This pushes harder and is more sensitive to setbacks."
         )
     else:
         st.caption(
-            f"Suggested starting point: about £{float(target_context['recommended_target']):,.0f}/week. This is the balanced default for your current intent."
+            f"Balanced starting point: about £{float(target_context['recommended_target']):,.0f}/week. "
+            "This is the balanced default for your current intent."
         )
 
     p1, p2, p3 = st.columns(3)
     with p1:
-        if st.button("Safe", key="step2_preset_safe"):
+        if st.button("Cautious", key="step2_preset_safe"):
             _queue_target_patch(
                 float(target_context["safe_target"]),
                 "Safe",
                 baseline_weekly=float(target_context["baseline_weekly"]),
             )
     with p2:
-        if st.button("Recommended", key="step2_preset_recommended"):
+        if st.button("Balanced", key="step2_preset_recommended"):
             _queue_target_patch(
                 float(target_context["recommended_target"]),
                 "Recommended",
                 baseline_weekly=float(target_context["baseline_weekly"]),
             )
     with p3:
-        if st.button("Ambitious", key="step2_preset_ambitious"):
+        if st.button("Stretch", key="step2_preset_ambitious"):
             _queue_target_patch(
                 float(target_context["ambitious_target"]),
                 "Ambitious",
                 baseline_weekly=float(target_context["baseline_weekly"]),
             )
 
-    st.caption("Use the presets for quick changes, or adjust the amount manually.")
-
+    st.caption("Use the presets for quick changes, or adjust the weekly amount manually.")
 
     planning_horizon = int(st.session_state.get(STEP2_PLANNING_HORIZON_WEEKS, 12) or 12)
-    uncertainty_preset = str(st.session_state.get(STEP2_UNCERTAINTY_PRESET, UNCERTAINTY_OPTIONS[0]) or UNCERTAINTY_OPTIONS[0])  # configured in Step 3
+
+    # Usually configured by the feasibility/stress-test controls.
+    uncertainty_preset = str(
+        st.session_state.get(STEP2_UNCERTAINTY_PRESET, UNCERTAINTY_OPTIONS[0]) or UNCERTAINTY_OPTIONS[0]
+    )
     random_run_nonce = int(st.session_state.get(STEP2_RANDOM_RUN_NONCE, 0) or 0)
 
     feasibility = build_feasibility_view_model(
@@ -218,18 +247,25 @@ def render_step_2(*, embedded: bool = False) -> None:
         target_weekly=float(target_weekly or 0.0),
     )
 
-    st.markdown("### Quick feasibility check")
+    st.markdown("### Quick weekly feasibility check")
+    st.caption(
+        f"Checks whether this weekly target fits within the current margin over a "
+        f"{planning_horizon}-week short-term horizon."
+    )
+
     if float(feasibility["required_weekly"]) <= float(feasibility["baseline_margin_weekly"]):
         st.success(
             f"Target: £{float(feasibility['required_weekly']):,.0f}/week is already achievable without changes."
         )
     elif float(feasibility["need_weekly"]) <= float(feasibility["discretionary_weekly"]):
         st.info(
-            f"Target: £{float(feasibility['required_weekly']):,.0f}/week needs about £{float(feasibility['required_cut_monthly']):,.0f}/mo more than your current baseline."
+            f"Target: £{float(feasibility['required_weekly']):,.0f}/week needs about "
+            f"£{float(feasibility['required_cut_monthly']):,.0f}/mo more than your current baseline."
         )
     else:
         st.error(
-            f"Target: £{float(feasibility['required_weekly']):,.0f}/week is not achievable through discretionary cuts alone. Even using your full discretionary budget only gives about £{float(feasibility['required_cut_monthly']):,.0f}/mo."
+            f"Target: £{float(feasibility['required_weekly']):,.0f}/week is not achievable through discretionary cuts alone. "
+            f"Even using your full discretionary budget only gives about £{float(feasibility['required_cut_monthly']):,.0f}/mo."
         )
 
     updated_snapshot = build_step2_snapshot_update(

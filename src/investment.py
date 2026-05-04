@@ -1,55 +1,39 @@
-from __future__ import annotations
-
 """
 src/investment.py
 
-Optional long-horizon savings growth module for LifeBudget Micro.
+Investment configuration, strategy-engine, and projection helpers for
+LifeBudget Micro.
 
-This version includes two layers:
+This module supports four connected app areas:
 
-1) Long-horizon savings-growth simulation
-   - bootstrap from realised monthly returns
-   - parametric Gaussian simulation
-   - summary metrics and explanation layer
+1) Risk Profile & Asset Universe
+   - asset-class grouping;
+   - Simple UI preset resolution;
+   - philosophy-aware configuration normalisation;
+   - governed override / recommendation handling.
 
-2) Optional micro-pipeline for live OOS generation
-   - compact walk-forward over monthly asset-panel data
-   - per-asset mu / sigma estimation
-   - cross-asset weighting with coursework-style controls
-   - realised OOS portfolio return generation
+2) Strategy Engine
+   - compact walk-forward evaluation over monthly asset-panel data;
+   - per-asset signal, risk, covariance, and allocation logic;
+   - diagnostics, timing metadata, summaries, and run reports.
 
-Important
----------
-This is a MICRO pipeline, not the full coursework research stack.
-It is meant to be:
-- compact
-- maintainable
-- usable inside the FYP
-- able to regenerate a fresh OOS return series when newer data arrives
+3) Long-Term Scenario
+   - educational savings/investment projection;
+   - bootstrap simulation from realised monthly strategy returns;
+   - optional daily-hybrid path expansion for smoother scenario visualisation.
 
-It is NOT:
-- the full notebook
-- a full benchmark/tuning framework
-- a full research environment
+4) Final Report
+   - performance, risk, cost, diversification, universe, and configuration
+     summaries used by the report layer.
 
-The micro-pipeline below is deliberately closer to the final coursework spirit than
-an ultra-minimal toy implementation. In particular it supports:
-- longer training windows
-- risk-adjusted cross-sectional scores
-- softmax allocation with temperature
-- shrinkage toward equal weight
-- optional inertia versus previous weights
-- optional deadband to suppress tiny reallocations
-- dispersion gating when cross-sectional signal strength is weak
-- simple regime diagnostics
-
-It still does NOT guarantee exact reproduction of the coursework outputs unless:
-- the input panel matches the coursework panel
-- the same universe, dates, and preprocessing are used
-- the same feature engineering and exact model choices are replicated upstream
+The engine is intentionally compact enough to run inside the FYP prototype. It is
+not a full research notebook, production trading system, financial adviser, or
+forecasting guarantee. Outputs are educational backtests and scenario estimates.
 """
 
-from dataclasses import asdict, dataclass, fields
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
@@ -80,6 +64,14 @@ MAX_REASONABLE_ANNUAL_RETURN = 0.30
 
 PROFILE_LIBRARY: Dict[str, Dict[str, float]] = {
     "Conservative": {
+        "mean_scale": 0.70,
+        "vol_scale": 0.60,
+        "fallback_return_annual": 0.04,
+        "fallback_vol_annual": 0.08,
+    },
+    "Defensive": {
+        # UI-facing alias used by the current LifeBudget Micro flow.
+        # Kept close to Conservative to avoid changing the intended risk level.
         "mean_scale": 0.70,
         "vol_scale": 0.60,
         "fallback_return_annual": 0.04,
@@ -406,7 +398,6 @@ def get_asset_group_info(ticker: Any) -> Dict[str, str]:
     if meta is not None:
         return {"ticker": symbol, "group": str(meta.get("group") or _ASSET_GROUP_FALLBACK), "subgroup": str(meta.get("subgroup") or _ASSET_GROUP_FALLBACK)}
 
-    sector_prefixes = ("XL", "XL", "KR")
     if symbol.startswith(("XLK", "XLF", "XLV", "XLI", "XLP", "XLY", "XLE", "XLB", "XLU", "XLC", "XHB", "XRT")):
         return {"ticker": symbol, "group": "Equity", "subgroup": "Sector Equity"}
     if symbol in {"XLRE", "VNQ", "IYR", "RWR", "SCHH", "FREL"} or symbol.startswith("RE"):
@@ -599,7 +590,7 @@ class MicroPipelineConfig:
     asset_col: str = "asset"
     return_col: str = "return"
 
-    # Closer-to-coursework defaults
+    # Research-inspired defaults used by the in-app strategy engine.
     min_train: int = 120
     lookback_mu: int = 12
     lookback_sigma: int = 12
@@ -3919,7 +3910,11 @@ def _evaluate_period_cost_tax(
 
     tax_rate_by_asset = pd.Series(np.where(age_prev >= float(long_threshold), long_rate, short_rate), index=assets, dtype="float64")
     tax_due_value = float((realised_gain_value.clip(lower=0.0) * tax_rate_by_asset).sum()) if bool(getattr(cfg, "tax_model_enabled", False)) else 0.0
-    tax_credit_value = float((-realised_gain_value.clip(upper=0.0)) * loss_credit_rate).sum() if bool(getattr(cfg, "tax_model_enabled", False) and getattr(cfg, "tax_apply_loss_credit", False)) else 0.0
+    tax_credit_value = (
+        float(((-realised_gain_value.clip(upper=0.0)) * loss_credit_rate).sum())
+        if bool(getattr(cfg, "tax_model_enabled", False) and getattr(cfg, "tax_apply_loss_credit", False))
+        else 0.0
+    )
     tax_net_value = max(tax_due_value - tax_credit_value, 0.0)
     tax_rate_total = float(tax_net_value / nav_pre) if bool(getattr(cfg, "tax_model_enabled", False)) else 0.0
 
@@ -4532,6 +4527,10 @@ def describe_profile_tradeoff(profile: str) -> str:
             "This profile prioritises lower uncertainty and shallower downside, "
             "but usually offers lower long-term growth potential."
         ),
+        "Defensive": (
+            "This profile prioritises lower uncertainty, stronger drawdown control, "
+            "and smoother outcomes, but usually accepts lower long-term growth potential."
+        ),
         "Balanced": (
             "This profile aims for a middle ground between growth and risk, "
             "with moderate uncertainty and moderate long-term upside."
@@ -4621,7 +4620,7 @@ def _panel_to_return_matrix(
             f"Not enough monthly rows for micro pipeline. Need at least {cfg.min_train + 1}, got {pivot.shape[0]}"
         )
 
-    # closer to coursework behaviour: only keep dates where enough assets are alive
+    # Keep only dates where enough assets are available for a stable cross-sectional run.
     enough_assets = pivot.notna().sum(axis=1) >= max(2, int(np.ceil(pivot.shape[1] * 0.5)))
     pivot = pivot.loc[enough_assets]
     if pivot.shape[0] < cfg.min_train + 1:
@@ -6754,18 +6753,13 @@ def _resolve_universe_scaling(n_assets: int, cfg: MicroPipelineConfig) -> Dict[s
     }
 
 
-# Canonical implementations above already include the compatible adaptive allocation, vol-target, weights and probabilistic-forecast logic.
-# Additional late override redefinitions were removed to avoid shadowing core engine functions.
-
 # ============================================================
-# Restored canonical micro-pipeline layer
-# The original tail of the file contained multiple late overrides.
-# This restored section provides a single live implementation for
-# the public engine API used by app.py.
+# Micro-pipeline implementation
 # ============================================================
-
-from dataclasses import replace
-
+#
+# This section contains the public in-app strategy engine used by the UI layer.
+# Keep the implementation single-source to avoid shadowing allocation,
+# volatility-targeting, weighting, or probabilistic-overlay helpers.
 
 def _safe_zscore_series(x: pd.Series) -> pd.Series:
     s = pd.to_numeric(x, errors="coerce").replace([np.inf, -np.inf], np.nan)
@@ -7515,7 +7509,7 @@ def _apply_feature_conditioned_mu(
     else:
         adjustment_scaled = feature_mu_adjustment
 
-    # Step 16 — optional quantile filter (post-scaling)
+    # Optional quantile filter applied after scaling.
     feature_mu_apply_quantile = getattr(cfg, "feature_mu_apply_quantile", None)
     if feature_mu_apply_quantile is not None:
         try:
@@ -7574,10 +7568,6 @@ def _apply_feature_conditioned_mu(
             "excluded_feature_columns_preview": "|".join([str(x) for x in selection_debug.get("excluded_preview", [])]),
         })
     details = pd.DataFrame(rows).set_index("asset") if rows else empty_details
-    try:
-        details.to_csv("debug_feature_mu_details.csv")
-    except Exception:
-        pass
     meta = {
         "feature_mu_active_share": float(pd.to_numeric(details.get("feature_mu_active", pd.Series(dtype="float64")), errors="coerce").mean()) if not details.empty else 0.0,
         "feature_mu_match_n_mean": float(pd.to_numeric(details.get("feature_mu_match_n", pd.Series(dtype="float64")), errors="coerce").mean()) if not details.empty else np.nan,

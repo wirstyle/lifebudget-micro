@@ -1,18 +1,16 @@
-from __future__ import annotations
+"""Step 5 universe-size recommendation phase.
 
-"""Step 5 universe-size assistant.
+This module implements Phase 4 of the optional Strategy Engine improvement flow.
+It keeps the active strategy preset, technical engine configuration and current
+universe-mix result as the baseline, then tests a capped coarse-to-fine set of
+alternative universe sizes.
 
-Phase 4 scope:
-- keep the active Step 5 strategy preset unchanged;
-- keep the active technical engine configuration unchanged;
-- keep the current universe-composition result as the baseline;
-- test only a capped coarse-to-fine set of universe sizes;
-- apply by promoting an already rerun-tested candidate result.
-
-This module deliberately does not rerun preset, engine-tuning, or universe-
-composition search. It only changes the number of assets after Phase 3 has been
-resolved.
+Accepted candidates are applied by promoting an already rerun-tested result, so
+the user does not need to manually run the same candidate again. This module does
+not rerun preset, engine-tuning or universe-mix searches.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -1380,10 +1378,10 @@ def render_size_improvement(run_result: dict) -> None:
     coarse_label = ", ".join(map(str, coarse_sizes)) if coarse_sizes else "none"
     panel_note = str(payload.get("panel_note", "") or "")
     size_search_window_note = (
-        f"Size-search window: current baseline {baseline_size} → {philosophy} guidance cap {cap_size} "
-        f"(deployment hard cap {deployment_hard_cap}). "
+        f"Size-search window: current baseline {baseline_size} assets → effective search cap {cap_size} assets "
+        f"({philosophy} guidance cap {guidance_cap}; deployment hard cap {deployment_hard_cap}). "
         f"Coarse candidates: {coarse_label}. If one coarse size looks promising, up to two local refinements are tested nearby. "
-        "Baseline is not rerun."
+        "The current baseline result is reused as the comparison anchor; alternatives are rerun-tested."
     )
 
     accepted_items = [dict(x) for x in evaluations if bool(_coerce_mapping(x).get("accepted", False))]

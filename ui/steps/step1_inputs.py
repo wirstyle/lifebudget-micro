@@ -1,12 +1,22 @@
 """
-Step 1 — User Inputs (Budget / Preferences)
+Personal Finance Planner renderer for LifeBudget Micro.
 
-Refactor goals in this version:
-- keep renderer UI-focused
-- move snapshot/baseline orchestration to ui.services.step1_budget_service
-- move breakdown helpers to ui.services.step1_breakdown_service
-- reuse ui.common.cards / ui.common.tables / ui.state.updates
+This module owns the user-facing finance setup flow. In the current prototype,
+Step 1 acts as a compact dashboard that combines:
+
+- Step 1: current weekly income/spending estimate;
+- Step 2: weekly savings target selection;
+- Step 3: short-term feasibility and stress-test preview.
+
+The canonical hand-off is ``st.session_state[PLANNING_SNAPSHOT]``. Later modules
+use that snapshot, together with the selected weekly target, as the bridge into
+investment and long-term scenario planning.
+
+Most business logic lives in ``ui.services`` modules. This file should remain
+primarily responsible for Streamlit layout, widget state, user feedback, and
+safe navigation between steps.
 """
+
 from __future__ import annotations
 
 import streamlit as st
@@ -44,9 +54,9 @@ from ui.state.updates import apply_pending_step_patch, queue_step_patch
 _PERIOD_OPTIONS = ["Weekly", "Monthly", "Yearly"]
 _SEASON_OPTIONS = ["Low", "Normal", "High"]
 
-# Default-on for the Assignment 3 polish build: Step 1 now acts as the
-# Personal Finance Planner shell, rendering Steps 1-3 in one guided screen.
-# Set this session key to False only if you need the legacy single-step view.
+# Default route for the final prototype: Step 1 renders the combined Personal
+# Finance Planner dashboard instead of the older standalone Step 1 page.
+# Keeping the flag allows the legacy view to remain available for compatibility.
 PERSONAL_FINANCE_COMBINED_MODE_KEY = "step1_personal_finance_combined_mode_enabled"
 
 
@@ -76,7 +86,6 @@ def _render_step2_target_seed(snapshot: dict) -> None:
         f"Suggested next step: try starting Step 2 around **£{suggested_weekly:,.0f}/week**. "
         "You can still adjust it with Safe, Recommended or Ambitious presets."
     )
-
 
 
 def _format_gbp_weekly(value: float) -> str:
@@ -187,7 +196,6 @@ def _render_budget_pressure_guidance(snapshot: dict) -> None:
             )
 
 
-
 def _personal_finance_snapshot_confirmed() -> bool:
     return bool(st.session_state.get(CONFIRMED_SNAPSHOT, False))
 
@@ -213,8 +221,6 @@ def _personal_finance_has_target(snapshot: dict) -> bool:
         except Exception:
             continue
     return False
-
-
 
 
 def _personal_finance_money(value: float, suffix: str = "") -> str:
@@ -381,9 +387,8 @@ def _personal_finance_next_step_from_pathway() -> tuple[str, int]:
     return "Continue to Risk Profile and Asset Universe →", 4
 
 
-
 # -----------------------------------------------------------------------------
-# Compact Personal Finance Setup dashboard polish
+# Combined Personal Finance Planner state and dashboard helpers
 # -----------------------------------------------------------------------------
 PERSONAL_FINANCE_ACTIVE_PANEL_KEY = "personal_finance_active_panel_v1"
 PERSONAL_FINANCE_LAST_PANEL_KEY = "personal_finance_last_active_panel_v1"
@@ -491,7 +496,9 @@ def _apply_dashboard_life_event_stress_to_snapshot(snapshot: dict, *, persist: b
 
 def _life_event_stress_caption(snapshot: dict | None = None) -> str:
     source = dict(snapshot or {}) if isinstance(snapshot, dict) else {}
-    preset = _normalize_life_event_stress_preset(source.get("stress_preset", st.session_state.get("step3_stress_preset", "None")))
+    preset = _normalize_life_event_stress_preset(
+        source.get("stress_preset", st.session_state.get("step3_stress_preset", "None"))
+    )
     amount = safe_float(source.get("shock_amount", _STRESS_PRESET_EVENTS.get(preset, {}).get("amount", 0.0)), 0.0)
     week = int(source.get("shock_week", _life_event_stress_payload().get("shock_week", 1)) or 1)
     if amount <= 0.0:
@@ -555,10 +562,22 @@ def _ensure_budget_amount_defaults() -> None:
 
 
 def _step1_quick_weekly_values() -> dict[str, float]:
-    income = _period_to_weekly(st.session_state.get(STEP1_INCOME_AMOUNT, 460.0), st.session_state.get(STEP1_INCOME_PERIOD, "Weekly"))
-    fixed = _period_to_weekly(st.session_state.get(STEP1_FIXED_AMOUNT, 185.0), st.session_state.get(STEP1_FIXED_PERIOD, "Weekly"))
-    variable = _period_to_weekly(st.session_state.get(STEP1_VARIABLE_AMOUNT, 80.0), st.session_state.get(STEP1_VARIABLE_PERIOD, "Weekly"))
-    discretionary = _period_to_weekly(st.session_state.get(STEP1_DISCRETIONARY_AMOUNT, 35.0), st.session_state.get(STEP1_DISCRETIONARY_PERIOD, "Weekly"))
+    income = _period_to_weekly(
+        st.session_state.get(STEP1_INCOME_AMOUNT, 460.0),
+        st.session_state.get(STEP1_INCOME_PERIOD, "Weekly"),
+    )
+    fixed = _period_to_weekly(
+        st.session_state.get(STEP1_FIXED_AMOUNT, 185.0),
+        st.session_state.get(STEP1_FIXED_PERIOD, "Weekly"),
+    )
+    variable = _period_to_weekly(
+        st.session_state.get(STEP1_VARIABLE_AMOUNT, 80.0),
+        st.session_state.get(STEP1_VARIABLE_PERIOD, "Weekly"),
+    )
+    discretionary = _period_to_weekly(
+        st.session_state.get(STEP1_DISCRETIONARY_AMOUNT, 35.0),
+        st.session_state.get(STEP1_DISCRETIONARY_PERIOD, "Weekly"),
+    )
     spending = fixed + variable + discretionary
     margin = income - spending
     return {
@@ -584,7 +603,9 @@ def _apply_quick_margin_to_discretionary(desired_margin_weekly: float) -> None:
     # giving the user one simple control for the first-pass estimate.
     discretionary_weekly = max(0.0, income - fixed - variable - desired_margin_weekly)
     discretionary_period = str(st.session_state.get(STEP1_DISCRETIONARY_PERIOD, "Weekly") or "Weekly")
-    st.session_state[STEP1_DISCRETIONARY_AMOUNT] = float(round(_weekly_to_period_amount(discretionary_weekly, discretionary_period), 2))
+    st.session_state[STEP1_DISCRETIONARY_AMOUNT] = float(
+        round(_weekly_to_period_amount(discretionary_weekly, discretionary_period), 2)
+    )
 
 
 def _render_budget_colour_bar(values: dict[str, float]) -> None:
@@ -602,16 +623,24 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
     discretionary_colour = "#cbd5e1"
     free_margin_colour = "#22c55e"
     deficit_colour = "#ef4444"
+
     margin_colour = free_margin_colour if margin >= 0 else deficit_colour
     margin_label = "Free margin" if margin >= 0 else "Deficit"
     margin_help = "Money left after spending" if margin >= 0 else "Spending above income"
 
-    total = max(income, fixed + variable + discretionary + free_margin, fixed + variable + discretionary + deficit, 1.0)
+    total = max(
+        income,
+        fixed + variable + discretionary + free_margin,
+        fixed + variable + discretionary + deficit,
+        1.0,
+    )
+
     segments = [
         ("Fixed essentials", fixed, fixed_colour),
         ("Variable essentials", variable, variable_colour),
         ("Discretionary", discretionary, discretionary_colour),
     ]
+
     if free_margin > 0:
         segments.append(("Free margin", free_margin, free_margin_colour))
     if deficit > 0:
@@ -623,38 +652,41 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
         if width <= 0:
             continue
         pieces.append(
-            f'<div title="{label}: £{amount:,.0f}/week" style="width:{width:.2f}%; background:{colour}; height:22px;"></div>'
+            f'<div title="{label}: £{amount:,.0f}/week" '
+            f'style="width:{width:.2f}%; background:{colour}; height:22px;"></div>'
         )
 
+    fixed_swatch = (
+        f'<span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; '
+        f'background:{fixed_colour}; display:inline-block;"></span>'
+    )
+    variable_swatch = (
+        f'<span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; '
+        f'background:{variable_colour}; display:inline-block;"></span>'
+    )
+    discretionary_swatch = (
+        f'<span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; '
+        f'background:{discretionary_colour}; border:1px solid #cbd5e1; display:inline-block;"></span>'
+    )
+    margin_swatch = (
+        f'<span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; '
+        f'background:{margin_colour}; display:inline-block;"></span>'
+    )
+
     legend_items = [
-        f"""
-        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
-            <span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; background:{income_colour}; border:1px solid #cbd5e1; display:inline-block;"></span>
-            <span><b>Income capacity</b> · total weekly budget background</span>
-        </span>
-        """,
-        f"""
-        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
-            <span style="display:inline-flex; gap:0.12rem;">
-                <span style="width:0.56rem; height:0.74rem; border-radius:0.22rem 0 0 0.22rem; background:{fixed_colour}; display:inline-block;"></span>
-                <span style="width:0.56rem; height:0.74rem; border-radius:0 0.22rem 0.22rem 0; background:{variable_colour}; display:inline-block;"></span>
-            </span>
-            <span><b>Essentials</b> · fixed + variable essentials</span>
-        </span>
-        """,
-        f"""
-        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
-            <span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; background:{discretionary_colour}; border:1px solid #cbd5e1; display:inline-block;"></span>
-            <span><b>Discretionary</b> · flexible spending</span>
-        </span>
-        """,
-        f"""
-        <span style="display:inline-flex; align-items:center; gap:0.38rem; white-space:nowrap;">
-            <span style="width:0.74rem; height:0.74rem; border-radius:0.22rem; background:{margin_colour}; display:inline-block;"></span>
-            <span><b>{margin_label}</b> · {margin_help}</span>
-        </span>
-        """,
+        ("Fixed essentials", "Rent, subscriptions, fixed bills", fixed_swatch),
+        ("Variable essentials", "Groceries, utilities, transport", variable_swatch),
+        ("Discretionary", "Flexible spending", discretionary_swatch),
+        (margin_label, margin_help, margin_swatch),
     ]
+
+    legend_html = "".join(
+        f'<div style="display:flex; align-items:center; gap:0.45rem; font-size:0.82rem; color:#334155; line-height:1.35;">'
+        f'{swatch}'
+        f'<span><b>{label}</b> · {help_text}</span>'
+        f'</div>'
+        for label, help_text, swatch in legend_items
+    )
 
     st.markdown(
         f"""
@@ -662,13 +694,14 @@ def _render_budget_colour_bar(values: dict[str, float]) -> None:
             <div style="display:flex; overflow:hidden; border-radius:999px; height:22px; background:{income_colour}; margin-bottom:0.65rem;">
                 {''.join(pieces)}
             </div>
-            <div style="display:flex; flex-wrap:wrap; gap:0.45rem 0.9rem; font-size:0.82rem; color:#334155; line-height:1.35;">
-                {''.join(legend_items)}
+            <div style="display:grid; grid-template-columns:1fr; gap:0.4rem;">
+                {legend_html}
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
 
 def _auto_save_current_situation_snapshot() -> None:
     """Persist the current Step 1 estimate without asking for a confirm button."""
@@ -856,15 +889,35 @@ def _render_step1_quick_estimate_panel() -> dict[str, float]:
 
     _render_budget_colour_bar(values)
 
+    st.caption(
+        "Quick presets adjust discretionary/flexible spending only. Income, fixed essentials, "
+        "and variable essentials stay unchanged."
+    )
+
     b1, b2, b3 = st.columns(3)
     with b1:
-        if st.button("Quiet", key="step1_quick_quiet_week", use_container_width=True):
+        if st.button(
+            "Quiet week",
+            key="step1_quick_quiet_week",
+            use_container_width=True,
+            help="Lower flexible spending and increase the estimated weekly free margin.",
+        ):
             _queue_quick_margin_and_rerun(base_margin + 50.0, min_value=slider_min, max_value=slider_max)
     with b2:
-        if st.button("Typical", key="step1_quick_typical_week", use_container_width=True):
+        if st.button(
+            "Typical week",
+            key="step1_quick_typical_week",
+            use_container_width=True,
+            help="Return flexible spending to the typical estimate.",
+        ):
             _queue_quick_margin_and_rerun(base_margin, min_value=slider_min, max_value=slider_max)
     with b3:
-        if st.button("Expensive", key="step1_quick_expensive_week", use_container_width=True):
+        if st.button(
+            "Expensive week",
+            key="step1_quick_expensive_week",
+            use_container_width=True,
+            help="Increase flexible spending and reduce the estimated weekly free margin.",
+        ):
             _queue_quick_margin_and_rerun(base_margin - 50.0, min_value=slider_min, max_value=slider_max)
 
     if float(values.get("margin", 0.0) or 0.0) < 0.0:
@@ -1059,28 +1112,71 @@ def _render_step1_quick_estimate_panel() -> dict[str, float]:
             st.markdown("#### Exact income and spending totals")
             c1, c2 = st.columns([2.1, 1.0])
             with c1:
-                st.number_input("Take-home income (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_INCOME_AMOUNT, 460.0), 460.0), step=10.0, key=STEP1_INCOME_AMOUNT)
+                st.number_input(
+                    "Take-home income (£)",
+                    min_value=0.0,
+                    value=safe_float(st.session_state.get(STEP1_INCOME_AMOUNT, 460.0), 460.0),
+                    step=10.0,
+                    key=STEP1_INCOME_AMOUNT,
+                )
             with c2:
-                st.selectbox("Income period", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_INCOME_PERIOD, "Weekly"))), key=STEP1_INCOME_PERIOD)
+                st.selectbox(
+                    "Income period",
+                    _PERIOD_OPTIONS,
+                    index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_INCOME_PERIOD, "Weekly"))),
+                    key=STEP1_INCOME_PERIOD,
+                )
 
             c3, c4 = st.columns([2.1, 1.0])
             with c3:
-                st.number_input("Fixed essentials (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_FIXED_AMOUNT, 185.0), 185.0), step=5.0, key=STEP1_FIXED_AMOUNT)
+                st.number_input(
+                    "Fixed essentials (£)",
+                    min_value=0.0,
+                    value=safe_float(st.session_state.get(STEP1_FIXED_AMOUNT, 185.0), 185.0),
+                    step=5.0,
+                    key=STEP1_FIXED_AMOUNT,
+                )
             with c4:
-                st.selectbox("Fixed period", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_FIXED_PERIOD, "Weekly"))), key=STEP1_FIXED_PERIOD)
+                st.selectbox(
+                    "Fixed period",
+                    _PERIOD_OPTIONS,
+                    index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_FIXED_PERIOD, "Weekly"))),
+                    key=STEP1_FIXED_PERIOD,
+                )
 
             c5, c6 = st.columns([2.1, 1.0])
             with c5:
-                st.number_input("Variable essentials (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_VARIABLE_AMOUNT, 80.0), 80.0), step=5.0, key=STEP1_VARIABLE_AMOUNT)
+                st.number_input(
+                    "Variable essentials (£)",
+                    min_value=0.0,
+                    value=safe_float(st.session_state.get(STEP1_VARIABLE_AMOUNT, 80.0), 80.0),
+                    step=5.0,
+                    key=STEP1_VARIABLE_AMOUNT,
+                )
             with c6:
-                st.selectbox("Variable period", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_VARIABLE_PERIOD, "Weekly"))), key=STEP1_VARIABLE_PERIOD)
+                st.selectbox(
+                    "Variable period",
+                    _PERIOD_OPTIONS,
+                    index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_VARIABLE_PERIOD, "Weekly"))),
+                    key=STEP1_VARIABLE_PERIOD,
+                )
 
             c7, c8 = st.columns([2.1, 1.0])
             with c7:
-                st.number_input("Discretionary spending (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_DISCRETIONARY_AMOUNT, 35.0), 35.0), step=5.0, key=STEP1_DISCRETIONARY_AMOUNT)
+                st.number_input(
+                    "Discretionary spending (£)",
+                    min_value=0.0,
+                    value=safe_float(st.session_state.get(STEP1_DISCRETIONARY_AMOUNT, 35.0), 35.0),
+                    step=5.0,
+                    key=STEP1_DISCRETIONARY_AMOUNT,
+                )
             with c8:
-                st.selectbox("Discretionary period", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_DISCRETIONARY_PERIOD, "Weekly"))), key=STEP1_DISCRETIONARY_PERIOD)
-
+                st.selectbox(
+                    "Discretionary period",
+                    _PERIOD_OPTIONS,
+                    index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_DISCRETIONARY_PERIOD, "Weekly"))),
+                    key=STEP1_DISCRETIONARY_PERIOD,
+                )
 
         st.caption("Advanced edits are auto-saved before the target and feasibility cards update.")
 
@@ -1113,7 +1209,6 @@ def _render_cashflow_summary(values: dict[str, float], target_weekly: float) -> 
         """,
         unsafe_allow_html=True,
     )
-
 
 
 def _render_period_equivalents_table(values: dict[str, float]) -> None:
@@ -1161,7 +1256,14 @@ def _render_period_equivalents_table(values: dict[str, float]) -> None:
         unsafe_allow_html=True,
     )
 
+
 def _target_service_payload(snapshot: dict, target_weekly: float | None = None) -> tuple[dict, dict, dict, str, int]:
+    """Build and persist the Step 2-compatible target payload.
+
+    The combined dashboard does not render the old Step 2 page directly, but
+    downstream modules still expect the same snapshot fields. This helper keeps
+    the compact Personal Finance Planner compatible with the Step 2 service layer.
+    """
     from ui.services.step2_goal_service import (
         UNCERTAINTY_OPTIONS,
         build_feasibility_view_model,
@@ -1179,7 +1281,9 @@ def _target_service_payload(snapshot: dict, target_weekly: float | None = None) 
     planning_horizon = int(st.session_state.get(STEP2_PLANNING_HORIZON_WEEKS, init_state.get("planning_horizon", 12)) or 12)
     target_context = build_target_context(snapshot, intent, planning_horizon)
     if target_weekly is None:
-        target_weekly = float(st.session_state.get(STEP1_TARGET_WEEKLY_SAVINGS, target_context.get("recommended_target", 0.0)) or 0.0)
+        target_weekly = float(
+            st.session_state.get(STEP1_TARGET_WEEKLY_SAVINGS, target_context.get("recommended_target", 0.0)) or 0.0
+        )
 
     uncertainty_preset = str(st.session_state.get(STEP2_UNCERTAINTY_PRESET, UNCERTAINTY_OPTIONS[0]) or UNCERTAINTY_OPTIONS[0])
     random_run_nonce = int(st.session_state.get(STEP2_RANDOM_RUN_NONCE, 0) or 0)
@@ -1226,6 +1330,7 @@ def _apply_target_preset_and_rerun(value: float, label: str) -> None:
 
 def _render_savings_target_card(snapshot: dict) -> tuple[dict, dict, dict, float, int]:
     st.markdown("### Savings target")
+    st.caption("Choose how much of your current free margin you want to set aside each week.")
 
     updated_snapshot = snapshot
     target_context: dict = {}
@@ -1248,8 +1353,15 @@ def _render_savings_target_card(snapshot: dict) -> tuple[dict, dict, dict, float
         }
 
     if STEP1_TARGET_WEEKLY_SAVINGS not in st.session_state:
-        st.session_state[STEP1_TARGET_WEEKLY_SAVINGS] = float(round(float(target_context.get("recommended_target", max(0.0, baseline_weekly * 0.30))), 2))
+        st.session_state[STEP1_TARGET_WEEKLY_SAVINGS] = float(
+            round(float(target_context.get("recommended_target", max(0.0, baseline_weekly * 0.30))), 2)
+        )
         st.session_state[STEP2_SELECTED_PRESET] = "Recommended"
+
+    max_target_weekly = max(0.0, float(baseline_weekly))
+    current_target = float(st.session_state.get(STEP1_TARGET_WEEKLY_SAVINGS, 0.0) or 0.0)
+    if current_target > max_target_weekly:
+        st.session_state[STEP1_TARGET_WEEKLY_SAVINGS] = float(round(max_target_weekly, 2))
 
     preset_options = ["Safe", "Recommended", "Ambitious"]
     preset_display_labels = {
@@ -1264,11 +1376,15 @@ def _render_savings_target_card(snapshot: dict) -> tuple[dict, dict, dict, float
 
     target_weekly = float(
         st.number_input(
-            "Weekly savings target (£)",
+            "Weekly savings target (£/week)",
             min_value=0.0,
+            max_value=float(max_target_weekly),
             step=5.0,
             key=STEP1_TARGET_WEEKLY_SAVINGS,
-            help="This becomes the short-term savings target and the monthly contribution bridge used later.",
+            help=(
+                "This is the amount you aim to set aside each week. "
+                "It cannot be higher than the current weekly free margin."
+            ),
         )
         or 0.0
     )
@@ -1282,6 +1398,8 @@ def _render_savings_target_card(snapshot: dict) -> tuple[dict, dict, dict, float
             "Recommended": float(target_context.get("recommended_target", baseline_weekly * 0.30)),
             "Ambitious": float(target_context.get("ambitious_target", baseline_weekly * 0.40)),
         }.get(preset_name, float(target_context.get("recommended_target", baseline_weekly * 0.30)))
+        preset_value = min(max_target_weekly, max(0.0, float(preset_value)))
+
         with preset_cols[idx]:
             if st.button(
                 display_label,
@@ -1289,11 +1407,11 @@ def _render_savings_target_card(snapshot: dict) -> tuple[dict, dict, dict, float
                 use_container_width=True,
                 type="primary" if preset_name == active_preset_before else "secondary",
                 help=(
-                    "Lower-pressure target."
+                    "Lower-pressure weekly target."
                     if preset_name == "Safe"
-                    else "Balanced default target."
+                    else "Balanced default weekly target."
                     if preset_name == "Recommended"
-                    else "Higher-pressure stretch target."
+                    else "Higher-pressure stretch weekly target."
                 ),
             ):
                 _apply_target_preset_and_rerun(preset_value, preset_name)
@@ -1306,14 +1424,18 @@ def _render_savings_target_card(snapshot: dict) -> tuple[dict, dict, dict, float
         st.session_state[PLANNING_SNAPSHOT] = updated_snapshot
         feasibility = {}
 
-    active_preset = str(st.session_state.get(STEP2_SELECTED_PRESET, "Recommended") or "Recommended")
-    active_display = {
-        "Safe": "Cautious",
-        "Recommended": "Balanced",
-        "Ambitious": "Stretch",
-    }.get(active_preset, active_preset)
     pct = (target_weekly / baseline_weekly) if baseline_weekly > 0 else 0.0
-    st.caption(f"Uses about **{pct * 100:.0f}%** of the current weekly margin.")
+    remaining_after_target = max(0.0, baseline_weekly - target_weekly)
+    st.caption(
+        f"This weekly target uses about **{pct * 100:.0f}%** of the current weekly free margin, "
+        f"leaving roughly **£{remaining_after_target:,.0f}/week** as a buffer."
+    )
+
+    if pct >= 0.85:
+        st.warning(
+            "This target uses most of the available weekly margin. It may still be possible, "
+            "but the feasibility check is important because there is limited room for surprises."
+        )
 
     return updated_snapshot, target_context, feasibility, float(target_weekly), int(planning_horizon)
 
@@ -1326,7 +1448,6 @@ def _short_money(value: float) -> str:
         return f"£{value:,.0f}"
     except Exception:
         return "—"
-
 
 
 def _render_dashboard_projection_chart(
@@ -1411,8 +1532,20 @@ def _build_dashboard_feasibility_view_model(snapshot: dict) -> dict:
     except Exception:
         return {}
 
+
 def _render_feasibility_card(snapshot: dict, *, target_weekly: float) -> None:
     st.markdown("### Feasibility check")
+
+    try:
+        horizon_weeks = int(st.session_state.get(STEP2_PLANNING_HORIZON_WEEKS, 12) or 12)
+    except Exception:
+        horizon_weeks = 12
+
+    st.caption(
+        f"Checks whether the selected weekly savings target remains realistic over a "
+        f"{horizon_weeks}-week short-term scenario."
+    )
+
     if not isinstance(snapshot, dict) or not snapshot:
         st.info("Budget estimate is still being prepared.")
         return
@@ -1442,6 +1575,11 @@ def _render_feasibility_card(snapshot: dict, *, target_weekly: float) -> None:
     with m3:
         st.metric("High case", _short_money(optimistic))
 
+    st.caption(
+        "Expected is the central simulated outcome for the selected weekly target and short-term assumptions. "
+        "Conservative and high case show lower and higher scenario outcomes."
+    )
+
     expected_delta = expected - baseline_final
     conservative_delta = conservative - baseline_final
     if conservative_delta >= -max(25.0, abs(baseline_final) * 0.02) and expected_delta >= 0:
@@ -1449,7 +1587,10 @@ def _render_feasibility_card(snapshot: dict, *, target_weekly: float) -> None:
     elif expected_delta >= 0:
         st.info("This target is feasible, but the cautious case leaves less room for surprises.")
     else:
-        st.error("This target is fragile under the stress-test assumptions. It still builds savings, but the expected result no longer clearly improves on your baseline.")
+        st.error(
+            "This target is fragile under the stress-test assumptions. It still builds savings, "
+            "but the expected result no longer clearly improves on your baseline."
+        )
 
 
 def _render_feasibility_chart_card(snapshot: dict, *, target_weekly: float) -> None:
@@ -1472,8 +1613,9 @@ def _render_feasibility_chart_card(snapshot: dict, *, target_weekly: float) -> N
     with st.container(border=True):
         st.markdown("### Short-term path chart")
         st.caption(
-            "Baseline vs target plan over the selected short-term horizon. "
-            "The shaded band shows the 10–90% uncertainty range."
+            "Baseline shows the current cash-flow path using the confirmed budget estimate, before applying the selected weekly savings target. "
+            "Target plan shows the simulated path after applying the weekly target. "
+            "The shaded band shows the 10–90% uncertainty range for possible short-term variation."
         )
         if shock_amount > 0.0 and shock_week > 0:
             st.caption(f"Life-event stress is modelled as a one-off £{shock_amount:,.0f} cost around week {shock_week}.")
@@ -1515,7 +1657,10 @@ def _render_advanced_assumptions_and_diagnostics(snapshot: dict, values: dict[st
     st.session_state["step3_stress_preset"] = current_stress
 
     with st.expander("Optional stress-test settings", expanded=False):
-        st.caption("Use these controls only to test a different short-term horizon, uncertainty level, or one-off life event.")
+        st.caption(
+            "Use these controls to test how the plan behaves when normal spending varies or a one-off cost appears. "
+            "This matters because groceries, utilities, transport and discretionary spending rarely stay exactly the same every week."
+        )
 
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -1554,6 +1699,7 @@ def _render_advanced_assumptions_and_diagnostics(snapshot: dict, values: dict[st
                 "If the deficit is deliberate for a short period, continue with caution and use the stress test."
             )
 
+
 def render_personal_finance_planner() -> None:
     """Render Steps 1-3 as a compact dashboard.
 
@@ -1574,6 +1720,10 @@ def render_personal_finance_planner() -> None:
     st.info(
         "**Why this matters:** your weekly free margin becomes the contribution bridge used later by the investment "
         "and long-term scenario modules. Rough numbers are enough for the demo; exact editing remains optional."
+    )
+    st.caption(
+        "If you are unsure about a field, check the help icons where available, the Q&A section, "
+        "and the Terms/educational notice in the sidebar."
     )
 
     # 1) Budget estimate full-width card.
@@ -1631,7 +1781,14 @@ def render_personal_finance_planner() -> None:
             st.rerun()
         if not can_continue:
             st.caption("Set a positive free margin and weekly savings target before continuing.")
+
+
 def _render_step_1_legacy(*, embedded: bool = False) -> None:
+    """Render the older standalone Step 1 form.
+
+    The final prototype normally uses the combined Personal Finance Planner,
+    but this path is kept for embedded/legacy compatibility.
+    """
     if not embedded and bool(st.session_state.get(PERSONAL_FINANCE_COMBINED_MODE_KEY, True)):
         render_personal_finance_planner()
         return
@@ -1651,17 +1808,46 @@ def _render_step_1_legacy(*, embedded: bool = False) -> None:
 
     income_col, income_period_col = st.columns([2.1, 1.0])
     with income_col:
-        st.number_input("Take-home income (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_INCOME_AMOUNT, 460.0), 460.0), step=10.0, key=STEP1_INCOME_AMOUNT)
+        st.number_input(
+            "Take-home income (£)",
+            min_value=0.0,
+            value=safe_float(st.session_state.get(STEP1_INCOME_AMOUNT, 460.0), 460.0),
+            step=10.0,
+            key=STEP1_INCOME_AMOUNT,
+        )
     with income_period_col:
-        st.selectbox("Income period", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_INCOME_PERIOD, "Weekly"))), key=STEP1_INCOME_PERIOD)
+        st.selectbox(
+            "Income period",
+            _PERIOD_OPTIONS,
+            index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_INCOME_PERIOD, "Weekly"))),
+            key=STEP1_INCOME_PERIOD,
+        )
 
     with st.expander("Not sure about take-home pay? Estimate it (optional)", expanded=False):
         e1, e2 = st.columns(2)
         with e1:
-            gross_amount = st.number_input("Gross income (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_ESTIMATED_GROSS_INCOME, 30000.0), 30000.0), step=10.0, key=STEP1_ESTIMATED_GROSS_INCOME)
+            gross_amount = st.number_input(
+                "Gross income (£)",
+                min_value=0.0,
+                value=safe_float(st.session_state.get(STEP1_ESTIMATED_GROSS_INCOME, 30000.0), 30000.0),
+                step=10.0,
+                key=STEP1_ESTIMATED_GROSS_INCOME,
+            )
         with e2:
-            gross_period = st.selectbox("Gross income period", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_ESTIMATED_GROSS_PERIOD, "Yearly"))), key=STEP1_ESTIMATED_GROSS_PERIOD)
-        tax_rate = st.slider("Estimated deduction rate", min_value=0.0, max_value=0.60, value=float(st.session_state.get(STEP1_ESTIMATED_TAX_RATE, 0.30) or 0.30), step=0.01, key=STEP1_ESTIMATED_TAX_RATE)
+            gross_period = st.selectbox(
+                "Gross income period",
+                _PERIOD_OPTIONS,
+                index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_ESTIMATED_GROSS_PERIOD, "Yearly"))),
+                key=STEP1_ESTIMATED_GROSS_PERIOD,
+            )
+        tax_rate = st.slider(
+            "Estimated deduction rate",
+            min_value=0.0,
+            max_value=0.60,
+            value=float(st.session_state.get(STEP1_ESTIMATED_TAX_RATE, 0.30) or 0.30),
+            step=0.01,
+            key=STEP1_ESTIMATED_TAX_RATE,
+        )
         estimated_take_home = gross_amount * (1.0 - tax_rate)
         st.caption(f"Estimated take-home: £{estimated_take_home:,.2f} per {gross_period.lower()}")
         if st.button("Use this estimate as my take-home income", key="step1_apply_income_estimate"):
@@ -1675,21 +1861,54 @@ def _render_step_1_legacy(*, embedded: bool = False) -> None:
 
     fixed_col, fixed_period_col = st.columns([2.1, 1.0])
     with fixed_col:
-        st.number_input("Fixed essentials (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_FIXED_AMOUNT, 185.0), 185.0), step=5.0, key=STEP1_FIXED_AMOUNT)
+        st.number_input(
+            "Fixed essentials (£)",
+            min_value=0.0,
+            value=safe_float(st.session_state.get(STEP1_FIXED_AMOUNT, 185.0), 185.0),
+            step=5.0,
+            key=STEP1_FIXED_AMOUNT,
+        )
     with fixed_period_col:
-        st.selectbox("Period", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_FIXED_PERIOD, "Weekly"))), key=STEP1_FIXED_PERIOD)
+        st.selectbox(
+            "Period",
+            _PERIOD_OPTIONS,
+            index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_FIXED_PERIOD, "Weekly"))),
+            key=STEP1_FIXED_PERIOD,
+        )
 
     variable_col, variable_period_col = st.columns([2.1, 1.0])
     with variable_col:
-        st.number_input("Variable essentials (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_VARIABLE_AMOUNT, 80.0), 80.0), step=5.0, key=STEP1_VARIABLE_AMOUNT)
+        st.number_input(
+            "Variable essentials (£)",
+            min_value=0.0,
+            value=safe_float(st.session_state.get(STEP1_VARIABLE_AMOUNT, 80.0), 80.0),
+            step=5.0,
+            key=STEP1_VARIABLE_AMOUNT,
+        )
     with variable_period_col:
-        st.selectbox("Period ", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_VARIABLE_PERIOD, "Weekly"))), key=STEP1_VARIABLE_PERIOD)
+        st.selectbox(
+            "Period ",
+            _PERIOD_OPTIONS,
+            index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_VARIABLE_PERIOD, "Weekly"))),
+            key=STEP1_VARIABLE_PERIOD,
+        )
 
     discretionary_col, discretionary_period_col = st.columns([2.1, 1.0])
     with discretionary_col:
-        st.number_input("Discretionary spending (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_DISCRETIONARY_AMOUNT, 35.0), 35.0), step=5.0, key=STEP1_DISCRETIONARY_AMOUNT)
+        st.number_input(
+            "Discretionary spending (£)",
+            min_value=0.0,
+            value=safe_float(st.session_state.get(STEP1_DISCRETIONARY_AMOUNT, 35.0), 35.0),
+            step=5.0,
+            key=STEP1_DISCRETIONARY_AMOUNT,
+        )
     with discretionary_period_col:
-        st.selectbox("Period  ", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_DISCRETIONARY_PERIOD, "Weekly"))), key=STEP1_DISCRETIONARY_PERIOD)
+        st.selectbox(
+            "Period  ",
+            _PERIOD_OPTIONS,
+            index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_DISCRETIONARY_PERIOD, "Weekly"))),
+            key=STEP1_DISCRETIONARY_PERIOD,
+        )
 
     preset_cols = st.columns(3)
     for col, label in zip(preset_cols, ["Quiet week", "Typical", "Social-heavy"]):
@@ -1742,16 +1961,66 @@ def _render_step_1_legacy(*, embedded: bool = False) -> None:
         st.markdown("### Variable essentials breakdown (optional)")
         v1, v2 = st.columns(2)
         with v1:
-            st.number_input("Utilities baseline (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_VAR_UTILITIES_AMOUNT, 0.0), 0.0), step=5.0, key=STEP1_VAR_UTILITIES_AMOUNT)
-            st.selectbox("Utilities period", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_VAR_UTILITIES_PERIOD, "Weekly"))), key=STEP1_VAR_UTILITIES_PERIOD)
-            st.selectbox("Season", _SEASON_OPTIONS, index=_SEASON_OPTIONS.index(str(st.session_state.get(STEP1_VAR_SEASON, "Normal"))), key=STEP1_VAR_SEASON)
-            st.slider("Commute days/week", min_value=0, max_value=7, value=int(st.session_state.get(STEP1_VAR_COMMUTE_DAYS, 0) or 0), key=STEP1_VAR_COMMUTE_DAYS)
-            st.number_input("Cost per commute day (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_VAR_COMMUTE_COST, 0.0), 0.0), step=1.0, key=STEP1_VAR_COMMUTE_COST)
+            st.number_input(
+                "Utilities baseline (£)",
+                min_value=0.0,
+                value=safe_float(st.session_state.get(STEP1_VAR_UTILITIES_AMOUNT, 0.0), 0.0),
+                step=5.0,
+                key=STEP1_VAR_UTILITIES_AMOUNT,
+            )
+            st.selectbox(
+                "Utilities period",
+                _PERIOD_OPTIONS,
+                index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_VAR_UTILITIES_PERIOD, "Weekly"))),
+                key=STEP1_VAR_UTILITIES_PERIOD,
+            )
+            st.selectbox(
+                "Season",
+                _SEASON_OPTIONS,
+                index=_SEASON_OPTIONS.index(str(st.session_state.get(STEP1_VAR_SEASON, "Normal"))),
+                key=STEP1_VAR_SEASON,
+            )
+            st.slider(
+                "Commute days/week",
+                min_value=0,
+                max_value=7,
+                value=int(st.session_state.get(STEP1_VAR_COMMUTE_DAYS, 0) or 0),
+                key=STEP1_VAR_COMMUTE_DAYS,
+            )
+            st.number_input(
+                "Cost per commute day (£)",
+                min_value=0.0,
+                value=safe_float(st.session_state.get(STEP1_VAR_COMMUTE_COST, 0.0), 0.0),
+                step=1.0,
+                key=STEP1_VAR_COMMUTE_COST,
+            )
         with v2:
-            st.number_input("Groceries (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_VAR_GROCERIES_AMOUNT, 0.0), 0.0), step=5.0, key=STEP1_VAR_GROCERIES_AMOUNT)
-            st.selectbox("Groceries period", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_VAR_GROCERIES_PERIOD, "Weekly"))), key=STEP1_VAR_GROCERIES_PERIOD)
-            st.number_input("Household basics (£)", min_value=0.0, value=safe_float(st.session_state.get(STEP1_VAR_HOUSEHOLD_AMOUNT, 0.0), 0.0), step=5.0, key=STEP1_VAR_HOUSEHOLD_AMOUNT)
-            st.selectbox("Household period", _PERIOD_OPTIONS, index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_VAR_HOUSEHOLD_PERIOD, "Weekly"))), key=STEP1_VAR_HOUSEHOLD_PERIOD)
+            st.number_input(
+                "Groceries (£)",
+                min_value=0.0,
+                value=safe_float(st.session_state.get(STEP1_VAR_GROCERIES_AMOUNT, 0.0), 0.0),
+                step=5.0,
+                key=STEP1_VAR_GROCERIES_AMOUNT,
+            )
+            st.selectbox(
+                "Groceries period",
+                _PERIOD_OPTIONS,
+                index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_VAR_GROCERIES_PERIOD, "Weekly"))),
+                key=STEP1_VAR_GROCERIES_PERIOD,
+            )
+            st.number_input(
+                "Household basics (£)",
+                min_value=0.0,
+                value=safe_float(st.session_state.get(STEP1_VAR_HOUSEHOLD_AMOUNT, 0.0), 0.0),
+                step=5.0,
+                key=STEP1_VAR_HOUSEHOLD_AMOUNT,
+            )
+            st.selectbox(
+                "Household period",
+                _PERIOD_OPTIONS,
+                index=_PERIOD_OPTIONS.index(str(st.session_state.get(STEP1_VAR_HOUSEHOLD_PERIOD, "Weekly"))),
+                key=STEP1_VAR_HOUSEHOLD_PERIOD,
+            )
 
         variable_total_weekly = variable_breakdown_weekly_total()
         st.write(f"**Estimated total:** £{variable_total_weekly:,.2f}/week")
@@ -1806,8 +2075,8 @@ def _render_step_1_legacy(*, embedded: bool = False) -> None:
             st.caption(step1_confirmation_required_message())
 
 
-
 def render_step_1(*, embedded: bool = False) -> None:
+    """Public Step 1 entry point used by the app router."""
     if not embedded and bool(st.session_state.get(PERSONAL_FINANCE_COMBINED_MODE_KEY, True)):
         render_personal_finance_planner()
         return

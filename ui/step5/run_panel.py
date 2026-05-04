@@ -1,3 +1,14 @@
+"""
+Strategy Engine execution panel for Step 5.
+
+This module renders the run button, validates execution readiness, calls the
+real micro-pipeline, normalises the returned result, stores the canonical run
+state in ``st.session_state``, and triggers a clean rerun so the post-run view
+can display the stored result.
+
+The workspace owns screen flow; this module owns execution and result storage.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -81,7 +92,7 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 def _coerce_cfg(cfg_payload: dict) -> MicroPipelineConfig:
     valid = {f.name for f in fields(MicroPipelineConfig)}
-    filtered = {k: v for k, v in dict(cfg_payload or {}).items() if k in valid}
+    filtered = {key: value for key, value in dict(cfg_payload or {}).items() if key in valid}
     return MicroPipelineConfig(**filtered)
 
 
@@ -134,9 +145,16 @@ def _normalise_run_result(
     out.update(
         {
             "source": "micro_pipeline_real",
-            "asset_panel_source_label": str(st.session_state.get("asset_panel_source_label", "Selected market-data panel") or "Selected market-data panel"),
+            "asset_panel_source_label": str(
+                st.session_state.get("asset_panel_source_label", "Selected market-data panel")
+                or "Selected market-data panel"
+            ),
             "asset_panel_n_rows": int(len(asset_panel_df)) if isinstance(asset_panel_df, pd.DataFrame) else 0,
-            "asset_panel_n_assets": int(asset_panel_df["asset"].nunique()) if isinstance(asset_panel_df, pd.DataFrame) and "asset" in asset_panel_df.columns else 0,
+            "asset_panel_n_assets": (
+                int(asset_panel_df["asset"].nunique())
+                if isinstance(asset_panel_df, pd.DataFrame) and "asset" in asset_panel_df.columns
+                else 0
+            ),
             "performance_summary": {
                 "cagr": _safe_float(perf.get("cagr", 0.0), 0.0),
                 "annual_volatility": _safe_float(perf.get("annual_volatility", perf.get("volatility", 0.0)), 0.0),
@@ -200,9 +218,9 @@ def _run_pipeline_cached(asset_panel_df: pd.DataFrame, cfg_payload: dict) -> tup
     if isinstance(cached, dict) and "result" in cached:
         return _coerce_mapping(cached.get("result", {})), 0.0, True
 
-    t0 = time.perf_counter()
+    start_time = time.perf_counter()
     raw_result = run_micro_investment_pipeline(asset_panel_df, cfg=_coerce_cfg(cfg_payload))
-    elapsed = time.perf_counter() - t0
+    elapsed = time.perf_counter() - start_time
     cache[cache_key] = {"result": _coerce_mapping(raw_result)}
     st.session_state[STEP5_TIMING_CACHE_KEY] = cache
     return _coerce_mapping(raw_result), float(elapsed), False
@@ -247,10 +265,11 @@ def render_run_panel(
     *,
     compact: bool = False,
 ):
-    """Gold Stable runner: one real engine run and one stored result.
+    """Run the Strategy Engine once and store the canonical result.
 
-    compact=True is used by the cleaned Step 5 workspace so the run button can live
-    inside the first "Ready to run" card without repeating the full technical run block.
+    compact=True is used by the Step 5 workspace so the run button can live
+    inside the Ready-to-run section without repeating the full technical run
+    block.
     """
     if not compact:
         st.markdown("## Run engine")
@@ -261,11 +280,12 @@ def render_run_panel(
     governance_status = dict(governance_status or {})
     cfg_final = dict(cfg_final or {})
     state = str(governance_status.get("state", "coherent") or "coherent")
-    disabled = state == "blocked"
+    governance_blocked = state == "blocked"
 
     asset_panel_df = st.session_state.get("asset_panel_df")
     asset_panel_df = asset_panel_df.copy() if isinstance(asset_panel_df, pd.DataFrame) else pd.DataFrame()
-    disabled = bool(disabled or asset_panel_df.empty)
+    panel_missing = bool(asset_panel_df.empty)
+    disabled = bool(governance_blocked or panel_missing)
 
     current_signature = _resolve_run_signature(cfg_final, asset_panel_df)
     current_config_fingerprint = _resolve_config_fingerprint(cfg_final)
@@ -296,14 +316,19 @@ def render_run_panel(
         with c1:
             st.metric("Panel rows", f"{int(len(asset_panel_df)):,}")
         with c2:
-            st.metric("Panel assets", int(asset_panel_df["asset"].nunique()) if "asset" in asset_panel_df.columns and not asset_panel_df.empty else 0)
+            st.metric(
+                "Panel assets",
+                int(asset_panel_df["asset"].nunique()) if "asset" in asset_panel_df.columns and not asset_panel_df.empty else 0,
+            )
         with c3:
             st.metric("Engine status", "Ready" if not disabled and not asset_panel_df.empty else "Blocked")
 
     if inputs_changed_after_run:
         st.info("The current strategy engine inputs differ from the last executed run. Run the updated setup to refresh the metrics.")
 
-    if disabled:
+    if panel_missing:
+        st.error("Execution is blocked until the market-data panel is ready.")
+    elif governance_blocked:
         st.error("Execution is blocked until the governance issues are resolved.")
     elif not compact:
         st.info("Using the selected market-data panel for real execution.")
@@ -351,11 +376,6 @@ def render_run_panel(
         cfg_payload = dict(config_to_dict(cfg_obj))
         run_timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
-        st.session_state["last_engine_config"] = cfg_payload
-        st.session_state["step5_last_run_signature"] = current_signature
-        st.session_state["step5_last_config_fingerprint"] = current_config_fingerprint
-        st.session_state["step5_last_run_timestamp"] = run_timestamp
-
         with st.spinner("Running strategy (~30s)..."):
             raw_result, base_run_sec, base_from_cache = _run_pipeline_cached(asset_panel_df, cfg_payload)
 
@@ -372,7 +392,7 @@ def render_run_panel(
         run_result["run_timestamp"] = run_timestamp
         run_result["panel_shape"] = (int(len(asset_panel_df)), int(len(asset_panel_df.columns)))
         run_result["evaluation_period_label"] = "Walk-forward evaluated period"
-        run_result["search_eval_split"] = {"enabled": False, "reason": "gold_stable_minimal_runner"}
+        run_result["search_eval_split"] = {"enabled": False, "reason": "minimal_strategy_runner"}
 
         elapsed_total = float(time.perf_counter() - step5_t0)
         timing_summary = {
@@ -388,6 +408,13 @@ def render_run_panel(
         st.session_state[STEP5_LAST_TIMINGS_KEY] = timing_summary
         run_result["timing_summary"] = timing_summary
 
+        # Only mark this setup as the latest completed run after the engine has
+        # succeeded and the result has been normalised. This prevents a failed
+        # run from making an older stored result look fresh for the new inputs.
+        st.session_state["last_engine_config"] = cfg_payload
+        st.session_state["step5_last_run_signature"] = current_signature
+        st.session_state["step5_last_config_fingerprint"] = current_config_fingerprint
+        st.session_state["step5_last_run_timestamp"] = run_timestamp
         st.session_state["step5_last_run_result"] = run_result
         st.session_state["step5_run_result"] = run_result
         st.session_state["engine_has_run"] = True
@@ -397,8 +424,8 @@ def render_run_panel(
         clear_retired_step5_improvement_state()
 
         # Force one clean repaint after the run is stored.
-        # Without this, the button can remain visually active in the same Streamlit pass
-        # even though the current setup is already fresh.
+        # Without this, the button can remain visually active in the same
+        # Streamlit pass even though the current setup is already fresh.
         st.session_state[STEP5_JUST_COMPLETED_RUN_BANNER_KEY] = True
         _safe_rerun()
 

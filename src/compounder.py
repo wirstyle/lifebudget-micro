@@ -1,28 +1,16 @@
-# src/compounder.py
 """
 Short-horizon weekly scenario simulation for LifeBudget Micro.
 
-Responsibilities
-----------------
-This module handles the weekly uncertainty layer used by the core budgeting
-engine. In particular, it is responsible for:
+This module supports the Personal Finance Planner feasibility check. It builds
+weekly simulated balance paths for a target savings scenario, including:
 
-- weekly scenario simulation
-- uncertainty in variable/discretionary spending
-- one-off shock/event adjustments to balances
-- building scenario DataFrames for app.py visualisation
+- uncertainty in variable/discretionary spending;
+- deterministic target-plan savings adjustments;
+- 10th/mean/90th percentile outputs for charting;
+- one-off shock/event adjustments to balances.
 
-Scope note
-----------
-This module is intentionally limited to short-horizon weekly budgeting logic.
-
-Long-horizon savings growth / investment projection is handled separately in
-`investment.py`, which was added as an optional module for probabilistic
-investment-growth exploration under risk and volatility assumptions.
-
-This separation is intentional:
-- `compounder.py` supports weekly budgeting decisions
-- `investment.py` supports optional long-term growth exploration
+Long-horizon savings and investment projections are handled elsewhere. This
+module is intentionally limited to short-term weekly budgeting scenarios.
 """
 
 from __future__ import annotations
@@ -33,7 +21,6 @@ from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 
-# NEW: multi-event cumulative shock helper
 from src.expenses import apply_cumulative_events_to_series
 
 
@@ -51,14 +38,24 @@ def simulate_scenario(
     seed: int = 42,
     variability_frac: float = 0.30,
 ):
-    """
-    Monte Carlo–style simulation for a simple behavioural scenario (weekly).
+    """Run a weekly Monte Carlo-style cash-flow simulation.
 
-    Model:
-    - Uncertainty is applied ONLY to variable expenses via Gaussian noise.
-    - delta_savings is interpreted as a REAL weekly spend reduction (a "cut")
+    Model assumptions:
+    - ``income`` and ``fixed_expenses`` are deterministic weekly values;
+    - uncertainty is applied only to ``variable_expenses``;
+    - ``variable_expenses`` may represent discretionary spending, or a combined
+      variable/discretionary bucket, depending on the caller;
+    - ``delta_savings`` is interpreted as a real weekly spending reduction
       applied to the controllable spending bucket.
+
+    Returns:
+    - mean weekly cumulative balance path;
+    - 10th percentile path;
+    - 90th percentile path.
     """
+    weeks = int(weeks)
+    iterations = int(iterations)
+
     if weeks <= 0:
         raise ValueError(f"weeks must be positive, got {weeks}")
     if iterations <= 0:
@@ -69,12 +66,19 @@ def simulate_scenario(
     rng = np.random.default_rng(seed)
     all_runs = np.zeros((iterations, weeks), dtype=float)
 
-    delta_cut = float(delta_savings)
+    income = float(income)
+    fixed_expenses = float(fixed_expenses)
+    variable_expenses = max(float(variable_expenses), 0.0)
+    delta_cut = max(float(delta_savings), 0.0)
 
     for i in range(iterations):
         balance = 0.0
-        for w in range(weeks):
-            noise = rng.normal(loc=0.0, scale=variable_expenses * variability_frac)
+
+        for week_index in range(weeks):
+            noise = rng.normal(
+                loc=0.0,
+                scale=variable_expenses * float(variability_frac),
+            )
 
             effective_variable = variable_expenses - delta_cut + noise
             if effective_variable < 0.0:
@@ -82,7 +86,7 @@ def simulate_scenario(
 
             savings = income - fixed_expenses - effective_variable
             balance += savings
-            all_runs[i, w] = balance
+            all_runs[i, week_index] = balance
 
     mean = all_runs.mean(axis=0)
     lower = np.percentile(all_runs, 10, axis=0)
@@ -92,26 +96,28 @@ def simulate_scenario(
 
 
 # ============================================================
-# One-off shock (single event – legacy)
+# One-off shock support — single-event legacy helpers
 # ============================================================
 
 def apply_one_off_shock(values, shock_amount: float, shock_week: int):
-    """
-    Apply a single unexpected expense ONCE at week shock_week (1-indexed).
+    """Apply one legacy one-off expense from ``shock_week`` onward.
 
-    Semantics:
-    - From shock_week onward, balances are reduced by shock_amount.
+    ``shock_week`` is 1-indexed. From that week onward, all balances are reduced
+    by ``shock_amount``. The newer multi-event pathway uses shock maps, but this
+    helper is kept for backward compatibility.
     """
     if values is None:
         return values
     if shock_amount <= 0:
-        return [float(v) for v in values]
+        return [float(value) for value in values]
 
     start_idx = max(int(shock_week) - 1, 0)
     out = []
-    for i, v in enumerate(values):
-        vv = float(v)
-        out.append(vv - float(shock_amount) if i >= start_idx else vv)
+
+    for index, value in enumerate(values):
+        numeric_value = float(value)
+        out.append(numeric_value - float(shock_amount) if index >= start_idx else numeric_value)
+
     return out
 
 
@@ -121,13 +127,11 @@ def apply_one_off_shock_to_df(
     shock_week: int,
     value_cols: Tuple[str, ...] = ("Balance",),
 ) -> pd.DataFrame:
-    """
-    Apply a single cumulative shock to one or more dataframe columns.
-    """
+    """Apply one legacy cumulative shock to one or more dataframe columns."""
     if df is None or df.empty or shock_amount <= 0:
         return df
 
-    missing = [c for c in value_cols if c not in df.columns]
+    missing = [column for column in value_cols if column not in df.columns]
     if missing:
         raise KeyError(
             f"Dataframe missing expected columns {missing}. "
@@ -137,18 +141,18 @@ def apply_one_off_shock_to_df(
     df2 = df.copy()
     start_idx = max(int(shock_week) - 1, 0)
 
-    for col in value_cols:
-        vals = df2[col].tolist()
-        df2[col] = [
-            float(v) - float(shock_amount) if i >= start_idx else float(v)
-            for i, v in enumerate(vals)
+    for column in value_cols:
+        values = df2[column].tolist()
+        df2[column] = [
+            float(value) - float(shock_amount) if index >= start_idx else float(value)
+            for index, value in enumerate(values)
         ]
 
     return df2
 
 
 # ============================================================
-# NEW: Multi-event shock (shock_map)
+# Multi-event shock map support
 # ============================================================
 
 def apply_shock_map_to_df(
@@ -156,21 +160,21 @@ def apply_shock_map_to_df(
     shock_map: Dict[int, float],
     value_cols: Tuple[str, ...] = ("Balance",),
 ) -> pd.DataFrame:
-    """
-    Apply a cumulative multi-event shock map to one or more dataframe columns.
+    """Apply a cumulative multi-event shock map to dataframe columns.
 
-    shock_map:
-      {week (1-indexed) -> total shock amount at that week}
+    ``shock_map`` uses the convention ``{week_1_indexed: shock_amount}``.
+    Negative shock amounts reduce balances.
 
     Semantics:
-    - Shocks are punctual (not tracking).
-    - If a shock occurs at week k, balance is reduced from week k onward.
-    - Multiple shocks accumulate over time.
+    - shocks are punctual events, not recurring costs;
+    - if a shock occurs at week ``k``, balances are reduced from week ``k``
+      onward;
+    - multiple shocks accumulate over time.
     """
     if df is None or df.empty or not shock_map:
         return df
 
-    missing = [c for c in value_cols if c not in df.columns]
+    missing = [column for column in value_cols if column not in df.columns]
     if missing:
         raise KeyError(
             f"Dataframe missing expected columns {missing}. "
@@ -179,19 +183,26 @@ def apply_shock_map_to_df(
 
     df2 = df.copy()
 
-    for col in value_cols:
-        values = df2[col].tolist()
-        df2[col] = apply_cumulative_events_to_series(values, shock_map)
+    for column in value_cols:
+        values = df2[column].tolist()
+        df2[column] = apply_cumulative_events_to_series(values, shock_map)
 
     return df2
 
 
 # ============================================================
-# Scenario dataframe builder (UI-friendly)
+# Scenario dataframe builder
 # ============================================================
 
 @dataclass(frozen=True)
 class ScenarioParams:
+    """Traceability container for short-term scenario settings.
+
+    The current UI usually consumes the plain ``params`` dictionary returned by
+    ``simulate_scenario_df``. This dataclass is kept as a lightweight structured
+    representation for compatibility and possible future use.
+    """
+
     delta_savings: float
     weeks: int
     iterations: int
@@ -203,10 +214,13 @@ class ScenarioParams:
 
 
 def validate_scenario_df(df: pd.DataFrame) -> None:
+    """Validate the minimum schema expected from a scenario dataframe."""
     if df is None or df.empty:
         raise ValueError("Scenario dataframe is empty.")
+
     required = {"Week", "Mean", "Lower", "Upper"}
     missing = required - set(df.columns)
+
     if missing:
         raise KeyError(
             f"Scenario dataframe missing columns: {sorted(missing)}. "
@@ -227,11 +241,17 @@ def simulate_scenario_df(
     shock_amount: float = 0.0,
     shock_week: int = 1,
 ) -> Tuple[pd.DataFrame, Dict]:
+    """Run a weekly scenario simulation and return UI-friendly outputs.
+
+    Returns:
+    - ``scenario_df`` with ``Week``, ``Mean``, ``Lower`` and ``Upper`` columns;
+    - ``params`` dictionary for traceability/debugging.
+
+    ``Lower`` and ``Upper`` are the 10th and 90th percentile balance paths.
     """
-    Runs simulate_scenario and returns:
-    - scenario_df: Week, Mean, Lower, Upper
-    - params: traceability dict
-    """
+    weeks = int(weeks)
+    iterations = int(iterations)
+
     mean, lower, upper = simulate_scenario(
         income=income,
         fixed_expenses=fixed_expenses,
@@ -243,11 +263,12 @@ def simulate_scenario_df(
         variability_frac=variability_frac,
     )
 
-    mean_l = [float(x) for x in mean]
-    low_l = [float(x) for x in lower]
-    up_l = [float(x) for x in upper]
+    mean_l = [float(value) for value in mean]
+    low_l = [float(value) for value in lower]
+    up_l = [float(value) for value in upper]
 
-    # Legacy single-event shock (kept for backward compatibility)
+    # Legacy single-event shock pathway. The preferred newer path applies
+    # shock maps outside this helper via ``apply_shock_map_to_df``.
     if shock_enabled and shock_amount > 0:
         mean_l = apply_one_off_shock(mean_l, shock_amount, shock_week)
         low_l = apply_one_off_shock(low_l, shock_amount, shock_week)
@@ -255,7 +276,7 @@ def simulate_scenario_df(
 
     df = pd.DataFrame(
         {
-            "Week": list(range(1, int(weeks) + 1)),
+            "Week": list(range(1, weeks + 1)),
             "Mean": mean_l,
             "Lower": low_l,
             "Upper": up_l,
@@ -265,7 +286,7 @@ def simulate_scenario_df(
     validate_scenario_df(df)
 
     params = {
-        "delta_savings": float(delta_savings),
+        "delta_savings": float(max(float(delta_savings), 0.0)),
         "weeks": int(weeks),
         "iterations": int(iterations),
         "seed": int(seed),
@@ -292,10 +313,10 @@ def simulate_scenario_df_with_seed_offset(
     shock_amount: float = 0.0,
     shock_week: int = 1,
 ) -> Tuple[pd.DataFrame, Dict]:
-    """
-    Convenience wrapper:
-    - Scenario A: seed + 0
-    - Scenario B: seed + 1
+    """Run ``simulate_scenario_df`` with an added seed offset.
+
+    This is useful when comparing two short-term scenarios while keeping them
+    reproducible but not identical.
     """
     return simulate_scenario_df(
         income=income,

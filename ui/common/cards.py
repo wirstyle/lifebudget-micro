@@ -1,3 +1,10 @@
+"""Reusable Streamlit card helpers for LifeBudget Micro.
+
+This module contains small UI wrappers for consistent card-style sections and
+the Step 1 weekly cash-flow snapshot. It does not contain business logic; it
+only formats already-computed values for display.
+"""
+
 from __future__ import annotations
 
 from typing import Callable, Optional
@@ -82,7 +89,8 @@ def weekly_reality_card(
             ax.set_title("Where your weekly money goes")
 
             st.pyplot(fig, clear_figure=True)
-
+            plt.close(fig)
+            
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown(f"**Fixed:** £{fixed_weekly:,.0f}")

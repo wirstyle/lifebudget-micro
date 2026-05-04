@@ -1,16 +1,30 @@
-"""
-Step 0 — Landing Page + Educational Notice
+"""Home / module-selection screen for LifeBudget Micro.
 
-Final-polish version:
-- Presents the app as three user-facing modules instead of three narrow branches.
-- Keeps the old step0_planning_pathway and USER_INTENT values for downstream compatibility.
-- Step 0 no longer owns the sidebar; app.py should render the shared global sidebar once.
+This screen is the user's entry point into the prototype. It presents the app as
+three user-facing modules:
+
+- Personal Finance Planner;
+- Investment Strategy Lab;
+- Long-Term Scenario Explorer.
+
+It also renders the educational notice gate. Module cards stay disabled until
+the notice is accepted, because the app produces educational backtests,
+proxies, and scenario comparisons rather than financial advice.
+
+Implementation note
+-------------------
+Earlier versions of the project used narrower planning pathways and intent
+values. The current Home screen keeps ``step0_planning_pathway`` and
+``USER_INTENT`` updated for downstream compatibility, while showing clearer
+module language to the user.
+
+Step 0 does not render its own sidebar. ``app.py`` renders the shared global
+sidebar once after the active screen.
 """
 
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
-import html
 
 import streamlit as st
 
@@ -31,9 +45,20 @@ STEP0_PATHWAY = "step0_planning_pathway"
 STEP0_SELECTED_MODULE = "step0_selected_module"
 STEP0_PENDING_MODULE_OPEN = "step0_pending_module_open_v1"
 
-# Keep these original pathway values because later steps still use them as
-# compatibility signals. Step 0 now exposes broader modules to the user, then
-# maps each module back to the closest existing internal pathway/intention.
+# Legacy internal pathway values.
+#
+# Earlier versions of LifeBudget Micro used narrower planning pathways such as
+# "savings only" and "savings + investing". The final Home screen now presents
+# broader user-facing modules instead:
+#
+# - Personal Finance Planner
+# - Investment Strategy Lab
+# - Long-Term Scenario Explorer
+#
+# These pathway values are still persisted because later screens and older
+# compatibility logic can read them to decide which downstream flow is active.
+# Step 0 therefore maps each visible module card back to the closest internal
+# pathway and USER_INTENT value.
 PATHWAY_OPTIONS = [
     ("compare_both", "Compare both approaches"),
     ("savings_only", "Savings only"),
@@ -61,7 +86,17 @@ PATHWAY_TO_USER_INTENT = {
 
 DEFAULT_PATHWAY = "compare_both"
 
-# module_id, title, steps, description, button_label, target_step, pathway, user_intent
+
+# User-facing Home cards.
+#
+# Each module has a visible card title/description and a target step. The last
+# two fields keep compatibility with the older internal pathway/user-intent
+# model. In the final UI, the user sees three broad modules rather than the
+# original narrow planning branches.
+#
+# Tuple shape:
+# module_id, title, steps_label, description, button_label, target_step,
+# legacy_pathway, legacy_user_intent
 MODULE_OPTIONS: List[Tuple[str, str, str, str, str, int, str, str]] = [
     (
         "personal_finance",
@@ -114,9 +149,9 @@ def _mark_educational_notice_accepted() -> None:
 def _handle_notice_checkbox_change() -> None:
     """Persist acceptance before the next full rerun.
 
-    app.py renders the global sidebar before Step 0. Using a checkbox callback
-    means the durable notice flag is already available when the sidebar renders
-    on the rerun triggered by checking the box.
+    The checkbox has its own widget key, while the accepted notice is stored in
+    durable alias keys. Using a callback keeps the acceptance state consistent
+    across the main page and global sidebar after the checkbox interaction.
     """
     if bool(st.session_state.get(STEP0_NOTICE_CHECKBOX, False)):
         _mark_educational_notice_accepted()
@@ -189,8 +224,6 @@ def _navigate_to_module(module: dict) -> None:
     st.rerun()
 
 
-
-
 def _module_button_label(module: dict) -> str:
     """Return a native Streamlit button label for a clickable module card.
 
@@ -248,6 +281,8 @@ def _render_module_selector(*, can_open: bool) -> dict:
         with cols[idx]:
             _render_module_card(module, can_open=can_open)
 
+    # Persist the currently selected/default module so the sidebar can preview the
+    # relevant branch even before a module button is clicked.
     selected_module = _persist_module_choice(str(st.session_state.get(STEP0_SELECTED_MODULE, selected_module["id"])))
 
     st.info(
@@ -258,6 +293,10 @@ def _render_module_selector(*, can_open: bool) -> dict:
     return selected_module
 
 
+# Retained as optional explanatory copy for future Home-screen variants.
+# The final submitted layout keeps the landing page shorter, so this block is
+# not called by default. The same concepts are covered later in the Strategy
+# Engine, Long-Term Scenario, and User Guide.
 def _render_investment_interpretation_note() -> None:
     with st.expander("How should I interpret investment and projection results later?", expanded=False):
         st.markdown(
@@ -274,7 +313,6 @@ Investment/projection outputs are **not**:
 - a market prediction.
 """
         )
-
 
 
 def _render_app_overview() -> None:

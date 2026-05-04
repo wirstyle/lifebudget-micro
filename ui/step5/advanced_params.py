@@ -1,3 +1,16 @@
+"""Advanced Step 5 manual-control renderer for LifeBudget Micro.
+
+This module renders the optional advanced Strategy Engine controls used after
+the Step 4 asset universe has been built. It keeps low-level engine parameters
+available for inspection and manual adjustment, while showing governance,
+coherence, and repair information when manual overrides move away from the
+coherent base configuration.
+
+The controls in this file are technical by design. They support diagnostics and
+manual experimentation, but the main user-facing flow should continue to rely on
+the simpler Step 5 Strategy Engine setup and educational explanations.
+"""
+
 from __future__ import annotations
 
 import streamlit as st
@@ -5,9 +18,12 @@ import streamlit as st
 
 def _safe_float(value, default: float = 0.0) -> float:
     try:
-        return float(value)
+        out = float(value)
+        if out == out and out not in {float("inf"), float("-inf")}:
+            return out
     except Exception:
-        return float(default)
+        pass
+    return float(default)
 
 
 def _safe_int(value, default: int = 0) -> int:
@@ -57,9 +73,12 @@ def _normalize_score_display(governance_status: dict | None = None) -> str:
     coherence_after = dict(gov.get("coherence_after", {}) or {})
     score = coherence_after.get("score_continuous", coherence_after.get("score", None))
     try:
-        return f"{float(score):.2f}"
+        value = float(score)
+        if value == value and value not in {float("inf"), float("-inf")}:
+            return f"{value:.2f}"
     except Exception:
-        return "—"
+        pass
+    return "—"
 
 
 def _collect_visible_warnings(governance_status: dict | None = None) -> list[str]:
@@ -222,8 +241,8 @@ def _render_manual_override_governance_header(
 
     st.markdown("### Manual override governance")
     st.caption(
-        "Advanced controls remain available, but they are now read against the coherent base config for the current philosophy. "
-        "This block shows what changed at the structural block level and whether the current manual state stretches the mother philosophy."
+        "Advanced controls remain available, but they are read against the coherent base config for the current philosophy. "
+        "This block shows what changed at the structural block level and whether the current manual state stretches the selected investment philosophy."
     )
 
     c1, c2, c3 = st.columns(3)
@@ -261,7 +280,6 @@ def _render_manual_override_governance_header(
 
     st.markdown("#### Parameter-level diff vs coherent base")
     st.dataframe(pd.DataFrame(parameter_rows), use_container_width=True, hide_index=True)
-
     st.markdown("#### Parameter trade-off reading")
     changed_rows = [row for row in parameter_rows if row["Changed"] == "Yes"]
     if changed_rows:
@@ -272,27 +290,27 @@ def _render_manual_override_governance_header(
     else:
         st.markdown("- **No parameter drift detected** — manual values remain aligned with the coherent base.")
 
-    st.markdown("#### Repair CTA")
+    st.markdown("#### Repair action")
     repair_patch = dict(gov.get("suggested_repair_patch", {}) or {})
     if not repair_patch:
         repairs = gov.get("repair_summary") or gov.get("repairs") or {}
         if isinstance(repairs, dict):
             repair_patch = dict(repairs.get("suggested_patch", {}) or {})
+
     if warnings:
         st.caption(warnings[0])
+
     if repair_patch:
         st.caption(f"{len(repair_patch)} structural adjustment available: {', '.join(list(repair_patch.keys())[:4])}.")
-    else:
-        st.caption("No explicit repair patch is available yet, but the button is shown now so the full top block is visible.")
-    if st.button("Apply minimal coherence repair", key="step5_apply_minimal_coherence_repair", use_container_width=True):
-        if repair_patch:
+        if st.button("Apply minimal coherence repair", key="step5_apply_minimal_coherence_repair", use_container_width=True):
             repaired = dict(override)
             repaired.update(repair_patch)
             st.session_state["step5_post_run_advanced_cfg"] = repaired
             st.success("Minimal coherence repair applied to the override layer.")
             st.rerun()
-        else:
-            st.info("Repair CTA is visible now. Wiring is partial in this pass because the goal was to surface the block first.")
+    else:
+        st.caption("No explicit repair patch is available for the current manual state.")
+
     st.caption(
         "Applies the smallest structural fix needed to restore alignment with your current philosophy. This does not change "
         "your overall strategy intent."
@@ -300,6 +318,9 @@ def _render_manual_override_governance_header(
     st.caption("Full recommendations available in Strategy Coherence.")
     st.caption("Simple mode is currently syncing the affected manual controls below from the semantic resolve.")
     st.markdown("---")
+
+
+
 
 
 def _render_manual_override_governance(
@@ -564,7 +585,7 @@ def render_advanced_params(
             disabled=not w_cap_enabled,
         )
     with c2:
-        st.markdown("#### Adaptive caps (Phase 1 wiring)")
+        st.markdown("#### Adaptive caps")
         caps_left, caps_right = st.columns(2)
         with caps_left:
             vol_dependent_cap_enabled = st.checkbox(
@@ -1394,7 +1415,7 @@ def render_advanced_params(
         "deadband_threshold": float(deadband_threshold),
         "weight_shrink": float(weight_shrink),
         "asset_weight_cap": float(asset_weight_cap) if asset_weight_cap_enabled else None,
-        "w_cap": float(w_cap) if asset_weight_cap_enabled else None,
+        "w_cap": float(w_cap) if w_cap_enabled else None,
         "vol_dependent_cap_enabled": bool(vol_dependent_cap_enabled),
         "vol_cap_threshold_low": float(vol_cap_threshold_low),
         "vol_cap_threshold_high": float(vol_cap_threshold_high),
@@ -1490,30 +1511,8 @@ def render_advanced_params(
     }
 
 
-
-def render_config_diff(base_cfg: dict | None = None, override_cfg: dict | None = None):
-    st.markdown("### Config diff")
-    base_map = dict(base_cfg or {})
-    override_map = dict(override_cfg or {})
-    changes = []
-    for key, override_value in override_map.items():
-        if override_value is None:
-            continue
-        base_value = base_map.get(key)
-        if base_value != override_value:
-            changes.append({"parameter": str(key), "base": base_value, "override": override_value})
-    if not changes:
-        st.success("No changes relative to the governed base config.")
-        return []
-    import pandas as pd
-    df = pd.DataFrame(changes)
-    st.dataframe(df, use_container_width=True, hide_index=True)
-    return changes
-
-
-
 # ------------------------------------------------------------------
-# Compatibility helpers required by step5_workspace variants
+# Compatibility helpers for Step 5 advanced/manual-control views
 # ------------------------------------------------------------------
 
 def render_config_diff(base_cfg: dict | None = None, override_cfg: dict | None = None):

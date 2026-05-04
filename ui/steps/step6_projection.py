@@ -1,5 +1,13 @@
 """
-Long-Term Scenario
+Step 6 Long-Term Scenario renderer.
+
+This module renders the long-term projection screen. It combines the
+savings-only accumulation baseline with the investment/proxy projection so the
+user can compare long-term outcomes on one page.
+
+When a Strategy Engine run exists, the investment path uses the engine-generated
+monthly return series. Before the engine has run, the page uses a clearly
+labelled educational proxy so the workflow remains usable for demos.
 """
 
 from __future__ import annotations
@@ -580,7 +588,7 @@ def _profile_assumptions_for_demo_proxy(profile: str) -> Dict[str, float]:
 
     This is deliberately not presented as a real engine result. It only exists
     so the Investment / Compare pathways can be demonstrated before a Strategy Engine run.
-    A real Strategy Engine engine path always takes priority when available.
+    A real Strategy Engine path always takes priority when available.
     """
     name = str(profile or DEFAULT_STEP6_DEMO_PROFILE).strip().capitalize()
     if name == "Growth":
@@ -594,8 +602,7 @@ def _build_demo_monthly_return_proxy(profile: str, months: int = DEFAULT_STEP6_D
     """Build a deterministic monthly return path for demo-only projections.
 
     The pattern is deterministic rather than random so repeated demos are stable.
-    It approximates a broad profile-level return/volatility path, not the output
-    of the Strategy Engine engine.
+    It approximates a broad profile-level return/volatility path, not the output of the Strategy Engine.
     """
     assumptions = _profile_assumptions_for_demo_proxy(profile)
     annual_return = float(assumptions["annual_return"])
@@ -1678,6 +1685,8 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
         selected_compare_horizons=selected_compare_horizons,
     )
 
+    display_table = pd.DataFrame()
+
     if not horizon_table_df.empty:
         st.markdown("### Horizon comparison")
 
@@ -1757,7 +1766,7 @@ def _render_investment_step6(*, show_header: bool = True, show_navigation: bool 
 
 
 # ============================================================
-# Branch-aware Long-Term Scenario wrapper: savings-only vs investment paths
+# Legacy pathway helpers and savings-only baseline utilities
 # ============================================================
 
 STEP0_PATHWAY = "step0_planning_pathway"
@@ -2197,20 +2206,6 @@ def _render_savings_only_step6(*, show_header: bool = True, show_navigation: boo
                 _go_to_step(7)
 
 
-
-def render_step_6() -> None:
-    pathway = _current_pathway()
-
-    if pathway == "savings_only":
-        _render_savings_only_step6()
-        return
-
-    # Existing Long-Term Scenario investment flow. This branch intentionally still requires
-    # a Strategy Engine engine run because it depends on investment engine outputs.
-    _render_investment_step6()
-
-
-
 # ============================================================
 # Compare-both branch override
 # ============================================================
@@ -2289,7 +2284,7 @@ def _render_compare_step6(*, show_header: bool = True) -> None:
         section_header("Long-Term Scenario — Pathway comparison")
 
     # Compare mode can use a labelled demo proxy before Strategy Engine exists. Real
-    # Strategy Engine engine returns always override the proxy automatically.
+    # Strategy Engine returns always override the proxy automatically.
     contribution = _resolve_projection_contribution(prefer_plan=True)
     _sync_projection_contribution_state(contribution)
     investment_context = _coerce_mapping(st.session_state.get("investment_context", {}))
@@ -2313,7 +2308,7 @@ def _render_compare_step6(*, show_header: bool = True) -> None:
     else:
         st.info(
             "Compare mode uses the same starting pot, monthly contribution, horizon and goal for both pathways. "
-            "The only difference is return assumption: savings-only uses 0% market return; investing uses the Strategy Engine engine projection. "
+            "The only difference is return assumption: savings-only uses 0% market return; investing uses the Strategy Engine projection. "
             "Optional long-term shocks reduce the shared contribution before both pathways are compared."
         )
 
@@ -2504,10 +2499,9 @@ def _render_compare_step6(*, show_header: bool = True) -> None:
 def render_step_6() -> None:
     """Render Long-Term Scenario as one combined scenario screen.
 
-    The page now shows the savings-only accumulation view and the
-    investment/proxy comparison view together. No projection-mode selector is
-    shown, and no underlying content is deleted; the old branch renderers are
-    reused in sequence.
+    The page shows the investment/proxy projection together with a savings-only
+    baseline, so the user can compare long-term outcomes on one page. No projection
+    mode selector is shown in the final flow.
     """
     section_header("Long-Term Scenario")
     st.info(

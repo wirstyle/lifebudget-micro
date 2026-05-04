@@ -1,13 +1,15 @@
-from __future__ import annotations
+"""Step 5 engine-tuning recommendation phase.
 
-"""Step 5 technical engine-tuning assistant.
+This module implements Phase 2 of the optional Strategy Engine improvement flow.
+It keeps the selected universe, asset list, universe size, strategy template and
+style preset unchanged, then tests a small whitelist of technical engine knobs
+with the real engine.
 
-Scope of this second restored suggestion phase:
-- keep the current selected universe, asset list, and universe size unchanged;
-- keep the current strategy template and style preset unchanged;
-- test only a small whitelist of technical engine knobs;
-- apply changes by promoting an already rerun-tested candidate result.
+Accepted candidates are applied by promoting an already rerun-tested result, so
+the user does not need to manually run the same candidate again.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -65,6 +67,8 @@ def _format_runtime_estimate(seconds: float) -> str:
     rounded = round(minutes * 2.0) / 2.0
     return f"~{rounded:g} min"
 
+# Only these low-level fields may be changed by Phase 2. Strategy preset,
+# universe composition and universe size are reserved for other phases.
 SAFE_TUNING_FIELDS: tuple[str, ...] = (
     "top_k",
     "lookback_mu",
@@ -348,6 +352,7 @@ def _candidate_specs(base_cfg: dict, philosophy: str, universe_size: int, *, max
     current_inertia = _clip_float(base_cfg.get("inertia", 0.0), 0.0, 1.0, 0.0)
 
     def spec(label: str, family: str, patch: dict, caption: str) -> dict:
+        # max_top_k is the effective upper bound for top_k under the current universe.
         cfg_payload = _apply_patch_to_cfg(base_cfg, patch, universe_size=max_top_k)
         changed = {
             field: cfg_payload.get(field)

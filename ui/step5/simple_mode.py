@@ -1,3 +1,15 @@
+"""
+Simple-mode Strategy Engine controls for Step 5.
+
+This module renders the high-level Strategy Engine setup controls: strategy
+template, style preset and semantic posture sliders. It also exposes a read-only
+state resolver so the Step 5 workspace can check freshness and build configs
+without mounting the widgets.
+
+Technical engine overrides live in ``step5_workspace.py``; this module should
+stay focused on user-facing strategy posture controls.
+"""
+
 from typing import Any, Callable
 
 import streamlit as st
@@ -92,7 +104,6 @@ def _slider(widget_key: str, label: str, default: float) -> float:
     )
 
 
-
 def _safe_slider_state(logical_key: str, fallback: float) -> float:
     widget_key = SEMANTIC_SLIDER_KEYS.get(logical_key, "")
     try:
@@ -157,12 +168,22 @@ def resolve_simple_mode_state() -> dict:
         "philosophy": philosophy,
     }
 
-def render_simple_mode(*, use_internal_expanders: bool = True, posture_footer_renderer: Callable[[dict], Any] | None = None):
+
+def render_simple_mode(
+    *,
+    use_internal_expanders: bool = True,
+    posture_footer_renderer: Callable[[dict], Any] | None = None,
+) -> dict:
+    """Render the Step 5 user-facing strategy setup controls.
+
+    The optional ``posture_footer_renderer`` lets the workspace append related
+    controls, such as technical overrides, inside the same visual group.
+    """
     philosophy = get_canonical_investment_philosophy()
     rec_template, rec_style = recommended_strategy_combo_for_philosophy(philosophy)
 
-    # Gold Stable: keep semantic defaults stable during a forced rerun,
-    # then return to normal user-controlled interactions.
+    # Keep semantic defaults stable during a forced rerun, then return to normal
+    # user-controlled interactions.
     freeze_after_apply = bool(st.session_state.get("step5_force_run_once", False))
 
     if freeze_after_apply:
@@ -229,6 +250,11 @@ def render_simple_mode(*, use_internal_expanders: bool = True, posture_footer_re
         posture_ctx = st.container(border=True)
 
     with posture_ctx:
+        st.caption(
+            "These sliders adjust the strategy posture in plain-English terms. "
+            "They are mapped into engine settings before the run."
+        )
+
         r1, r2 = st.columns(2)
         with r1:
             _slider(SEMANTIC_SLIDER_KEYS["risk_appetite"], "Risk appetite", 0.50)

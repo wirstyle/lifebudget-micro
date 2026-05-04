@@ -1,7 +1,17 @@
-# services/projection_service.py
-
 """
 Projection service for LifeBudget Micro.
+
+This module prepares and runs the Step 6 long-term scenario projection. It acts
+as a UI-facing service layer around the core projection engine in ``src.investment``
+when available, with a deterministic fallback used only when the core projection
+function cannot be imported.
+
+The service is responsible for:
+- coercing Step 6 runtime inputs into safe numeric values;
+- building stable signatures for cached projection results;
+- enriching projection summaries with fields used by Step 6 and Step 7;
+- keeping outputs clearly framed as educational scenarios, not forecasts,
+  guarantees, or financial advice.
 """
 
 from __future__ import annotations
@@ -21,6 +31,7 @@ except Exception:  # pragma: no cover
 
 PROFILE_RETURN_MAP = {
     "Conservative": 0.04,
+    "Defensive": 0.04,
     "Balanced": 0.06,
     "Growth": 0.08,
 }
@@ -47,6 +58,14 @@ def _coerce_float_list(value: Any) -> list[float]:
             continue
     return values
 
+def _coerce_int_list(value: Any) -> list[int]:
+    values: list[int] = []
+    for raw in coerce_list(value):
+        try:
+            values.append(int(raw))
+        except Exception:
+            continue
+    return values
 
 
 def _first_present_numeric(mapping: Dict[str, Any], *keys: str) -> float | None:
@@ -100,7 +119,9 @@ def _build_rich_projection_summary(
         if median_terminal is None and expected_terminal is not None:
             median_terminal = float(expected_terminal)
         if total_contributed is None and "annual_contribution" in projection_df.columns:
-            total_contributed = float(pd.to_numeric(projection_df["annual_contribution"], errors="coerce").fillna(0.0).sum())
+            total_contributed = float(current_savings) + float(
+                pd.to_numeric(projection_df["annual_contribution"], errors="coerce").fillna(0.0).sum()
+            )
 
     if total_contributed is None:
         total_contributed = float(current_savings + (monthly_contribution * 12.0 * max(horizon_years, 0)))
@@ -199,17 +220,20 @@ def _build_rich_projection_summary(
     )
     return enriched
 
+
 def resolve_projection_return(profile: str, step5_run_result: Any = None) -> float:
     annual_return = float(PROFILE_RETURN_MAP.get(str(profile or "Balanced"), 0.06))
     perf = coerce_mapping(coerce_mapping(step5_run_result).get("performance_summary", {}))
     cagr = perf.get("cagr")
-    if cagr is not None:
-        try:
-            annual_return = float(cagr)
-        except Exception:
-            pass
-    return float(annual_return)
 
+    try:
+        candidate = float(cagr)
+        if math.isfinite(candidate):
+            annual_return = candidate
+    except Exception:
+        pass
+
+    return float(annual_return)
 
 def build_projection_table(
     monthly_contribution: float,
@@ -234,12 +258,17 @@ def build_projection_table(
     return pd.DataFrame(rows)
 
 
-def build_projection_summary(projection_df: pd.DataFrame, annual_return: float) -> Dict[str, Any]:
+def build_projection_summary(
+    projection_df: pd.DataFrame,
+    annual_return: float,
+    starting_value: float = 0.0,
+) -> Dict[str, Any]:
+
     if not isinstance(projection_df, pd.DataFrame) or projection_df.empty:
         return {}
 
     final_value = float(projection_df["projected_value"].iloc[-1])
-    total_contributed = float(projection_df["annual_contribution"].sum())
+    total_contributed = float(starting_value) + float(projection_df["annual_contribution"].sum())
     gain_from_growth = float(final_value - total_contributed)
 
     if final_value > total_contributed * 1.5:
@@ -279,11 +308,12 @@ def build_projection_signature(payload: Dict[str, Any]) -> str:
 
 
 def build_projection_compare_signature(payload: Dict[str, Any]) -> str:
-    compare_payload = dict(payload or {})
-    compare_payload["compare_horizons"] = sorted(
-        int(x) for x in coerce_list(compare_payload.get("compare_horizons", [])) if str(x).strip()
-    )
-    return build_projection_signature(compare_payload)
+    compare_horizons = sorted(set(_coerce_int_list(coerce_mapping(payload).get("compare_horizons", []))))
+
+    data = json.loads(build_projection_signature(payload))
+    data["compare_horizons"] = compare_horizons
+
+    return json.dumps(data, sort_keys=True)
 
 
 def build_projection_bundle(
@@ -300,7 +330,11 @@ def build_projection_bundle(
         horizon_years=horizon_years,
         starting_value=starting_value,
     )
-    summary = build_projection_summary(projection_df, annual_return)
+    summary = build_projection_summary(
+        projection_df,
+        annual_return,
+        starting_value=starting_value,
+    )
     summary = _build_rich_projection_summary(
         {"projection_df": projection_df, "summary": summary},
         runtime={
@@ -399,11 +433,7 @@ def run_projection(payload: Dict[str, Any], step5_run_result: Any = None) -> Dic
 
 def run_projection_compare(payload: Dict[str, Any], step5_run_result: Any = None) -> Dict[str, Any]:
     runtime = coerce_mapping(payload)
-    compare_horizons = [
-        int(x)
-        for x in coerce_list(runtime.get("compare_horizons", []))
-        if str(x).strip()
-    ]
+    compare_horizons = _coerce_int_list(runtime.get("compare_horizons", []))
     if not compare_horizons:
         return {
             "compare_results": {},

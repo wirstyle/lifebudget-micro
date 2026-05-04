@@ -1,4 +1,16 @@
-# src/explain.py
+"""
+Narrative explanation helpers for LifeBudget Micro.
+
+This module converts budgeting, feasibility, investment and governance outputs
+into user-facing explanatory text. It is intentionally separate from renderers
+and simulation services: services compute results, renderers display them, and
+this module provides the explanatory language used in expanders, reports and
+guidance cards.
+
+The file currently contains both active Personal Finance Planner explanations
+and compatibility helpers for earlier two-scenario flows.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 # ============================================================
-# Technical explanation (Step 4 expander)
+# Short-term feasibility explanation helpers
 # ============================================================
 @dataclass
 class ExplanationInputs:
@@ -94,7 +106,7 @@ def build_single_plan_explanation(
             return ""
         return f", {p:+.1f}%"
 
-    # ---- Dynamic interpretation layer (new) ----
+    # ---- Dynamic interpretation layer ----
     baseline_abs = abs(baseline_final) if abs(baseline_final) > 1e-9 else 1.0
     spread_ratio = float(spread_width / baseline_abs)
 
@@ -138,8 +150,9 @@ def build_single_plan_explanation(
         f"- **Conservative (10th percentile)**: **{_fmt_gbp0(conservative_final)}** "
         f"({_fmt_money_delta(conservative_diff)} vs baseline{_fmt_pct_delta(conservative_pct)})."
     )
+
     lines.append(
-        f"- **Expected (median / 50th percentile)**: **{_fmt_gbp0(expected_final)}** "
+        f"- **Expected (mean simulated outcome)**: **{_fmt_gbp0(expected_final)}** "
         f"({_fmt_money_delta(expected_diff)} vs baseline{_fmt_pct_delta(expected_pct)})."
     )
     lines.append(
@@ -211,7 +224,7 @@ def build_step3_next_actions_markdown(
             body_lines.append(structural_deficit_tips)
         return {
             "level": "warning",
-            "title": "What to do next (short)",
+            "title": "What to do next",
             "body": "\n\n".join(body_lines),
         }
 
@@ -221,18 +234,18 @@ def build_step3_next_actions_markdown(
         if need <= 0.0:
             return {
                 "level": "success",
-                "title": "What to do next (short)",
+                "title": "What to do next",
                 "body": "Your cash flow already looks stable enough to stay at or above break-even under the current assumptions. This mode is about protecting that stability.",
             }
         if need <= disc:
             return {
                 "level": "info",
-                "title": "What to do next (short)",
+                "title": "What to do next",
                 "body": f"To make break-even more resilient, reduce flexible spending by about **{_fmt_gbp0(need)}/week** and test the plan again with one-off events.",
             }
         return {
             "level": "error",
-            "title": "What to do next (short)",
+            "title": "What to do next",
             "body": "Even this stabilisation-first mode still needs a structural change because discretionary cuts alone are not enough.",
         }
 
@@ -240,18 +253,18 @@ def build_step3_next_actions_markdown(
         if need <= 0.0:
             return {
                 "level": "success",
-                "title": "What to do next (short)",
+                "title": "What to do next",
                 "body": "Your chosen savings pace is already covered by your current margin. You can push it a little higher if you want a stronger weekly savings habit.",
             }
         if need <= disc:
             return {
                 "level": "info",
-                "title": "What to do next (short)",
+                "title": "What to do next",
                 "body": f"To save more each week, aim to free up about **{_fmt_gbp0(need)}/week** from discretionary spending and check whether the uncertainty band still feels acceptable.",
             }
         return {
             "level": "error",
-            "title": "What to do next (short)",
+            "title": "What to do next",
             "body": "Your current stretch target is too aggressive for discretionary cuts alone. You’ll need either lower essentials or more income to sustain it.",
         }
 
@@ -261,7 +274,7 @@ def build_step3_next_actions_markdown(
             if target_a >= short_term_goal_required_weekly and short_term_goal_required_weekly > 0.0:
                 return {
                     "level": "success",
-                    "title": "What to do next (short)",
+                    "title": "What to do next",
                     "body": (
                         f"At **{_fmt_gbp0(target_a)}/week**, you are pacing fast enough to build a short-term cash buffer of about "
                         f"**{_fmt_gbp0(short_term_goal_amount)}** within roughly **{short_term_goal_weeks} weeks** in cash-only terms."
@@ -269,42 +282,44 @@ def build_step3_next_actions_markdown(
                 }
             return {
                 "level": "info",
-                "title": "What to do next (short)",
+                "title": "What to do next",
                 "body": (
                     f"Your cash-buffer goal implies about **{_fmt_gbp0(short_term_goal_required_weekly)}/week**. "
-                    f"Your current Plan A target would build roughly **{_fmt_gbp0(implied_cash_only)}** over **{short_term_goal_weeks} weeks** before any investing logic from later steps."
+                    f"Your current weekly target would build roughly **{_fmt_gbp0(implied_cash_only)}** over **{short_term_goal_weeks} weeks** before any investing logic from later steps."
                 ),
             }
         if need <= 0.0:
             return {
                 "level": "success",
-                "title": "What to do next (short)",
+                "title": "What to do next",
                 "body": "Your current weekly target already supports the short-term goal framing you selected.",
             }
         return {
             "level": "info",
-            "title": "What to do next (short)",
+            "title": "What to do next",
             "body": f"Your current target still needs about **{_fmt_gbp0(need)}/week** more than the baseline to support the short-term goal framing.",
         }
+
 
     # default = not_sure_yet
     if need <= 0.0:
         return {
             "level": "success",
-            "title": "What to do next (short)",
-            "body": "Plan A is already covered by your current margin. Consider setting a slightly higher target.",
+            "title": "What to do next",
+            "body": "Your weekly target is already covered by your current margin. Consider setting a slightly higher target if you want a more ambitious savings pace.",
         }
     if need <= disc:
         return {
             "level": "info",
-            "title": "What to do next (short)",
-            "body": f"To reach Plan A (**{_fmt_gbp0(target_a)}/week**), aim to reduce discretionary by about **{_fmt_gbp0(need)}/week**. Start with a small, consistent cut rather than a perfect plan.",
+            "title": "What to do next",
+            "body": f"To reach the weekly target (**{_fmt_gbp0(target_a)}/week**), aim to reduce discretionary spending by about **{_fmt_gbp0(need)}/week**. Start with a small, consistent cut rather than a perfect plan.",
         }
     return {
         "level": "error",
-        "title": "What to do next (short)",
-        "body": "Plan A is not achievable through discretionary cuts alone. You’ll need a structural change (income ↑ or essentials ↓).",
+        "title": "What to do next",
+        "body": "The weekly target is not achievable through discretionary cuts alone. You’ll need a structural change, such as higher income or lower essentials.",
     }
+
 
 def build_step3_technical_details_markdown(
     *,
@@ -408,7 +423,7 @@ def build_step3_technical_details_markdown(
 
     lines.append("### Interpretation")
     lines.append(f"- About **1 in 10** outcomes end below **£{conservative_final:,.0f}**.")
-    lines.append(f"- About **1 in 2** outcomes are around **£{expected_final:,.0f}**.")
+    lines.append(f"- The average simulated outcome is around **£{expected_final:,.0f}**.")
     lines.append(f"- About **1 in 10** outcomes exceed **£{optimistic_final:,.0f}**.")
 
     lines.append("### Comparison with your Step 2 target")
@@ -569,7 +584,7 @@ def build_explanation(
 
 
 # ============================================================
-# Human-first reflection (Step 4)
+# Compatibility two-scenario reflection helpers
 # ============================================================
 @dataclass
 class ReflectionMetrics:
@@ -592,7 +607,7 @@ class ReflectionMetrics:
     margin_a_weekly: float
     margin_b_weekly: float
 
-    # Back-compat (treat as REAL cut)
+    # Compatibility aliases for earlier two-scenario flows.
     delta_a_weekly: float
     delta_b_weekly: float
 
@@ -617,7 +632,7 @@ def compute_reflection_metrics(
     b_mean: float,
     b_low: float,
     b_high: float,
-    # New params (preferred)
+    # Current two-scenario semantics.
     target_a_weekly: Optional[float] = None,
     target_b_weekly: Optional[float] = None,
     cut_a_weekly: Optional[float] = None,
@@ -697,9 +712,8 @@ def compute_reflection_metrics(
 
 
 # ============================================================
-# Step 3 → Step 4 transition helper
+# Short-term budget → investment transition helper
 # ============================================================
-
 def build_step4_transition_text(
     *,
     weekly_margin: float,
@@ -765,7 +779,7 @@ def weekly_to_monthly_for_text(amount_weekly: float) -> float:
 
 
 # ============================================================
-# 🧠 Intelligent structural deficit tips
+# Intelligent structural deficit tips
 # ============================================================
 def build_structural_deficit_tips(
     *,
@@ -931,11 +945,11 @@ def build_structural_deficit_tips(
             f"and find the other **{_fmt_gbp0(deficit_w/2)}/w** across the next 1–2 items."
         )
     else:
-        lines.append("")
         lines.append(
             "### Make tips more specific\n"
-            "Open **“Build my fixed expenses”** in Step 1 and enter your major items "
-            "(rent, council tax, transport, etc.). Then come back to Step 2 — the tips will list your top drivers explicitly."
+            "Open **Detailed budget controls** in the Personal Finance Planner and use the "
+            "**fixed essentials** and **variable essentials** breakdowns. Add your major items "
+            "(rent, council tax, transport, utilities, groceries, etc.) so the app can list your top drivers explicitly."
         )
 
     if any(x > 0 for x in [utilities_w, commute_w, groceries_w, household_w]):
@@ -964,9 +978,9 @@ def build_structural_deficit_tips(
     lines.append("")
     lines.append("### Inside the app (what to do next)")
     lines.append(
-        "- Step 1 → use the fixed/variable breakdowns so the app can identify your top items.\n"
-        "- Try a realistic reduction on the top 1–3 weekly items, then re-check the Margin.\n"
-        "- Once Margin ≥ £0/w, Step 2 scenarios become actionable."
+        "- Personal Finance Planner → open **Detailed budget controls** and use the fixed/variable essentials breakdowns so the app can identify your top items.\n"
+        "- Try a realistic reduction on the top 1–3 weekly items, then re-check the free margin.\n"
+        "- Once free margin is positive, the savings target and feasibility check become actionable."
     )
     lines.append(
         "_Note: tips are not personalised financial advice (the app can’t see contracts, eligibility, or local options)._"
@@ -1509,7 +1523,7 @@ def build_investment_strategy_explanation(inputs: InvestmentExplanationInputs) -
 
 
 # ============================================================
-# Engine structural explanation (5G)
+# Engine structural explanation
 # ============================================================
 
 def _coerce_mapping(value: Any) -> Dict[str, Any]:
@@ -1784,7 +1798,7 @@ def summarize_governed_parameter_tradeoffs(parameter_rows: List[Dict[str, Any]],
 
 
 # ============================================================
-# Governed traceability explanation (6H)
+# Governed traceability explanation
 # ============================================================
 
 def _pretty_key_name(key: Any) -> str:
@@ -1992,7 +2006,7 @@ def build_governed_traceability_explanation(
     }
 
 # ============================================================
-# Governed actionable recommendations (6F)
+# Governed actionable recommendations
 # ============================================================
 
 def _safe_int(value: Any) -> Optional[int]:
@@ -2254,12 +2268,19 @@ def build_governed_recommendations(
         safer_patch["correlation_penalty_strength"] = max(x for x in [corr_strength, base_corr_strength, 0.75] if x is not None)
         if _safe_num(cfg_map.get("asset_weight_cap")) is None or (_safe_num(cfg_map.get("asset_weight_cap")) or 1.0) > (0.10 if philosophy_name == "Defensive" else 0.20):
             safer_patch["asset_weight_cap"] = 0.10 if philosophy_name == "Defensive" else 0.20
+
     if philosophy_name == "Defensive":
+        current_strength = _safe_num(cfg_map.get("turnover_penalty_strength")) or 0.0
         turnover_limit = _safe_num(cfg_map.get("turnover_constraint_max_turnover"))
-        safer_patch["turnover_penalty_strength"] = max((_safe_num(cfg_map.get("turnover_penalty_strength")) or 0.0), 1.0)
-        safer_patch["turnover_constraint_max_turnover"] = min(turnover_limit, 0.25) if turnover_limit is not None else 0.25
+
+        safer_patch["turnover_penalty_strength"] = min(max(current_strength, 0.12), 0.20)
+        safer_patch["turnover_constraint_max_turnover"] = (
+            max(turnover_limit, 0.41) if turnover_limit is not None else 0.41
+        )
+
         if preferred_overlays and overlay_mode not in preferred_overlays:
             safer_patch["probabilistic_mode"] = preferred_overlays[0]
+
     if top_k is not None and low_k > 0 and top_k < low_k:
         safer_patch["top_k"] = low_k
     safer_patch = _clean_patch(cfg_map, _merge_patch(suggested_patch, safer_patch))
@@ -2365,7 +2386,15 @@ def build_governed_recommendations(
             defensive_patch["asset_weight_cap"] = 0.10
         defensive_patch["ewma_sigma"] = True
         defensive_patch["correlation_penalty_strength"] = max((_safe_num(cfg_map.get("correlation_penalty_strength")) or 0.0), 1.0)
-        defensive_patch["turnover_penalty_strength"] = max((_safe_num(cfg_map.get("turnover_penalty_strength")) or 0.0), 1.0)
+
+        current_strength = _safe_num(cfg_map.get("turnover_penalty_strength")) or 0.0
+        turnover_limit = _safe_num(cfg_map.get("turnover_constraint_max_turnover"))
+
+        defensive_patch["turnover_penalty_strength"] = min(max(current_strength, 0.12), 0.20)
+        defensive_patch["turnover_constraint_max_turnover"] = (
+            max(turnover_limit, 0.41) if turnover_limit is not None else 0.41
+        )
+
         defensive_patch = _clean_patch(cfg_map, defensive_patch)
         if defensive_patch:
             why_parts: List[str] = []
@@ -2379,9 +2408,9 @@ def build_governed_recommendations(
             _append_rec(
                 recommendations,
                 kind="improve_sharpe_defensive",
-                title="Improve Sharpe without breaking Defensive",
+                title="Strengthen Defensive coherence",
                 why=why,
-                expected_benefit="A cleaner Defensive structure can improve risk-adjusted quality without turning the profile aggressive.",
+                expected_benefit="A cleaner Defensive structure should make the configuration easier to interpret without turning the profile aggressive.",
                 tradeoff="The portfolio may feel more conservative and less upside-seeking in benign regimes.",
                 patch=defensive_patch,
             )

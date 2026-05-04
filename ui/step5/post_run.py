@@ -1,3 +1,16 @@
+"""
+Post-run Strategy Engine results renderer for Step 5.
+
+This module displays the results after a Strategy Engine run: headline metrics,
+plain-English interpretation, same-period benchmark context, optional improvement
+checks, reliability/robustness panels, run diagnostics, and navigation into the
+Long-Term Scenario.
+
+The engine execution itself lives in ``run_panel.py``. This file should remain
+focused on presenting the stored run result and coordinating optional post-run
+review layers.
+"""
+
 from __future__ import annotations
 
 import json
@@ -7,7 +20,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 
-from ui.step5.run_panel import clear_retired_step5_state
 from ui.step5.preset_recommendations import (
     PRESET_APPLIED_LABEL_KEY,
     PRESET_APPLIED_SIGNATURE_KEY,
@@ -62,7 +74,8 @@ STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY = "step5_run_diagnostics_expanded_v1"
 STEP5_SCROLL_TO_RUN_DIAGNOSTICS_KEY = "step5_scroll_to_run_diagnostics_v1"
 STEP5_SHOW_DETAILED_TIMING_TABLES_KEY = "step5_show_detailed_timing_tables_v1"
 
-
+# These keys mirror the pre-run suggestion-depth controls in step5_workspace.py.
+# Keep them aligned so pre-run and post-run suggestion controls share one state.
 SUGGESTION_DEPTH_MODE_KEY = "step5_suggestion_testing_depth_mode_v1"
 SUGGESTION_DEPTH_MODE_WIDGET_KEY = "step5_suggestion_testing_depth_mode_widget_v1"
 SUGGESTION_DEPTH_COUNT_KEYS: dict[str, str] = {
@@ -141,6 +154,8 @@ def _on_suggestion_depth_mode_change() -> None:
         _apply_suggestion_depth_preset(mode)
 
 
+# Backward-compatible post-run suggestion-depth controls. The active pre-run
+# controls live in step5_workspace.py.
 def _render_suggestion_depth_controls() -> None:
     """Optional runtime/coverage control for the sequential suggestion tests."""
     defaults = SUGGESTION_DEPTH_PRESETS[SUGGESTION_DEPTH_DEFAULT]
@@ -655,8 +670,11 @@ def _render_detailed_timing_breakdowns(run_map: dict, meta_parts: list[str], run
             _render_technical_run_metadata_content(meta_parts, run_timestamp)
 
 
+# Backward-compatible timing wrappers retained for older Step 5 call sites.
+# The active diagnostics view uses _render_suggestion_timing_overview() and
+# _render_detailed_timing_breakdowns().
 def _render_preset_suggestion_timing_block() -> None:
-    """Backward-compatible wrapper for older call sites."""
+    """Backward-compatible timing wrapper for older preset-suggestion call sites."""
     timing = _coerce_mapping(st.session_state.get(PRESET_SUGGESTION_TIMING_KEY, {}))
     payload = {
         "phase": "Preset",
@@ -674,7 +692,7 @@ def _render_preset_suggestion_timing_block() -> None:
 
 
 def _render_auto_opt_suggestion_timing_block() -> None:
-    """Backward-compatible wrapper for older call sites."""
+    """Backward-compatible timing wrapper for older engine-tuning call sites."""
     timing = _coerce_mapping(st.session_state.get(AUTO_OPT_SUGGESTION_TIMING_KEY, {}))
     payload = {
         "phase": "Engine tuning",
@@ -971,7 +989,7 @@ def _render_universe_waiting_for_engine_tuning() -> None:
     return
 
 def _render_universe_suggestion_timing_block() -> None:
-    """Backward-compatible wrapper for older call sites."""
+    """Backward-compatible timing wrapper for older universe-mix call sites."""
     timing = _coerce_mapping(st.session_state.get(UNIVERSE_SUGGESTION_TIMING_KEY, {}))
     payload = {
         "phase": "Universe mix",
@@ -989,7 +1007,7 @@ def _render_universe_suggestion_timing_block() -> None:
 
 
 def _render_size_suggestion_timing_block() -> None:
-    """Backward-compatible wrapper for older call sites."""
+    """Backward-compatible timing wrapper for older universe-size call sites."""
     timing = _coerce_mapping(st.session_state.get(SIZE_SUGGESTION_TIMING_KEY, {}))
     payload = {
         "phase": "Universe size",
@@ -2127,14 +2145,16 @@ def _maybe_scroll_to_run_diagnostics_panel() -> None:
 
 
 def render_post_run(run_result: dict) -> None:
-    """Render the Gold Stable post-run surface.
+    """Render the post-run Strategy Engine results surface.
 
     Active strategy engine flow:
-    - real engine metrics
-    - compact validation context
-    - optional improvement checks
-    - OOS-return bridge into Long-Term Scenario
+    - real engine metrics;
+    - compact interpretation and benchmark context;
+    - optional improvement checks;
+    - reliability/robustness and timing diagnostics;
+    - OOS-return bridge into Long-Term Scenario.
     """
+
     run_map = _coerce_mapping(run_result)
     if not run_map:
         st.warning("Run result is missing or empty.")
@@ -2147,12 +2167,6 @@ def render_post_run(run_result: dict) -> None:
 
     st.markdown(f'<div id="{STEP5_REAL_RUN_RESULT_ANCHOR_ID}"></div>', unsafe_allow_html=True)
     philosophy = str(st.session_state.get("investment_philosophy", "Balanced") or "Balanced")
-    try:
-        universe_size = int(st.session_state.get("universe_size", 25) or 25)
-    except Exception:
-        universe_size = 25
-    template = str(st.session_state.get("step5_template", "") or "—")
-    style = str(st.session_state.get("step5_style", "") or "—")
 
     run_signature = str(run_map.get("run_signature", "") or "")
     config_fingerprint = str(run_map.get("config_fingerprint", "") or "")
@@ -2162,7 +2176,6 @@ def render_post_run(run_result: dict) -> None:
     panel_rows = int(_safe_float(run_map.get("asset_panel_n_rows", 0), 0))
     panel_assets = int(_safe_float(run_map.get("asset_panel_n_assets", 0), 0))
     panel_shape = run_map.get("panel_shape", None)
-    oos_months = len(_extract_oos_returns(run_map))
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -2251,7 +2264,8 @@ def render_post_run(run_result: dict) -> None:
     # inside Change or rerun setup. Keeping it there avoids a second post-run
     # diagnostics expander after the recommendation flow.
 
-    n_oos = _store_projection_bridge_context(run_map)
+    # Store OOS returns in investment_context so Step 6 can build the projection bridge.
+    _store_projection_bridge_context(run_map)
 
     run_diagnostics_visible = bool(st.session_state.get(STEP5_RUN_DIAGNOSTICS_EXPANDED_KEY, False))
     if run_diagnostics_visible:
