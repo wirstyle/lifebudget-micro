@@ -4,6 +4,15 @@ LifeBudget Micro is an educational Streamlit prototype for personal finance plan
 
 > **Educational notice:** This project is not financial advice, investment advice, or a personal suitability assessment. Investment outputs are historical backtests or educational proxies and do not guarantee future outcomes.
 
+
+## Intended Users
+
+LifeBudget Micro is designed for students, early-career users, and individual learners who want to understand how personal budgeting, saving capacity, historical investment testing, and long-term scenario planning can be connected in one educational workflow.
+
+It is also intended for assessors and technical reviewers who need to verify a working end-to-end software prototype: what input is provided, what action the system performs, what output is produced, and which limitations affect interpretation.
+
+The system is not designed for real financial advice, regulated suitability assessment, or production investment planning.
+
 ## Core Features
 
 - Personal finance planner for budget baseline, savings capacity, and short-term feasibility checks.
@@ -37,20 +46,20 @@ Repository link:
 https://github.com/wirstyle/lifebudget-micro
 ```
 
-The hosted Streamlit app is deployed from the `deploy-lifebudget-demo` branch. The final assessment version should be labelled with a clear Git tag or GitHub release so the marker can identify the exact submitted snapshot. The suggested tag should point to the same commit used by the deployed `deploy-lifebudget-demo` branch.
+The hosted Streamlit app is deployed from the `deploy-lifbudget-demo` branch. The final assessment version should be labelled with a clear Git tag or GitHub release so the marker can identify the exact submitted snapshot. The suggested tag should point to the same commit used by the deployed `deploy-lifbudget-demo` branch.
 
 ```text
-Deployed branch: deploy-lifebudget-demo
-Final assessment tag: assignment-3-final-v4
+Deployed branch: deploy-lifbudget-demo
+Final assessment tag: assignment-3-final
 ```
 
 Example Git commands to create the final tag from the deployed branch:
 
 ```bash
-git checkout deploy-lifebudget-demo
-git pull origin deploy-lifebudget-demo
-git tag -a assignment-3-final-v4 -m "Assignment 3 final submission snapshot"
-git push origin assignment-3-final-v4
+git checkout deploy-lifbudget-demo
+git pull origin deploy-lifbudget-demo
+git tag -a assignment-3-final -m "Assignment 3 final submission snapshot"
+git push origin assignment-3-final
 ```
 
 If a different tag or release name is used, replace the suggested label above with the exact submitted version label. The important point is that the tag identifies the same commit used by the online deployed branch.
@@ -80,6 +89,18 @@ If the app does not open automatically, copy the local Streamlit URL shown in th
 10. Continue to **Long-Term Scenario Explorer**.
 11. Generate a long-term projection using the available monthly contribution.
 12. Open the final report / insights summary.
+
+
+## Assessment Evidence Path
+
+For assessment, the most important demonstration is the working end-to-end path rather than every optional diagnostic. The recommended evidence path is:
+
+- **Input:** enter or keep sample weekly finance values and a savings target.
+- **Action:** prepare the investment universe, run the Strategy Engine, and generate a long-term scenario.
+- **Output/result:** review the budget feasibility output, historical strategy metrics, benchmark context, projection chart, and final report.
+- **Limitations:** explain that the results are educational backtests, proxies, and scenarios rather than financial advice, forecasts, or guarantees.
+
+This mirrors the expected build-phase demonstration: the marker can see the system running, follow the input-action-output chain, and understand the main limitations.
 
 ## User Manual Scope
 

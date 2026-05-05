@@ -759,8 +759,64 @@ def _render_technical_improvement_guide(current_philosophy: str) -> None:
             "passes the acceptance gate."
         )
 
+def _seed_widget_state_once(
+    key: str,
+    value: Any,
+    *,
+    caster: Any = None,
+    low: Any = None,
+    high: Any = None,
+) -> None:
+    """Seed a Streamlit widget key without also passing widget default values.
+
+    Streamlit warns when a widget is created with both:
+    - a key already written through st.session_state; and
+    - an explicit widget default such as value=... or index=....
+
+    This helper prepares the session-state value before the widget is rendered,
+    so the widget can be created with key=... only.
+    """
+    if caster is not None:
+        try:
+            value = caster(value)
+        except Exception:
+            pass
+
+    try:
+        if low is not None:
+            value = max(low, value)
+        if high is not None:
+            value = min(high, value)
+    except Exception:
+        pass
+
+    if key not in st.session_state:
+        st.session_state[key] = value
+        return
+
+    current = st.session_state.get(key)
+
+    if caster is not None:
+        try:
+            current = caster(current)
+        except Exception:
+            current = value
+
+    try:
+        if low is not None:
+            current = max(low, current)
+        if high is not None:
+            current = min(high, current)
+    except Exception:
+        current = value
+
+    st.session_state[key] = current
+
+
+
 def _render_basic_engine_controls(cfg_final: dict) -> dict:
     universe_size = _safe_int(st.session_state.get("universe_size", 25), 25)
+
     current_top_k = _safe_int(cfg_final.get("top_k", 12), 12)
     current_top_k = max(1, min(current_top_k, max(1, universe_size)))
 
@@ -773,6 +829,74 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
     current_feature_mu_enabled = bool(cfg_final.get("feature_mu_enabled", False))
     current_feature_mu_blend = float(cfg_final.get("feature_mu_blend", 0.25) or 0.25)
 
+    signal_mode_options = [
+        "mu_sigma",
+        "huber_mu",
+        "lambdarank_like",
+        "directional_classifier",
+        "top_k_classifier",
+    ]
+    safe_signal_mode = current_signal_mode if current_signal_mode in set(signal_mode_options) else "mu_sigma"
+
+    # Seed widget keys before rendering widgets. Do not pass value=... / index=...
+    # below, because these keys may already have been synced from an active
+    # post-run result through st.session_state.
+    _seed_widget_state_once(
+        "step5_basic_top_k",
+        current_top_k,
+        caster=int,
+        low=1,
+        high=max(1, universe_size),
+    )
+    _seed_widget_state_once(
+        "step5_basic_lookback_mu",
+        current_lookback_mu,
+        caster=int,
+        low=3,
+        high=60,
+    )
+    _seed_widget_state_once(
+        "step5_basic_lookback_sigma",
+        current_lookback_sigma,
+        caster=int,
+        low=3,
+        high=60,
+    )
+    _seed_widget_state_once(
+        "step5_basic_temperature",
+        current_temperature,
+        caster=float,
+        low=0.01,
+        high=5.0,
+    )
+    _seed_widget_state_once(
+        "step5_basic_weight_shrink",
+        current_weight_shrink,
+        caster=float,
+        low=0.0,
+        high=1.0,
+    )
+    _seed_widget_state_once(
+        "step5_basic_feature_mu_blend",
+        current_feature_mu_blend,
+        caster=float,
+        low=0.0,
+        high=1.0,
+    )
+    _seed_widget_state_once(
+        "step5_basic_inertia",
+        current_inertia,
+        caster=float,
+        low=0.0,
+        high=1.0,
+    )
+
+    if st.session_state.get("step5_basic_signal_mode") not in signal_mode_options:
+        st.session_state["step5_basic_signal_mode"] = safe_signal_mode
+
+    if "step5_basic_feature_mu_enabled" not in st.session_state:
+        st.session_state["step5_basic_feature_mu_enabled"] = current_feature_mu_enabled
+
     c1, c2 = st.columns(2)
     with c1:
         top_k = int(
@@ -781,7 +905,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 min_value=1,
                 max_value=max(1, universe_size),
                 step=1,
-                value=current_top_k,
                 key="step5_basic_top_k",
                 help="Maximum number of active assets selected by the micro pipeline.",
             )
@@ -792,11 +915,11 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 min_value=3,
                 max_value=60,
                 step=1,
-                value=current_lookback_mu,
                 key="step5_basic_lookback_mu",
                 help="Lookback window used for the expected-return estimate.",
             )
         )
+
     with c2:
         lookback_sigma = int(
             st.number_input(
@@ -804,23 +927,13 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 min_value=3,
                 max_value=60,
                 step=1,
-                value=current_lookback_sigma,
                 key="step5_basic_lookback_sigma",
                 help="Lookback window used for the volatility estimate.",
             )
         )
-        signal_mode_options = [
-            "mu_sigma",
-            "huber_mu",
-            "lambdarank_like",
-            "directional_classifier",
-            "top_k_classifier",
-        ]
-        safe_signal_mode = current_signal_mode if current_signal_mode in set(signal_mode_options) else "mu_sigma"
         signal_mode = st.selectbox(
             "signal_mode",
             options=signal_mode_options,
-            index=signal_mode_options.index(safe_signal_mode),
             key="step5_basic_signal_mode",
             help="Signal model used by the micro-pipeline to rank or classify candidate assets.",
         )
@@ -833,7 +946,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 min_value=0.01,
                 max_value=5.0,
                 step=0.01,
-                value=current_temperature,
                 key="step5_basic_temperature",
                 help="Softmax temperature controlling concentration of weights.",
             )
@@ -844,7 +956,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 min_value=0.0,
                 max_value=1.0,
                 step=0.01,
-                value=current_weight_shrink,
                 key="step5_basic_weight_shrink",
                 help="Shrink weights toward equal-weight.",
             )
@@ -855,11 +966,11 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 min_value=0.0,
                 max_value=1.0,
                 step=0.01,
-                value=current_feature_mu_blend,
                 key="step5_basic_feature_mu_blend",
                 help="Controls the intensity of the feature-conditioned expected-return adjustment.",
             )
         )
+
     with c4:
         inertia = float(
             st.number_input(
@@ -867,7 +978,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
                 min_value=0.0,
                 max_value=1.0,
                 step=0.01,
-                value=current_inertia,
                 key="step5_basic_inertia",
                 help="Portfolio inertia / turnover smoothing.",
             )
@@ -875,7 +985,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
         feature_mu_enabled = bool(
             st.checkbox(
                 "feature_mu_enabled",
-                value=current_feature_mu_enabled,
                 key="step5_basic_feature_mu_enabled",
                 help="Enable feature-conditioned expected-return adjustment.",
             )
@@ -902,7 +1011,6 @@ def _render_basic_engine_controls(cfg_final: dict) -> dict:
         "feature_mu_enabled": bool(feature_mu_enabled),
         "feature_mu_blend": float(feature_mu_blend),
     }
-
 
 def _render_technical_engine_overrides(cfg_final: dict) -> dict:
     """Render optional technical overrides inside the fine-tune settings block."""
